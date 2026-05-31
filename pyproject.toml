@@ -1,0 +1,79 @@
+[project]
+name = "release-date-tracker"
+version = "0.1.0"
+description = "Aggregate and resolve concrete release dates (theatrical, digital, store, retail), locations and prices for movies/TV/games/tech from structured APIs first, scraped rumors second."
+authors = [{ name = "Kai Niermann", email = "kai.niermann@googlemail.com" }]
+readme = "README.md"
+requires-python = ">=3.13,<4.0"
+dependencies = [
+    "httpx>=0.28",
+    "pydantic>=2.10",
+    "pydantic-settings>=2.7",
+    "structlog>=25.1",
+    "typer>=0.15",
+    "rich>=13.9",
+    "tenacity>=9.0",
+    "openai>=1.60",
+    "dateparser>=1.2",
+]
+
+[project.scripts]
+rdt = "release_tracker.cli:app"
+
+[tool.poetry]
+packages = [{ include = "release_tracker", from = "src" }]
+
+[tool.poetry.group.dev.dependencies]
+ruff = ">=0.9"
+pyright = ">=1.1.390"
+pytest = ">=8.3"
+
+[build-system]
+requires = ["poetry-core>=2.0"]
+build-backend = "poetry.core.masonry.api"
+
+# ---------------------------------------------------------------------------
+# Ruff
+# ---------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",      # pyflakes / pycodestyle
+    "I",                 # isort
+    "N",                 # pep8-naming
+    "UP",                # pyupgrade
+    "B",                 # bugbear
+    "S",                 # flake8-bandit (security)
+    "SIM",               # flake8-simplify
+    "RUF",               # ruff-specific
+    "PTH",               # use pathlib
+    "DTZ",               # timezone-aware datetimes
+]
+ignore = [
+    "S101",              # assert is fine in tests
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S105", "S106"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["release_tracker"]
+
+# ---------------------------------------------------------------------------
+# Pyright (strict)
+# ---------------------------------------------------------------------------
+[tool.pyright]
+include = ["src", "tests"]
+typeCheckingMode = "strict"
+pythonVersion = "3.13"
+reportMissingTypeStubs = false
+reportUnknownMemberType = false   # external libs (httpx/openai) leak Unknowns
+reportUnknownArgumentType = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

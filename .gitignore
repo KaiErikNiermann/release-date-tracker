@@ -1,0 +1,32 @@
+# --- secrets & personal data (keep out of any future shared repo) ---
+.env
+.env.*
+!.env.example
+local/
+*.local.json
+
+# --- generated data ---
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+data/
+batches/
+
+# --- python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.pyright/
+.ruff_cache/
+.pytest_cache/
+dist/
+build/
+
+# --- editor / os ---
+.idea/
+.vscode/
+.DS_Store

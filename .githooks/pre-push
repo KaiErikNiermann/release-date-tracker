@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Pre-push: lint + type-check must pass before code leaves the machine.
+set -euo pipefail
+
+echo "[pre-push] ruff check…"
+poetry run ruff check src
+
+echo "[pre-push] ruff format --check…"
+poetry run ruff format --check src
+
+echo "[pre-push] pyright (strict)…"
+poetry run pyright src
+
+echo "[pre-push] ok"
