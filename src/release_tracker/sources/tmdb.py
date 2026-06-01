@@ -10,7 +10,6 @@ Free API key: https://www.themoviedb.org/settings/api
 
 from __future__ import annotations
 
-import re
 from datetime import UTC, date, datetime
 from typing import Any, cast
 
@@ -27,7 +26,8 @@ from release_tracker.models import (
     ReleaseObservation,
     SourceTier,
 )
-from release_tracker.sources.base import SourceResult, get_json
+from release_tracker.sources.base import Candidate, SourceResult, get_json, pinned_id
+from release_tracker.titles import split_season
 
 log = get_logger("tmdb")
 
@@ -65,7 +65,9 @@ class TmdbSource:
     async def _pull_movie(
         self, client: httpx.AsyncClient, entity: Entity, key: str
     ) -> SourceResult:
-        tmdb_id = entity.external_ids.get("tmdb")
+        tmdb_id, skip = pinned_id(entity.external_ids, "tmdb")
+        if skip:
+            return SourceResult()
         if tmdb_id is None:
             tmdb_id = await self._search(client, key, entity.title, "movie")
         if tmdb_id is None:
@@ -112,8 +114,10 @@ class TmdbSource:
         # Watchlist titles encode the season ("The Boys: Season 5"), but TMDB
         # search only matches the *show*. Split the show name from the season so
         # we can search the show and then resolve that specific season's date.
-        show_title, season_no = _split_season(entity.title)
-        tmdb_id = entity.external_ids.get("tmdb")
+        show_title, season_no = split_season(entity.title)
+        tmdb_id, skip = pinned_id(entity.external_ids, "tmdb")
+        if skip:
+            return SourceResult()
         if tmdb_id is None:
             tmdb_id = await self._search(client, key, show_title, "tv")
         if tmdb_id is None:
@@ -188,20 +192,45 @@ class TmdbSource:
             return None
         return str(results[0]["id"])
 
-
-_SEASON_RE = re.compile(r"^(?P<show>.+?)\s*[:\-]\s*Season\s+(?P<n>\d+)", re.IGNORECASE)
-# trailing qualifiers that aren't part of the show's TMDB title
-_QUALIFIER_RE = re.compile(
-    r"\s*[:\-]\s*(Part\s+[\w\d]+|Finale|Final\s+Season|Vol(?:ume)?\.?\s*\d+).*$",
-    re.IGNORECASE,
-)
-
-
-def _split_season(title: str) -> tuple[str, int | None]:
-    """('The Boys: Season 5') -> ('The Boys', 5); strip Part/Finale qualifiers too."""
-    if (m := _SEASON_RE.match(title)) is not None:
-        return m.group("show").strip(), int(m.group("n"))
-    return _QUALIFIER_RE.sub("", title).strip(), None
+    # -- candidates (manual resolution) -----------------------------------
+    async def search_candidates(
+        self,
+        client: httpx.AsyncClient,
+        query: str,
+        kind: MediaKind,
+        settings: Settings,
+        *,
+        limit: int = 6,
+    ) -> list[Candidate]:
+        if not settings.tmdb_api_key:
+            return []
+        media = "tv" if kind is MediaKind.TV else "movie"
+        payload = cast(
+            "dict[str, Any]",
+            await get_json(
+                client,
+                f"{BASE}/search/{media}",
+                params={"api_key": settings.tmdb_api_key, "query": query, "include_adult": "false"},
+            ),
+        )
+        out: list[Candidate] = []
+        for r in cast("list[dict[str, Any]]", payload.get("results", []))[:limit]:
+            name = str(r.get("title") or r.get("name") or "")
+            date_str = str(r.get("release_date") or r.get("first_air_date") or "")
+            year = int(date_str[:4]) if date_str[:4].isdigit() else None
+            overview = str(r.get("overview") or "")
+            out.append(
+                Candidate(
+                    source=self.name,
+                    id_key="tmdb",
+                    canonical_id=str(r["id"]),
+                    title=name,
+                    year=year,
+                    extra=(overview[:70] + "…") if len(overview) > 70 else overview,
+                    url=f"https://www.themoviedb.org/{media}/{r['id']}",
+                )
+            )
+        return out
 
 
 def _parse_tmdb_date(value: object) -> date | None:
