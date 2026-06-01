@@ -10,6 +10,7 @@ Free API key: https://www.themoviedb.org/settings/api
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, date, datetime
 from typing import Any, cast
 
@@ -108,29 +109,42 @@ class TmdbSource:
 
     # -- tv ----------------------------------------------------------------
     async def _pull_tv(self, client: httpx.AsyncClient, entity: Entity, key: str) -> SourceResult:
+        # Watchlist titles encode the season ("The Boys: Season 5"), but TMDB
+        # search only matches the *show*. Split the show name from the season so
+        # we can search the show and then resolve that specific season's date.
+        show_title, season_no = _split_season(entity.title)
         tmdb_id = entity.external_ids.get("tmdb")
         if tmdb_id is None:
-            tmdb_id = await self._search(client, key, entity.title, "tv")
+            tmdb_id = await self._search(client, key, show_title, "tv")
         if tmdb_id is None:
             return SourceResult()
 
-        detail = cast(
-            "dict[str, Any]",
-            await get_json(client, f"{BASE}/tv/{tmdb_id}", params={"api_key": key}),
-        )
         now = datetime.now(UTC)
         observations: list[ReleaseObservation] = []
         url = f"https://www.themoviedb.org/tv/{tmdb_id}"
+        air: date | None = None
 
-        # next episode to air is the most actionable date for an ongoing show
-        for field_name, cert in (
-            ("next_episode_to_air", Certainty.CONFIRMED),
-            ("first_air_date", Certainty.CONFIRMED),
-        ):
-            value = detail.get(field_name)
-            air = _parse_tmdb_date(value.get("air_date") if isinstance(value, dict) else value)
-            if air is None:
-                continue
+        if season_no is not None:
+            season = cast(
+                "dict[str, Any]",
+                await get_json(
+                    client, f"{BASE}/tv/{tmdb_id}/season/{season_no}", params={"api_key": key}
+                ),
+            )
+            air = _parse_tmdb_date(season.get("air_date"))
+
+        if air is None:
+            # whole-show fallback: next episode to air, else first air date
+            detail = cast(
+                "dict[str, Any]",
+                await get_json(client, f"{BASE}/tv/{tmdb_id}", params={"api_key": key}),
+            )
+            nxt = detail.get("next_episode_to_air")
+            air = _parse_tmdb_date(
+                nxt.get("air_date") if isinstance(nxt, dict) else detail.get("first_air_date")
+            )
+
+        if air is not None:
             observations.append(
                 ReleaseObservation(
                     entity_id=entity.id,
@@ -138,7 +152,7 @@ class TmdbSource:
                     region="WW",
                     release_date=air,
                     precision=DatePrecision.EXACT,
-                    certainty=cert,
+                    certainty=Certainty.CONFIRMED,
                     source_tier=SourceTier.AGGREGATOR,
                     provider=self.name,
                     source_name="TMDB",
@@ -146,9 +160,14 @@ class TmdbSource:
                     fetched_at=now,
                 )
             )
-            break  # prefer next_episode_to_air; fall back to first_air_date only
 
-        log.info("tmdb.tv", entity=entity.title, tmdb_id=tmdb_id, observations=len(observations))
+        log.info(
+            "tmdb.tv",
+            entity=entity.title,
+            tmdb_id=tmdb_id,
+            season=season_no,
+            observations=len(observations),
+        )
         return SourceResult(observations=observations, external_ids={"tmdb": str(tmdb_id)})
 
     # -- search ------------------------------------------------------------
@@ -168,6 +187,21 @@ class TmdbSource:
             log.warning("tmdb.search.miss", title=title, media=media)
             return None
         return str(results[0]["id"])
+
+
+_SEASON_RE = re.compile(r"^(?P<show>.+?)\s*[:\-]\s*Season\s+(?P<n>\d+)", re.IGNORECASE)
+# trailing qualifiers that aren't part of the show's TMDB title
+_QUALIFIER_RE = re.compile(
+    r"\s*[:\-]\s*(Part\s+[\w\d]+|Finale|Final\s+Season|Vol(?:ume)?\.?\s*\d+).*$",
+    re.IGNORECASE,
+)
+
+
+def _split_season(title: str) -> tuple[str, int | None]:
+    """('The Boys: Season 5') -> ('The Boys', 5); strip Part/Finale qualifiers too."""
+    if (m := _SEASON_RE.match(title)) is not None:
+        return m.group("show").strip(), int(m.group("n"))
+    return _QUALIFIER_RE.sub("", title).strip(), None
 
 
 def _parse_tmdb_date(value: object) -> date | None:
