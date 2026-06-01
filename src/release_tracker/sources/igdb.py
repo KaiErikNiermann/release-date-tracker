@@ -10,6 +10,7 @@ https://api-docs.igdb.com/#getting-started
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, date, datetime
 from typing import Any, cast
 
@@ -26,7 +27,7 @@ from release_tracker.models import (
     ReleaseObservation,
     SourceTier,
 )
-from release_tracker.sources.base import SourceResult, get_json, post_text
+from release_tracker.sources.base import SourceResult, post_json, post_text
 
 log = get_logger("igdb")
 
@@ -63,7 +64,10 @@ _REGION: dict[int, str] = {
 
 class IgdbSource:
     name = "igdb"
-    _token: str | None = None
+
+    def __init__(self) -> None:
+        self._token: str | None = None
+        self._token_lock = asyncio.Lock()
 
     def supports(self, kind: MediaKind) -> bool:
         return kind is MediaKind.GAME
@@ -75,20 +79,23 @@ class IgdbSource:
         if not cid or not secret:
             log.warning("igdb.skip", reason="no TWITCH_CLIENT_ID/SECRET")
             return None
-        if self._token is None:
-            payload = cast(
-                "dict[str, Any]",
-                await get_json(
-                    client,
-                    TOKEN_URL,
-                    params={
-                        "client_id": cid,
-                        "client_secret": secret,
-                        "grant_type": "client_credentials",
-                    },
-                ),
-            )
-            self._token = str(payload["access_token"])
+        # lock so concurrent game pulls fetch the app token exactly once
+        async with self._token_lock:
+            if self._token is None:
+                payload = cast(
+                    "dict[str, Any]",
+                    # Twitch OAuth requires POST (params on the query string)
+                    await post_json(
+                        client,
+                        TOKEN_URL,
+                        params={
+                            "client_id": cid,
+                            "client_secret": secret,
+                            "grant_type": "client_credentials",
+                        },
+                    ),
+                )
+                self._token = str(payload["access_token"])
         return cid, self._token
 
     async def pull(

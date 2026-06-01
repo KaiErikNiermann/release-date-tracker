@@ -87,3 +87,23 @@ async def post_text(
     if resp.status_code in (429, 500, 502, 503, 504):
         resp.raise_for_status()
     return resp.json()
+
+
+@retry(
+    retry=retry_if_exception_type((httpx.TransportError, httpx.HTTPStatusError)),
+    wait=wait_exponential(multiplier=0.5, min=0.5, max=8),
+    stop=stop_after_attempt(4),
+    reraise=True,
+)
+async def post_json(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    params: dict[str, str] | None = None,
+    headers: dict[str, str] | None = None,
+) -> object:
+    """POST with query params (e.g. OAuth token endpoints), returning parsed JSON."""
+    resp = await client.post(url, params=params, headers=headers)
+    if resp.status_code in (429, 500, 502, 503, 504):
+        resp.raise_for_status()
+    return resp.json()
