@@ -27,7 +27,13 @@ from release_tracker.models import (
     ReleaseObservation,
     SourceTier,
 )
-from release_tracker.sources.base import SourceResult, post_json, post_text
+from release_tracker.sources.base import (
+    Candidate,
+    SourceResult,
+    pinned_id,
+    post_json,
+    post_text,
+)
 
 log = get_logger("igdb")
 
@@ -107,7 +113,9 @@ class IgdbSource:
         cid, token = auth
         headers = {"Client-ID": cid, "Authorization": f"Bearer {token}"}
 
-        game_id = entity.external_ids.get("igdb")
+        game_id, skip = pinned_id(entity.external_ids, "igdb")
+        if skip:
+            return SourceResult()
         if game_id is None:
             game_id = await self._search(client, headers, entity.title)
         if game_id is None:
@@ -165,6 +173,50 @@ class IgdbSource:
             log.warning("igdb.search.miss", title=title)
             return None
         return str(rows[0]["id"])
+
+    # -- candidates (manual resolution) -----------------------------------
+    async def search_candidates(
+        self,
+        client: httpx.AsyncClient,
+        query: str,
+        kind: MediaKind,
+        settings: Settings,
+        *,
+        limit: int = 6,
+    ) -> list[Candidate]:
+        auth = await self._ensure_token(client, settings)
+        if auth is None:
+            return []
+        cid, token = auth
+        headers = {"Client-ID": cid, "Authorization": f"Bearer {token}"}
+        body = (
+            f'search "{query}"; '
+            f"fields id,name,slug,first_release_date,platforms.abbreviation; limit {limit};"
+        )
+        rows = cast(
+            "list[dict[str, Any]]",
+            await post_text(client, GAMES_URL, content=body, headers=headers),
+        )
+        out: list[Candidate] = []
+        for r in rows:
+            rel_date = _ts_to_date(r.get("first_release_date"))
+            year = rel_date.year if rel_date else None
+            plats = cast("list[dict[str, Any]]", r.get("platforms", []))
+            abbrevs = ", ".join(
+                str(p.get("abbreviation", "")) for p in plats if p.get("abbreviation")
+            )
+            out.append(
+                Candidate(
+                    source=self.name,
+                    id_key="igdb",
+                    canonical_id=str(r["id"]),
+                    title=str(r.get("name", "")),
+                    year=year,
+                    extra=abbrevs,
+                    url=f"https://www.igdb.com/games/{r.get('slug', r['id'])}",
+                )
+            )
+        return out
 
 
 def _ts_to_date(value: object) -> date | None:

@@ -29,7 +29,7 @@ from release_tracker.models import (
     ReleaseObservation,
     SourceTier,
 )
-from release_tracker.sources.base import SourceResult, get_json
+from release_tracker.sources.base import Candidate, SourceResult, get_json, pinned_id
 
 log = get_logger("steam")
 
@@ -50,7 +50,9 @@ class SteamSource:
     async def pull(
         self, client: httpx.AsyncClient, entity: Entity, settings: Settings
     ) -> SourceResult:
-        appid = entity.external_ids.get("steam_appid")
+        appid, skip = pinned_id(entity.external_ids, "steam_appid")
+        if skip:
+            return SourceResult()
         if appid is None:
             appid = await self._search(client, entity.title, settings.regions[0])
         if appid is None:
@@ -128,6 +130,38 @@ class SteamSource:
             log.warning("steam.search.miss", title=title)
             return None
         return str(items[0]["id"])
+
+    # -- candidates (manual resolution) -----------------------------------
+    async def search_candidates(
+        self,
+        client: httpx.AsyncClient,
+        query: str,
+        kind: MediaKind,
+        settings: Settings,
+        *,
+        limit: int = 6,
+    ) -> list[Candidate]:
+        region = settings.regions[0] if settings.regions else "US"
+        payload = cast(
+            "dict[str, Any]",
+            await get_json(
+                client, SEARCH_URL, params={"term": query, "cc": region.lower(), "l": "en"}
+            ),
+        )
+        out: list[Candidate] = []
+        for item in cast("list[dict[str, Any]]", payload.get("items", []))[:limit]:
+            out.append(
+                Candidate(
+                    source=self.name,
+                    id_key="steam_appid",
+                    canonical_id=str(item["id"]),
+                    title=str(item.get("name", "")),
+                    year=None,  # storesearch omits release year
+                    extra=str(item.get("type", "")),
+                    url=f"https://store.steampowered.com/app/{item['id']}",
+                )
+            )
+        return out
 
     async def _details(
         self, client: httpx.AsyncClient, appid: str, region: str

@@ -28,6 +28,24 @@ class SourceResult:
     external_ids: dict[str, str] = field(default_factory=dict[str, str])
 
 
+@dataclass(slots=True)
+class Candidate:
+    """A canonical match proposal for manual resolution.
+
+    ``id_key``/``canonical_id`` is exactly what gets pinned into an entity's
+    ``external_ids`` so the pullers use it directly instead of searching.
+    """
+
+    source: str
+    id_key: str  # e.g. "tmdb", "igdb", "steam_appid"
+    canonical_id: str
+    title: str
+    year: int | None = None
+    extra: str = ""  # disambiguators: media type, platforms, slug...
+    url: str | None = None
+    score: float = 0.0  # filled by the matching layer
+
+
 @runtime_checkable
 class Source(Protocol):
     """A Tier-0 puller. Stateless; given an entity, yields sourced observations."""
@@ -39,6 +57,31 @@ class Source(Protocol):
     async def pull(
         self, client: httpx.AsyncClient, entity: Entity, settings: Settings
     ) -> SourceResult: ...
+
+    async def search_candidates(
+        self,
+        client: httpx.AsyncClient,
+        query: str,
+        kind: MediaKind,
+        settings: Settings,
+        *,
+        limit: int = 6,
+    ) -> list[Candidate]: ...
+
+
+# Pin one of these as an external id (e.g. steam_appid=none) to tell a source the
+# item doesn't exist there, so it stops blind-searching and injecting wrong rows.
+SKIP_IDS = frozenset({"none", "skip", "-", "x", "na"})
+
+
+def pinned_id(external_ids: dict[str, str], key: str) -> tuple[str | None, bool]:
+    """Resolve a pinned external id. Returns (id_to_use, should_skip_source)."""
+    value = external_ids.get(key)
+    if value is None:
+        return None, False
+    if value.strip().lower() in SKIP_IDS:
+        return None, True
+    return value, False
 
 
 def make_client() -> httpx.AsyncClient:
