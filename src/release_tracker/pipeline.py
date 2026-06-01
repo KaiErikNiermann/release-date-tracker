@@ -48,6 +48,14 @@ async def _pull_entity(
             return_exceptions=True,
         )
     merged_ids: dict[str, str] = {}
+    # refresh: clear this entity's prior rows for the providers that succeeded, so
+    # re-pulls (e.g. after re-pinning a canonical id) don't leave wrong-match ghosts.
+    succeeded = tuple(
+        src.name
+        for src, r in zip(sources, results, strict=True)
+        if not isinstance(r, BaseException)
+    )
+    db.delete_observations(entity.id, succeeded)
     for src, result in zip(sources, results, strict=True):
         if isinstance(result, BaseException):
             stats.errors += 1

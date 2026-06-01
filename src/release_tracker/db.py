@@ -140,6 +140,26 @@ class Database:
         for row in self._conn.execute(sql):
             yield _row_to_entity(row)
 
+    def find_entities(self, query: str) -> list[Entity]:
+        """Resolve an entity reference: exact id, else case-insensitive title substring."""
+        exact = self.get_entity(query)
+        if exact is not None:
+            return [exact]
+        rows = self._conn.execute(
+            "SELECT * FROM entities WHERE lower(title) LIKE ? ORDER BY title",
+            (f"%{query.lower()}%",),
+        )
+        return [_row_to_entity(r) for r in rows]
+
+    def observation_dates(self, entity_id: str) -> list[date]:
+        """All known release dates for an entity (for released/upcoming + year hints)."""
+        rows = self._conn.execute(
+            "SELECT release_date FROM observations "
+            "WHERE entity_id = ? AND release_date IS NOT NULL",
+            (entity_id,),
+        )
+        return [date.fromisoformat(r[0]) for r in rows]
+
     def merge_external_ids(self, entity_id: str, ids: dict[str, str]) -> None:
         """Non-destructively fold newly discovered external IDs into an entity."""
         if not ids:
@@ -158,6 +178,22 @@ class Database:
     def upsert_observation(self, obs: ReleaseObservation) -> None:
         with self._tx() as conn:
             _insert_observation(conn, obs)
+
+    def delete_observations(self, entity_id: str, providers: tuple[str, ...]) -> int:
+        """Drop an entity's rows for the given providers (refresh before re-pull).
+
+        Keeps rows from other providers (e.g. the hand-authored 'notion' seed) so a
+        re-pull after re-pinning an id doesn't leave stale wrong-match ghosts.
+        """
+        if not providers:
+            return 0
+        placeholders = ",".join("?" for _ in providers)
+        with self._tx() as conn:
+            cur = conn.execute(
+                f"DELETE FROM observations WHERE entity_id = ? AND provider IN ({placeholders})",  # noqa: S608
+                (entity_id, *providers),
+            )
+            return cur.rowcount
 
     def upsert_observations(self, observations: Iterable[ReleaseObservation]) -> int:
         count = 0
