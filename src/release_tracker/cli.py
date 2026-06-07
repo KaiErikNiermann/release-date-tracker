@@ -9,6 +9,7 @@ rdt entities                            # list tracked entities
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, date, datetime
 from typing import Annotated
 
@@ -20,6 +21,7 @@ from release_tracker import matching
 from release_tracker.config import get_settings
 from release_tracker.db import Database
 from release_tracker.logging import configure_logging
+from release_tracker.lookup import RdReport, lookup
 from release_tracker.models import Entity, MediaKind
 from release_tracker.pipeline import pull_all
 from release_tracker.resolve import best_estimates
@@ -125,6 +127,57 @@ def entities() -> None:
         )
     db.close()
     console.print(table)
+
+
+@app.command()
+def rd(
+    name: Annotated[str, typer.Argument(help="title to look up, e.g. 'Dune Part Two'")],
+    kind: Annotated[
+        str | None, typer.Option(help="movie|tv|game|anime — auto-detected if omitted")
+    ] = None,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="emit machine-readable JSON (for the /rd skill)")
+    ] = False,
+) -> None:
+    """One-shot lookup: confirmed + speculative release dates for a single title."""
+    configure_logging()
+    settings = get_settings()
+    kind_hint = MediaKind(kind) if kind else None
+    report = asyncio.run(lookup(name, settings, kind_hint=kind_hint))
+    if as_json:
+        print(json.dumps(report.to_dict(), indent=2))
+        return
+    _render_report(report)
+
+
+def _render_report(r: RdReport) -> None:
+    if not r.found and not r.claims:
+        console.print(f"[yellow]No confident match[/] for '{r.query}'. {' '.join(r.notes)}")
+        raise typer.Exit(2)
+    kind_label = r.kind.value if r.kind else "?"
+    console.print(f"[bold]{r.matched_title}[/] [dim]({kind_label})[/]")
+    table = Table(show_header=True, header_style="bold")
+    for col in ("What", "Date", "± days", "Stance", "Conf.", "Basis"):
+        table.add_column(col)
+    for c in r.claims:
+        stance = "[green]confirmed[/]" if c.stance == "confirmed" else "[yellow]speculative[/]"
+        table.add_row(
+            c.label,
+            c.when.isoformat() if c.when else "—",
+            str(c.margin_days) if c.margin_days else "—",
+            stance,
+            f"{c.confidence:.2f}",
+            c.basis,
+        )
+    console.print(table)
+    if r.streaming:
+        console.print(f"[bold]Streaming:[/] {', '.join(r.streaming)}")
+    if r.price:
+        console.print(f"[bold]Price:[/] {r.price}")
+    for note in r.notes:
+        console.print(f"[dim]• {note}[/]")
+    if r.url:
+        console.print(f"[dim]{r.url}[/]")
 
 
 def _render(rows: list[tuple[str, MediaKind, object]]) -> None:
