@@ -39,6 +39,7 @@ from release_tracker.models import (
 from release_tracker.sources import sources_for
 from release_tracker.sources.base import Candidate, SourceResult, make_client
 from release_tracker.sources.tmdb import TmdbSource
+from release_tracker.tech import classify_tech, looks_like_tech, tech_info
 
 log = get_logger("lookup")
 
@@ -51,6 +52,11 @@ _THEATRICAL = (
 )
 # below this title-similarity we don't trust the match — caller should web-search.
 _MATCH_FLOOR = 0.4
+# a clear tech name wins over a media match weaker than this (e.g. "RTX 5090"
+# fuzzily hitting some film should still be treated as a GPU).
+_TECH_OVERRIDE = 0.85
+# region tech falls back to when none is given (a home market must be assumed).
+_DEFAULT_TECH_REGION = "US"
 
 Stance = Literal["confirmed", "speculative"]
 
@@ -95,6 +101,11 @@ class RdReport:
     streaming: tuple[str, ...] = ()
     price: str | None = None
     notes: tuple[str, ...] = ()
+    # tech-only: category, the region this lookup is scoped to, and the domains a
+    # web search should prefer (region is a hard constraint for tech, not film/tv).
+    category: str | None = None
+    region: str | None = None
+    preferred_sources: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -108,17 +119,37 @@ class RdReport:
             "streaming": list(self.streaming),
             "price": self.price,
             "notes": list(self.notes),
+            "category": self.category,
+            "region": self.region,
+            "preferred_sources": list(self.preferred_sources),
         }
 
 
-async def lookup(query: str, settings: Settings, *, kind_hint: MediaKind | None = None) -> RdReport:
-    """Resolve a single title to confirmed + speculative dates."""
+async def lookup(
+    query: str,
+    settings: Settings,
+    *,
+    kind_hint: MediaKind | None = None,
+    region: str | None = None,
+) -> RdReport:
+    """Resolve a single title to confirmed + speculative dates.
+
+    ``region`` only matters for tech (a hard per-country constraint); film/tv/game
+    dates are reported as earliest-worldwide and ignore it.
+    """
+    if kind_hint is MediaKind.TECH:
+        return _tech_report(query, settings, region)
+
     async with make_client() as client:
         if kind_hint is not None:
             cands = await _search_kind(client, query, kind_hint, settings)
             picked = (kind_hint, cands[0]) if cands else None
         else:
             picked = await _detect(client, query, settings)
+            # nothing solid from the media DBs, but the title clearly names a
+            # gadget? treat it as tech rather than forcing a bad film/game match.
+            if looks_like_tech(query) and (picked is None or picked[1].score < _TECH_OVERRIDE):
+                return _tech_report(query, settings, region)
 
         if picked is None or picked[1].score < _MATCH_FLOOR:
             return RdReport(
@@ -200,6 +231,47 @@ async def _detect(
     kind, cand = best
     cand.score = best_key[0]
     return kind, cand
+
+
+# --- tech (search-first, no Tier-0 DB) -----------------------------------
+def _tech_report(query: str, settings: Settings, region: str | None) -> RdReport:
+    """Build the policy scaffold for a tech lookup: category, region, search guidance.
+
+    There is no structured tech source, so this never carries dates — it tells the
+    /rd skill *how* to web-search (region-scoped, preferred domains) and *how* to
+    reason about price (predecessor anchor, adjusted for part-cost swings).
+    """
+    category = classify_tech(query)
+    info = tech_info(category)
+    reg = (region or (settings.regions[0] if settings.regions else _DEFAULT_TECH_REGION)).upper()
+    price_note = (
+        "Anchor price to the predecessor's MSRP in this region, but adjust for component / "
+        "part-cost swings (DRAM/NAND, panels, silicon node, tariffs, FX) — last-gen price is a "
+        "weak prior here."
+        if info.price_volatile
+        else (
+            "Anchor price to the predecessor's MSRP in this region; "
+            "part-cost swings are minor here."
+        )
+    )
+    notes = (
+        f"Tech has no Tier-0 DB — web-search scoped to {reg}. Region is a HARD constraint for "
+        "tech: launch date and price are per-country (tariffs/taxes/FX/carrier deals) and can't "
+        "be VPN-bypassed.",
+        f"Category: {info.label}. Prefer sources: {', '.join(info.preferred_sources)}.",
+        info.note,
+        price_note,
+    )
+    return RdReport(
+        query=query,
+        found=False,
+        kind=MediaKind.TECH,
+        matched_title=query,
+        category=info.label,
+        region=reg,
+        preferred_sources=info.preferred_sources,
+        notes=notes,
+    )
 
 
 # --- per-kind claim builders ---------------------------------------------
