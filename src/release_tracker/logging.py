@@ -28,6 +28,8 @@ def configure_logging(*, level: int = logging.INFO, json_logs: bool | None = Non
             renderer,
         ],
         wrapper_class=structlog.make_filtering_bound_logger(level),
+        # logs go to stderr so stdout stays clean for data (e.g. `rdt rd --json`)
+        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
         cache_logger_on_first_use=True,
     )
 
