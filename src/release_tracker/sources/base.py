@@ -44,6 +44,7 @@ class Candidate:
     extra: str = ""  # disambiguators: media type, platforms, slug...
     url: str | None = None
     score: float = 0.0  # filled by the matching layer
+    popularity: float = 0.0  # source-native popularity, used only to break ties
 
 
 @runtime_checkable

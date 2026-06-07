@@ -10,6 +10,7 @@ Free API key: https://www.themoviedb.org/settings/api
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Any, cast
 
@@ -32,6 +33,17 @@ from release_tracker.titles import split_season
 log = get_logger("tmdb")
 
 BASE = "https://api.themoviedb.org/3"
+
+
+@dataclass(slots=True, frozen=True)
+class MovieMeta:
+    """Extra movie detail used for speculation (distributor + fallback date)."""
+
+    studios: tuple[str, ...]  # all production companies, in TMDB order
+    primary_date: date | None
+    status: str | None
+    title: str | None
+
 
 # TMDB release_dates `type` integer -> our channel.
 _TYPE_TO_CHANNEL: dict[int, ReleaseChannel] = {
@@ -219,6 +231,7 @@ class TmdbSource:
             date_str = str(r.get("release_date") or r.get("first_air_date") or "")
             year = int(date_str[:4]) if date_str[:4].isdigit() else None
             overview = str(r.get("overview") or "")
+            pop = r.get("popularity")
             out.append(
                 Candidate(
                     source=self.name,
@@ -228,9 +241,57 @@ class TmdbSource:
                     year=year,
                     extra=(overview[:70] + "…") if len(overview) > 70 else overview,
                     url=f"https://www.themoviedb.org/{media}/{r['id']}",
+                    popularity=float(pop) if isinstance(pop, (int, float)) else 0.0,
                 )
             )
         return out
+
+    # -- detail helpers (speculation / streaming) -------------------------
+    async def movie_meta(self, client: httpx.AsyncClient, key: str, tmdb_id: str) -> MovieMeta:
+        """Distributor + primary release date — inputs for the digital-date guess."""
+        detail = cast(
+            "dict[str, Any]",
+            await get_json(client, f"{BASE}/movie/{tmdb_id}", params={"api_key": key}),
+        )
+        comps = cast("list[dict[str, Any]]", detail.get("production_companies", []))
+        studios = tuple(str(c["name"]) for c in comps if c.get("name"))
+        status = str(detail["status"]) if detail.get("status") else None
+        title = str(detail["title"]) if detail.get("title") else None
+        return MovieMeta(
+            studios=studios,
+            primary_date=_parse_tmdb_date(detail.get("release_date")),
+            status=status,
+            title=title,
+        )
+
+    async def tv_platforms(
+        self, client: httpx.AsyncClient, key: str, tmdb_id: str, regions: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        """Likely streaming homes: origin networks + per-region flatrate providers."""
+        names: list[str] = []
+
+        def add(name: str) -> None:
+            name = name.strip()
+            if name and name not in names:
+                names.append(name)
+
+        detail = cast(
+            "dict[str, Any]",
+            await get_json(client, f"{BASE}/tv/{tmdb_id}", params={"api_key": key}),
+        )
+        for net in cast("list[dict[str, Any]]", detail.get("networks", [])):
+            add(str(net.get("name", "")))
+
+        providers = cast(
+            "dict[str, Any]",
+            await get_json(client, f"{BASE}/tv/{tmdb_id}/watch/providers", params={"api_key": key}),
+        )
+        results = cast("dict[str, Any]", providers.get("results", {}))
+        for region in regions:
+            block = cast("dict[str, Any]", results.get(region, {}))
+            for prov in cast("list[dict[str, Any]]", block.get("flatrate", [])):
+                add(str(prov.get("provider_name", "")))
+        return tuple(names)
 
 
 def _parse_tmdb_date(value: object) -> date | None:
