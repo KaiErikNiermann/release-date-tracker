@@ -133,7 +133,11 @@ def entities() -> None:
 def rd(
     name: Annotated[str, typer.Argument(help="title to look up, e.g. 'Dune Part Two'")],
     kind: Annotated[
-        str | None, typer.Option(help="movie|tv|game|anime — auto-detected if omitted")
+        str | None, typer.Option(help="movie|tv|game|anime|tech — auto-detected if omitted")
+    ] = None,
+    region: Annotated[
+        str | None,
+        typer.Option(help="ISO country for tech (hard constraint; defaults to RDT_REGIONS[0])"),
     ] = None,
     as_json: Annotated[
         bool, typer.Option("--json", help="emit machine-readable JSON (for the /rd skill)")
@@ -143,7 +147,7 @@ def rd(
     configure_logging()
     settings = get_settings()
     kind_hint = MediaKind(kind) if kind else None
-    report = asyncio.run(lookup(name, settings, kind_hint=kind_hint))
+    report = asyncio.run(lookup(name, settings, kind_hint=kind_hint, region=region))
     if as_json:
         print(json.dumps(report.to_dict(), indent=2))
         return
@@ -151,6 +155,14 @@ def rd(
 
 
 def _render_report(r: RdReport) -> None:
+    if r.kind is MediaKind.TECH and not r.claims:
+        # tech carries no engine dates — show the search/price policy scaffold.
+        console.print(
+            f"[bold]{r.matched_title}[/] [dim](tech · {r.category} · region {r.region})[/]"
+        )
+        for note in r.notes:
+            console.print(f"[dim]• {note}[/]")
+        return
     if not r.found and not r.claims:
         console.print(f"[yellow]No confident match[/] for '{r.query}'. {' '.join(r.notes)}")
         raise typer.Exit(2)
