@@ -1,0 +1,372 @@
+"""One-shot lookup: resolve concrete + speculative dates for a single title.
+
+This is the engine behind the ``rdt rd "<name>"`` command (and the global ``/rd``
+skill). It deliberately does *not* touch the local seed/DB: given a free-text
+name it searches the Tier-0 sources (TMDB / IGDB / Steam), picks the best
+canonical match, pulls whatever dates those sources know, and then fills the gaps
+with the speculative estimators in :mod:`release_tracker.deltas`:
+
+* movies — always surface theatrical *and* a precise digital date (confirmed if
+  TMDB exposes a type-4 release, else theatrical + the distributor's PVOD window;
+  if even theatrical is unknown, a low-confidence guess off TMDB's primary date);
+* tv — the air date plus the likely streaming platform(s);
+* games — the announced date, or a coarse quarter/year collapsed to a precise
+  point with a margin of error.
+
+Every dated claim is annotated confirmed/speculative with a rough confidence.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import date
+from typing import Literal
+
+import httpx
+
+from release_tracker.config import Settings
+from release_tracker.deltas import estimate_digital, match_studio, precise_from_coarse
+from release_tracker.logging import get_logger
+from release_tracker.matching import score_candidate
+from release_tracker.models import (
+    Certainty,
+    DatePrecision,
+    Entity,
+    MediaKind,
+    ReleaseChannel,
+    ReleaseObservation,
+)
+from release_tracker.sources import sources_for
+from release_tracker.sources.base import Candidate, SourceResult, make_client
+from release_tracker.sources.tmdb import TmdbSource
+
+log = get_logger("lookup")
+
+# Kinds we can auto-detect (each has at least one Tier-0 source).
+_DETECT_KINDS: tuple[MediaKind, ...] = (MediaKind.MOVIE, MediaKind.TV, MediaKind.GAME)
+_THEATRICAL = (
+    ReleaseChannel.THEATRICAL,
+    ReleaseChannel.THEATRICAL_LIMITED,
+    ReleaseChannel.PREMIERE,
+)
+# below this title-similarity we don't trust the match — caller should web-search.
+_MATCH_FLOOR = 0.4
+
+Stance = Literal["confirmed", "speculative"]
+
+
+@dataclass(slots=True, frozen=True)
+class Claim:
+    """One annotated, dated answer line."""
+
+    label: str
+    when: date | None
+    precision: DatePrecision
+    stance: Stance
+    confidence: float
+    margin_days: int | None
+    basis: str
+    region: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "label": self.label,
+            "date": self.when.isoformat() if self.when else None,
+            "precision": self.precision.value,
+            "stance": self.stance,
+            "confidence": self.confidence,
+            "margin_days": self.margin_days,
+            "basis": self.basis,
+            "region": self.region,
+        }
+
+
+@dataclass(slots=True, frozen=True)
+class RdReport:
+    """Everything the CLI / skill needs to render one lookup."""
+
+    query: str
+    found: bool
+    kind: MediaKind | None = None
+    matched_title: str | None = None
+    url: str | None = None
+    canonical: dict[str, str] = field(default_factory=dict[str, str])
+    claims: tuple[Claim, ...] = ()
+    streaming: tuple[str, ...] = ()
+    price: str | None = None
+    notes: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "query": self.query,
+            "found": self.found,
+            "kind": self.kind.value if self.kind else None,
+            "matched_title": self.matched_title,
+            "url": self.url,
+            "canonical": dict(self.canonical),
+            "claims": [c.to_dict() for c in self.claims],
+            "streaming": list(self.streaming),
+            "price": self.price,
+            "notes": list(self.notes),
+        }
+
+
+async def lookup(query: str, settings: Settings, *, kind_hint: MediaKind | None = None) -> RdReport:
+    """Resolve a single title to confirmed + speculative dates."""
+    async with make_client() as client:
+        if kind_hint is not None:
+            cands = await _search_kind(client, query, kind_hint, settings)
+            picked = (kind_hint, cands[0]) if cands else None
+        else:
+            picked = await _detect(client, query, settings)
+
+        if picked is None or picked[1].score < _MATCH_FLOOR:
+            return RdReport(
+                query=query,
+                found=False,
+                notes=("No confident match in TMDB/IGDB/Steam — fall back to web search.",),
+            )
+
+        kind, cand = picked
+        # keep the raw query as the title (so "Show: Season 5" still resolves the
+        # season) but pin the canonical id we just chose so pullers don't re-search.
+        entity = Entity.create(query, kind, external_ids={cand.id_key: cand.canonical_id})
+
+        results: list[SourceResult] = []
+        for src in sources_for(kind):
+            try:
+                results.append(await src.pull(client, entity, settings))
+            except Exception as exc:
+                log.warning("lookup.pull_error", source=src.name, error=str(exc))
+        observations = [obs for r in results for obs in r.observations]
+        canonical: dict[str, str] = {cand.id_key: cand.canonical_id}
+        for r in results:
+            canonical.update(r.external_ids)
+
+        tmdb_id = canonical.get("tmdb")
+        match kind:
+            case MediaKind.MOVIE:
+                claims, notes = await _movie_claims(client, settings, tmdb_id, observations)
+                streaming: tuple[str, ...] = ()
+                price = None
+            case MediaKind.TV | MediaKind.ANIME:
+                claims, streaming, notes = await _tv_claims(client, settings, tmdb_id, observations)
+                price = None
+            case _:  # game / tech
+                claims, price, notes = _game_claims(observations)
+                streaming = ()
+
+        return RdReport(
+            query=query,
+            found=bool(claims),
+            kind=kind,
+            matched_title=cand.title,
+            url=cand.url,
+            canonical=canonical,
+            claims=tuple(claims),
+            streaming=streaming,
+            price=price,
+            notes=tuple(notes),
+        )
+
+
+# --- candidate selection --------------------------------------------------
+async def _search_kind(
+    client: httpx.AsyncClient, query: str, kind: MediaKind, settings: Settings
+) -> list[Candidate]:
+    from release_tracker.matching import candidates_for
+
+    return await candidates_for(client, Entity.create(query, kind), settings, limit=5)
+
+
+async def _detect(
+    client: httpx.AsyncClient, query: str, settings: Settings
+) -> tuple[MediaKind, Candidate] | None:
+    """Pick the best (kind, candidate) across movie/tv/game.
+
+    Ranked by title similarity, then source-native popularity. The tiebreak
+    matters for titles that exist as both a film and a show ("Severance"): the
+    popular one wins instead of whichever kind happened to be searched first.
+    """
+    best_key: tuple[float, float] | None = None
+    best: tuple[MediaKind, Candidate] | None = None
+    for kind in _DETECT_KINDS:
+        for cand in await _search_kind(client, query, kind, settings):
+            key = (score_candidate(query, None, cand, kind), cand.popularity)
+            if best_key is None or key > best_key:
+                best_key, best = key, (kind, cand)
+    if best is None or best_key is None:
+        return None
+    kind, cand = best
+    cand.score = best_key[0]
+    return kind, cand
+
+
+# --- per-kind claim builders ---------------------------------------------
+async def _movie_claims(
+    client: httpx.AsyncClient,
+    settings: Settings,
+    tmdb_id: str | None,
+    obs: list[ReleaseObservation],
+) -> tuple[list[Claim], list[str]]:
+    notes: list[str] = []
+    claims: list[Claim] = []
+    theatricals = [o for o in obs if o.channel in _THEATRICAL and o.release_date]
+    digitals = [o for o in obs if o.channel is ReleaseChannel.DIGITAL and o.release_date]
+    theatrical = min(theatricals, key=_obs_date) if theatricals else None
+    digital = min(digitals, key=_obs_date) if digitals else None
+
+    if theatrical and theatrical.release_date:
+        claims.append(
+            Claim(
+                "Theatrical",
+                theatrical.release_date,
+                theatrical.precision,
+                "confirmed",
+                0.9,
+                None,
+                f"TMDB ({theatrical.region})",
+                theatrical.region,
+            )
+        )
+
+    key = settings.tmdb_api_key
+    if digital and digital.release_date:
+        claims.append(
+            Claim(
+                "Digital",
+                digital.release_date,
+                digital.precision,
+                "confirmed",
+                0.9,
+                None,
+                f"TMDB type-4 ({digital.region})",
+                digital.region,
+            )
+        )
+    elif theatrical and theatrical.release_date and tmdb_id and key:
+        meta = await TmdbSource().movie_meta(client, key, tmdb_id)
+        studio = match_studio(meta.studios)
+        est = estimate_digital(theatrical.release_date, studio)
+        claims.append(
+            Claim(
+                "Digital (est.)",
+                est.when,
+                DatePrecision.EXACT,
+                "speculative",
+                est.confidence,
+                est.margin_days,
+                est.basis,
+            )
+        )
+        if studio:
+            notes.append(f"Distributor: {studio}.")
+    elif not theatrical and tmdb_id and key:
+        # nothing concrete yet — best-guess theatrical off TMDB's primary date.
+        meta = await TmdbSource().movie_meta(client, key, tmdb_id)
+        if meta.primary_date:
+            claims.append(
+                Claim(
+                    "Theatrical (guess)",
+                    meta.primary_date,
+                    DatePrecision.EXACT,
+                    "speculative",
+                    0.3,
+                    30,
+                    f"TMDB primary date, status={meta.status}",
+                )
+            )
+            est = estimate_digital(
+                meta.primary_date, match_studio(meta.studios), theatrical_confirmed=False
+            )
+            claims.append(
+                Claim(
+                    "Digital (est.)",
+                    est.when,
+                    DatePrecision.EXACT,
+                    "speculative",
+                    est.confidence,
+                    est.margin_days,
+                    est.basis,
+                )
+            )
+        else:
+            notes.append("No theatrical or digital date on TMDB yet.")
+    elif not theatrical:
+        notes.append("No theatrical or digital date found.")
+    return claims, notes
+
+
+async def _tv_claims(
+    client: httpx.AsyncClient,
+    settings: Settings,
+    tmdb_id: str | None,
+    obs: list[ReleaseObservation],
+) -> tuple[list[Claim], tuple[str, ...], list[str]]:
+    notes: list[str] = []
+    claims: list[Claim] = []
+    dated = [o for o in obs if o.release_date]
+    if dated:
+        o = min(dated, key=_obs_date)
+        confirmed = o.certainty is Certainty.CONFIRMED
+        claims.append(
+            Claim(
+                "Release",
+                o.release_date,
+                o.precision,
+                "confirmed" if confirmed else "speculative",
+                0.85 if confirmed else 0.5,
+                None,
+                o.source_name or "TMDB",
+                o.region,
+            )
+        )
+    else:
+        notes.append("No air date on TMDB yet.")
+
+    streaming: tuple[str, ...] = ()
+    key = settings.tmdb_api_key
+    if tmdb_id and key:
+        streaming = await TmdbSource().tv_platforms(client, key, tmdb_id, settings.regions)
+    return claims, streaming, notes
+
+
+def _game_claims(
+    obs: list[ReleaseObservation],
+) -> tuple[list[Claim], str | None, list[str]]:
+    notes: list[str] = []
+    claims: list[Claim] = []
+    price = next((str(o.price) for o in obs if o.price is not None), None)
+    dated = [o for o in obs if o.release_date]
+    if dated:
+        # prefer an exact date; otherwise the soonest coarse one, made precise.
+        o = min(dated, key=lambda x: (x.precision is not DatePrecision.EXACT, _obs_date(x)))
+        assert o.release_date is not None
+        est = precise_from_coarse(o.release_date, o.precision)
+        confirmed = o.precision is DatePrecision.EXACT and o.certainty is Certainty.CONFIRMED
+        confidence = est.confidence if confirmed else round(est.confidence * 0.8, 2)
+        margin = None if confirmed else (est.margin_days or 7)
+        basis = est.basis if confirmed else f"{est.basis} ({o.source_name or 'store'})"
+        claims.append(
+            Claim(
+                "Release",
+                est.when,
+                DatePrecision.EXACT,
+                "confirmed" if confirmed else "speculative",
+                confidence,
+                margin,
+                basis,
+                o.region,
+            )
+        )
+    elif obs:
+        notes.append("Listed but no concrete date yet (TBA).")
+    else:
+        notes.append("No release info found on IGDB/Steam.")
+    return claims, price, notes
+
+
+def _obs_date(o: ReleaseObservation) -> date:
+    # only called on observations already filtered to release_date is not None
+    assert o.release_date is not None
+    return o.release_date
