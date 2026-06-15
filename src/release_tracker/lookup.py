@@ -25,7 +25,12 @@ from typing import Literal
 import httpx
 
 from release_tracker.config import Settings
-from release_tracker.deltas import estimate_digital, match_studio, precise_from_coarse
+from release_tracker.deltas import (
+    estimate_digital,
+    match_studio,
+    precise_from_coarse,
+    predicted_platform,
+)
 from release_tracker.logging import get_logger
 from release_tracker.matching import score_candidate
 from release_tracker.models import (
@@ -98,7 +103,10 @@ class RdReport:
     url: str | None = None
     canonical: dict[str, str] = field(default_factory=dict[str, str])
     claims: tuple[Claim, ...] = ()
+    # streaming = where it actually streams now (confirmed); predicted_platform =
+    # the studio's typical home when nothing's streaming yet (a prediction).
     streaming: tuple[str, ...] = ()
+    predicted_platform: str | None = None
     price: str | None = None
     notes: tuple[str, ...] = ()
     # tech-only: category, the region this lookup is scoped to, and the domains a
@@ -117,6 +125,7 @@ class RdReport:
             "canonical": dict(self.canonical),
             "claims": [c.to_dict() for c in self.claims],
             "streaming": list(self.streaming),
+            "predicted_platform": self.predicted_platform,
             "price": self.price,
             "notes": list(self.notes),
             "category": self.category,
@@ -175,10 +184,12 @@ async def lookup(
             canonical.update(r.external_ids)
 
         tmdb_id = canonical.get("tmdb")
+        predicted: str | None = None
         match kind:
             case MediaKind.MOVIE:
-                claims, notes = await _movie_claims(client, settings, tmdb_id, observations)
-                streaming: tuple[str, ...] = ()
+                claims, notes, streaming, predicted = await _movie_claims(
+                    client, settings, tmdb_id, observations
+                )
                 price = None
             case MediaKind.TV | MediaKind.ANIME:
                 claims, streaming, notes = await _tv_claims(client, settings, tmdb_id, observations)
@@ -196,6 +207,7 @@ async def lookup(
             canonical=canonical,
             claims=tuple(claims),
             streaming=streaming,
+            predicted_platform=predicted,
             price=price,
             notes=tuple(notes),
         )
@@ -280,13 +292,20 @@ async def _movie_claims(
     settings: Settings,
     tmdb_id: str | None,
     obs: list[ReleaseObservation],
-) -> tuple[list[Claim], list[str]]:
+) -> tuple[list[Claim], list[str], tuple[str, ...], str | None]:
     notes: list[str] = []
     claims: list[Claim] = []
     theatricals = [o for o in obs if o.channel in _THEATRICAL and o.release_date]
     digitals = [o for o in obs if o.channel is ReleaseChannel.DIGITAL and o.release_date]
     theatrical = min(theatricals, key=_obs_date) if theatricals else None
     digital = min(digitals, key=_obs_date) if digitals else None
+
+    key = settings.tmdb_api_key
+    src = TmdbSource()
+    # one detail call up front: the distributor feeds both the digital-window
+    # estimate and the streaming-home prediction, plus the no-theatrical fallback.
+    meta = await src.movie_meta(client, key, tmdb_id) if (tmdb_id and key) else None
+    studio = match_studio(meta.studios) if meta else None
 
     if theatrical and theatrical.release_date:
         claims.append(
@@ -302,7 +321,6 @@ async def _movie_claims(
             )
         )
 
-    key = settings.tmdb_api_key
     if digital and digital.release_date:
         claims.append(
             Claim(
@@ -316,9 +334,7 @@ async def _movie_claims(
                 digital.region,
             )
         )
-    elif theatrical and theatrical.release_date and tmdb_id and key:
-        meta = await TmdbSource().movie_meta(client, key, tmdb_id)
-        studio = match_studio(meta.studios)
+    elif theatrical and theatrical.release_date:
         est = estimate_digital(theatrical.release_date, studio)
         claims.append(
             Claim(
@@ -331,42 +347,46 @@ async def _movie_claims(
                 est.basis,
             )
         )
-        if studio:
-            notes.append(f"Distributor: {studio}.")
-    elif not theatrical and tmdb_id and key:
+    elif meta and meta.primary_date:
         # nothing concrete yet — best-guess theatrical off TMDB's primary date.
-        meta = await TmdbSource().movie_meta(client, key, tmdb_id)
-        if meta.primary_date:
-            claims.append(
-                Claim(
-                    "Theatrical (guess)",
-                    meta.primary_date,
-                    DatePrecision.EXACT,
-                    "speculative",
-                    0.3,
-                    30,
-                    f"TMDB primary date, status={meta.status}",
-                )
+        claims.append(
+            Claim(
+                "Theatrical (guess)",
+                meta.primary_date,
+                DatePrecision.EXACT,
+                "speculative",
+                0.3,
+                30,
+                f"TMDB primary date, status={meta.status}",
             )
-            est = estimate_digital(
-                meta.primary_date, match_studio(meta.studios), theatrical_confirmed=False
+        )
+        est = estimate_digital(meta.primary_date, studio, theatrical_confirmed=False)
+        claims.append(
+            Claim(
+                "Digital (est.)",
+                est.when,
+                DatePrecision.EXACT,
+                "speculative",
+                est.confidence,
+                est.margin_days,
+                est.basis,
             )
-            claims.append(
-                Claim(
-                    "Digital (est.)",
-                    est.when,
-                    DatePrecision.EXACT,
-                    "speculative",
-                    est.confidence,
-                    est.margin_days,
-                    est.basis,
-                )
-            )
-        else:
-            notes.append("No theatrical or digital date on TMDB yet.")
-    elif not theatrical:
+        )
+    else:
         notes.append("No theatrical or digital date found.")
-    return claims, notes
+
+    if studio:
+        notes.append(f"Distributor: {studio}.")
+
+    # streaming: stage 2 (actual providers, confirmed) then stage 1 (studio
+    # prediction) only when nothing is streaming yet.
+    streaming = (
+        await src.movie_platforms(client, key, tmdb_id, settings.regions)
+        if (tmdb_id and key)
+        else ()
+    )
+    predicted = predicted_platform(meta.studios) if (meta and not streaming) else None
+    return claims, notes, streaming, predicted
 
 
 async def _tv_claims(

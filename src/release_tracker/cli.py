@@ -183,7 +183,11 @@ def _render_report(r: RdReport) -> None:
         )
     console.print(table)
     if r.streaming:
-        console.print(f"[bold]Streaming:[/] {', '.join(r.streaming)}")
+        console.print(f"[bold]Streaming:[/] {', '.join(r.streaming)} [dim](confirmed)[/]")
+    elif r.predicted_platform:
+        console.print(
+            f"[bold]Likely streaming home:[/] {r.predicted_platform} [yellow](predicted)[/]"
+        )
     if r.price:
         console.print(f"[bold]Price:[/] {r.price}")
     for note in r.notes:
