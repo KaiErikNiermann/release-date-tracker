@@ -58,6 +58,11 @@ def test_studio_platform_maps_distributor_to_service() -> None:
     assert studio_platform("Walt Disney Pictures") == "Disney+"
     assert studio_platform("Warner Bros. Pictures") == "HBO Max"
     assert studio_platform("Universal Pictures") == "Peacock"
+    assert studio_platform("A24") == "HBO Max"  # third-party pay-1, re-upped 2026
+    assert studio_platform("Neon") == "Hulu"
+    assert studio_platform("Illumination Entertainment") == "Peacock"  # Universal subsidiary
+    assert studio_platform("Lionsgate Films") == "Starz"
+    assert studio_platform("Amazon MGM Studios") == "Prime Video"
     assert studio_platform("Some Indie Co") is None
     assert studio_platform(None) is None
 

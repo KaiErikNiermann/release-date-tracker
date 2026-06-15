@@ -32,6 +32,8 @@ STUDIO_DIGITAL_DELTA_DAYS: Final[dict[str, int]] = {
     "universal": 31,  # post-2021 PVOD deal, ~17-31d
     "focus features": 31,
     "blumhouse": 31,  # distributed by Universal
+    "illumination": 31,
+    "dreamworks animation": 31,
     "monkeypaw": 31,
     "warner bros": 45,
     "new line": 45,
@@ -55,6 +57,7 @@ STUDIO_DIGITAL_DELTA_DAYS: Final[dict[str, int]] = {
     "marvel studios": 90,
     "pixar": 90,
     "lucasfilm": 90,
+    "national geographic": 90,
 }
 
 # When we know nothing about the distributor: an industry-ish median window.
@@ -65,36 +68,68 @@ DEFAULT_DIGITAL_DELTA_DAYS: Final[int] = 75
 # in-house service or its current pay-1-window partner). This is the *predicted*
 # eventual home, usable before a film is streaming at all — when JustWatch/TMDB
 # watch-providers is still empty. Matched by substring, longest key first.
+#
+# There is no clean machine-readable dataset of these output deals — they live in
+# paywalled trade tables (Variety VIP "Future of Film Output Deals", FilmTake) and
+# Wikipedia per-studio, and they churn (Sony->Netflix and A24->HBO Max were both
+# re-upped Jan 2026). So this is hand-curated; TMDB/JustWatch is the per-title
+# confirmed layer that supersedes it once a film actually streams.
 STUDIO_STREAMING: Final[dict[str, str]] = {
+    # Disney+ / Hulu — Walt Disney Studios
     "walt disney": "Disney+",
     "marvel studios": "Disney+",
     "pixar": "Disney+",
     "lucasfilm": "Disney+",
+    "national geographic": "Disney+",
     "20th century": "Disney+/Hulu",
     "searchlight": "Hulu",
+    # HBO Max — Warner Bros. Discovery (A24 holds the third-party pay-1 deal)
     "warner bros": "HBO Max",
     "new line": "HBO Max",
     "dc studios": "HBO Max",
     "dc films": "HBO Max",
+    "castle rock": "HBO Max",
+    "a24": "HBO Max",
+    # Peacock — NBCUniversal
     "universal": "Peacock",
     "focus features": "Peacock",
-    "blumhouse": "Peacock",
+    "illumination": "Peacock",
     "dreamworks animation": "Peacock",
+    "working title": "Peacock",
+    "amblin": "Peacock",
+    "blumhouse": "Peacock",
+    # Paramount+ — Paramount
     "paramount": "Paramount+",
     "skydance": "Paramount+",
     "nickelodeon": "Paramount+",
-    "sony": "Netflix",  # Sony's pay-1 output deal runs through Netflix
+    # Netflix — Sony pay-1 (Sony runs no service of its own)
+    "sony": "Netflix",
     "columbia": "Netflix",
     "tristar": "Netflix",
     "screen gems": "Netflix",
-    "lionsgate": "Starz",
-    "a24": "Max",  # output varies; A24 has run Max/Showtime deals
-    "neon": "Hulu",
+    "sony pictures animation": "Netflix",
     "netflix": "Netflix",
-    "apple original": "Apple TV+",
+    # Prime Video — Amazon MGM
     "amazon mgm": "Prime Video",
     "amazon studios": "Prime Video",
     "metro-goldwyn": "Prime Video",  # MGM, now under Amazon
+    "united artists": "Prime Video",
+    "orion": "Prime Video",
+    # Starz (then Prime Video from 2026 releases) — Lionsgate
+    "lionsgate": "Starz",
+    "summit": "Starz",
+    # Hulu — Neon
+    "neon": "Hulu",
+    # Apple TV+
+    "apple original": "Apple TV+",
+    "apple studios": "Apple TV+",
+    # AMC+ / Shudder — AMC Networks
+    "ifc films": "AMC+",
+    "rlje": "AMC+",
+    "shudder": "Shudder",
+    # Crunchyroll — anime
+    "crunchyroll": "Crunchyroll",
+    "funimation": "Crunchyroll",
 }
 
 
