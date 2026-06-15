@@ -10,6 +10,8 @@ from release_tracker.deltas import (
     estimate_digital,
     match_studio,
     precise_from_coarse,
+    predicted_platform,
+    studio_platform,
 )
 from release_tracker.models import DatePrecision
 
@@ -50,6 +52,21 @@ def test_estimate_digital_guessed_theatrical_is_penalised() -> None:
     assert guessed.confidence < base.confidence
     assert guessed.margin_days > base.margin_days
     assert guessed.basis.startswith("guessed")
+
+
+def test_studio_platform_maps_distributor_to_service() -> None:
+    assert studio_platform("Walt Disney Pictures") == "Disney+"
+    assert studio_platform("Warner Bros. Pictures") == "HBO Max"
+    assert studio_platform("Universal Pictures") == "Peacock"
+    assert studio_platform("Some Indie Co") is None
+    assert studio_platform(None) is None
+
+
+def test_predicted_platform_scans_all_companies() -> None:
+    # lead production co is unknown; a later one (DC Studios) carries the mapping.
+    assert predicted_platform(["6th & Idaho", "DC Studios"]) == "HBO Max"
+    assert predicted_platform(["Indie A", "Indie B"]) is None
+    assert predicted_platform([]) is None
 
 
 def test_precise_from_coarse_collapses_to_midpoint() -> None:
