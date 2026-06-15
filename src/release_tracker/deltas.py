@@ -61,6 +61,43 @@ STUDIO_DIGITAL_DELTA_DAYS: Final[dict[str, int]] = {
 DEFAULT_DIGITAL_DELTA_DAYS: Final[int] = 75
 
 
+# Distributor -> the streaming service a film typically lands on (the studio's
+# in-house service or its current pay-1-window partner). This is the *predicted*
+# eventual home, usable before a film is streaming at all — when JustWatch/TMDB
+# watch-providers is still empty. Matched by substring, longest key first.
+STUDIO_STREAMING: Final[dict[str, str]] = {
+    "walt disney": "Disney+",
+    "marvel studios": "Disney+",
+    "pixar": "Disney+",
+    "lucasfilm": "Disney+",
+    "20th century": "Disney+/Hulu",
+    "searchlight": "Hulu",
+    "warner bros": "HBO Max",
+    "new line": "HBO Max",
+    "dc studios": "HBO Max",
+    "dc films": "HBO Max",
+    "universal": "Peacock",
+    "focus features": "Peacock",
+    "blumhouse": "Peacock",
+    "dreamworks animation": "Peacock",
+    "paramount": "Paramount+",
+    "skydance": "Paramount+",
+    "nickelodeon": "Paramount+",
+    "sony": "Netflix",  # Sony's pay-1 output deal runs through Netflix
+    "columbia": "Netflix",
+    "tristar": "Netflix",
+    "screen gems": "Netflix",
+    "lionsgate": "Starz",
+    "a24": "Max",  # output varies; A24 has run Max/Showtime deals
+    "neon": "Hulu",
+    "netflix": "Netflix",
+    "apple original": "Apple TV+",
+    "amazon mgm": "Prime Video",
+    "amazon studios": "Prime Video",
+    "metro-goldwyn": "Prime Video",  # MGM, now under Amazon
+}
+
+
 @dataclass(slots=True, frozen=True)
 class Estimate:
     """A computed precise date, its uncertainty and how it was derived."""
@@ -83,6 +120,21 @@ def match_studio(names: Iterable[str]) -> str | None:
         if digital_delta_days(name)[1] is not None:
             return name
     return listed[0] if listed else None
+
+
+def studio_platform(studio: str | None) -> str | None:
+    """The streaming service this distributor's films typically land on, if known."""
+    if studio:
+        norm = studio.lower()
+        for key in sorted(STUDIO_STREAMING, key=len, reverse=True):
+            if key in norm:
+                return STUDIO_STREAMING[key]
+    return None
+
+
+def predicted_platform(studios: Iterable[str]) -> str | None:
+    """First known streaming home across all listed companies (not just the lead)."""
+    return next((platform for s in studios if (platform := studio_platform(s))), None)
 
 
 def digital_delta_days(studio: str | None) -> tuple[int, str | None]:
