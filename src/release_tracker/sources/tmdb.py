@@ -264,6 +264,38 @@ class TmdbSource:
             title=title,
         )
 
+    async def _flatrate_providers(
+        self,
+        client: httpx.AsyncClient,
+        key: str,
+        media: str,
+        tmdb_id: str,
+        regions: tuple[str, ...],
+    ) -> list[str]:
+        """Subscription (flatrate) providers per region — TMDB's JustWatch feed."""
+        names: list[str] = []
+        providers = cast(
+            "dict[str, Any]",
+            await get_json(
+                client, f"{BASE}/{media}/{tmdb_id}/watch/providers", params={"api_key": key}
+            ),
+        )
+        results = cast("dict[str, Any]", providers.get("results", {}))
+        for region in regions:
+            block = cast("dict[str, Any]", results.get(region, {}))
+            for prov in cast("list[dict[str, Any]]", block.get("flatrate", [])):
+                name = str(prov.get("provider_name", "")).strip()
+                # drop reseller add-ons ("HBO Max Amazon Channel") — keep the base service
+                if name and "Channel" not in name and name not in names:
+                    names.append(name)
+        return names
+
+    async def movie_platforms(
+        self, client: httpx.AsyncClient, key: str, tmdb_id: str, regions: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        """Where the film actually streams now (empty until it lands somewhere)."""
+        return tuple(await self._flatrate_providers(client, key, "movie", tmdb_id, regions))
+
     async def tv_platforms(
         self, client: httpx.AsyncClient, key: str, tmdb_id: str, regions: tuple[str, ...]
     ) -> tuple[str, ...]:
@@ -281,16 +313,8 @@ class TmdbSource:
         )
         for net in cast("list[dict[str, Any]]", detail.get("networks", [])):
             add(str(net.get("name", "")))
-
-        providers = cast(
-            "dict[str, Any]",
-            await get_json(client, f"{BASE}/tv/{tmdb_id}/watch/providers", params={"api_key": key}),
-        )
-        results = cast("dict[str, Any]", providers.get("results", {}))
-        for region in regions:
-            block = cast("dict[str, Any]", results.get(region, {}))
-            for prov in cast("list[dict[str, Any]]", block.get("flatrate", [])):
-                add(str(prov.get("provider_name", "")))
+        for name in await self._flatrate_providers(client, key, "tv", tmdb_id, regions):
+            add(name)
         return tuple(names)
 
 
