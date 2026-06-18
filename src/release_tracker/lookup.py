@@ -31,7 +31,6 @@ from release_tracker.deltas import (
     estimate_digital,
     match_studio,
     precise_from_coarse,
-    predicted_platform,
 )
 from release_tracker.logging import get_logger
 from release_tracker.matching import score_candidate
@@ -43,6 +42,7 @@ from release_tracker.models import (
     ReleaseChannel,
     ReleaseObservation,
 )
+from release_tracker.platforms import learn_predicted_platform
 from release_tracker.sources import sources_for
 from release_tracker.sources.base import Candidate, SourceResult, make_client
 from release_tracker.sources.igdb import IgdbSource
@@ -391,7 +391,10 @@ async def _movie_claims(
         if (tmdb_id and key)
         else ()
     )
-    predicted = predicted_platform(meta.studios) if (meta and not streaming) else None
+    # learns + persists a streaming home for any distributor not in the hand table.
+    predicted = (
+        await learn_predicted_platform(meta.studios, settings) if (meta and not streaming) else None
+    )
     return claims, notes, streaming, predicted
 
 

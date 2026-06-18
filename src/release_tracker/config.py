@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     trend_cache_path: Path = Field(
         default=Path("data/trends_cache.db"), alias="RDT_TREND_CACHE_PATH"
     )
+    # self-growing distributor -> streaming-home map, learned as we meet new studios
+    platform_db_path: Path = Field(default=Path("data/platforms.db"), alias="RDT_PLATFORM_DB_PATH")
 
     @property
     def regions(self) -> tuple[str, ...]:
