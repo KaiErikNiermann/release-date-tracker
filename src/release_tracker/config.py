@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     regions_raw: str = Field(default="US,DE,GB", alias="RDT_REGIONS")
     db_path: Path = Field(default=Path("data/releases.db"), alias="RDT_DB_PATH")
     seeds_path: Path = Field(default=Path("local/seeds.json"), alias="RDT_SEEDS_PATH")
+    # derived, disposable cache of mined studio release-timing trends (separate
+    # from db_path so the stateless `rdt rd` lookup never opens the entity DB)
+    trend_cache_path: Path = Field(
+        default=Path("data/trends_cache.db"), alias="RDT_TREND_CACHE_PATH"
+    )
 
     @property
     def regions(self) -> tuple[str, ...]:

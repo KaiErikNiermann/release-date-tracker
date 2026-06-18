@@ -161,6 +161,79 @@ class IgdbSource:
         log.info("igdb.game", entity=entity.title, igdb_id=game_id, observations=len(observations))
         return SourceResult(observations=observations, external_ids={"igdb": str(game_id)})
 
+    # -- studio-trend mining ----------------------------------------------
+    async def _headers(
+        self, client: httpx.AsyncClient, settings: Settings
+    ) -> dict[str, str] | None:
+        auth = await self._ensure_token(client, settings)
+        if auth is None:
+            return None
+        cid, token = auth
+        return {"Client-ID": cid, "Authorization": f"Bearer {token}"}
+
+    async def game_publisher(
+        self, client: httpx.AsyncClient, settings: Settings, game_id: str
+    ) -> tuple[str, str] | None:
+        """The publisher (id, name) for a game — falls back to developer, then first."""
+        headers = await self._headers(client, settings)
+        if headers is None:
+            return None
+        body = (
+            "fields involved_companies.company.id,involved_companies.company.name,"
+            "involved_companies.publisher,involved_companies.developer; "
+            f"where id = {int(game_id)};"
+        )
+        rows = cast(
+            "list[dict[str, Any]]",
+            await post_text(client, GAMES_URL, content=body, headers=headers),
+        )
+        if not rows:
+            return None
+        inv = cast("list[dict[str, Any]]", rows[0].get("involved_companies", []))
+        picked = (
+            next((c for c in inv if c.get("publisher")), None)
+            or next((c for c in inv if c.get("developer")), None)
+            or (inv[0] if inv else None)
+        )
+        company = picked.get("company") if picked else None
+        if not isinstance(company, dict) or "id" not in company:
+            return None
+        return str(company["id"]), str(company.get("name", ""))
+
+    async def company_release_months(
+        self, client: httpx.AsyncClient, settings: Settings, company_id: str, *, exclude: str
+    ) -> tuple[int, ...]:
+        """Release months of games this company published (past, this game excluded).
+
+        Uses each game's single ``first_release_date`` (one sample per title, so
+        multi-platform/region rows don't inflate the histogram). Coarse-dated games
+        land their timestamp at the period start — mild noise the concentration
+        threshold + ``MIN_SAMPLES`` are there to absorb.
+        """
+        headers = await self._headers(client, settings)
+        if headers is None:
+            return ()
+        body = (
+            "fields id,first_release_date; "
+            f"where involved_companies.company = {int(company_id)} "
+            "& involved_companies.publisher = true & first_release_date != null; "
+            "sort first_release_date desc; limit 100;"
+        )
+        rows = cast(
+            "list[dict[str, Any]]",
+            await post_text(client, GAMES_URL, content=body, headers=headers),
+        )
+        today = datetime.now(UTC).date()
+        months: list[int] = []
+        for r in rows:
+            if str(r.get("id")) == str(exclude):
+                continue
+            d = _ts_to_date(r.get("first_release_date"))
+            if d is None or d > today:  # only realized releases inform the pattern
+                continue
+            months.append(d.month)
+        return tuple(months)
+
     async def _search(
         self, client: httpx.AsyncClient, headers: dict[str, str], title: str
     ) -> str | None:

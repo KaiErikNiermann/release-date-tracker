@@ -24,8 +24,10 @@ from typing import Literal
 
 import httpx
 
+from release_tracker.cache import TrendCache
 from release_tracker.config import Settings
 from release_tracker.deltas import (
+    Estimate,
     estimate_digital,
     match_studio,
     precise_from_coarse,
@@ -43,8 +45,10 @@ from release_tracker.models import (
 )
 from release_tracker.sources import sources_for
 from release_tracker.sources.base import Candidate, SourceResult, make_client
+from release_tracker.sources.igdb import IgdbSource
 from release_tracker.sources.tmdb import TmdbSource
 from release_tracker.tech import classify_tech, looks_like_tech, tech_info
+from release_tracker.trends import StudioTrend, compute_trend, narrow_coarse
 
 log = get_logger("lookup")
 
@@ -195,7 +199,9 @@ async def lookup(
                 claims, streaming, notes = await _tv_claims(client, settings, tmdb_id, observations)
                 price = None
             case _:  # game / tech
-                claims, price, notes = _game_claims(observations)
+                claims, price, notes = await _game_claims(
+                    client, settings, canonical.get("igdb"), observations
+                )
                 streaming = ()
 
         return RdReport(
@@ -423,7 +429,13 @@ async def _tv_claims(
     return claims, streaming, notes
 
 
-def _game_claims(
+_COARSE = (DatePrecision.YEAR, DatePrecision.QUARTER)
+
+
+async def _game_claims(
+    client: httpx.AsyncClient,
+    settings: Settings,
+    igdb_id: str | None,
     obs: list[ReleaseObservation],
 ) -> tuple[list[Claim], str | None, list[str]]:
     notes: list[str] = []
@@ -434,8 +446,14 @@ def _game_claims(
         # prefer an exact date; otherwise the soonest coarse one, made precise.
         o = min(dated, key=lambda x: (x.precision is not DatePrecision.EXACT, _obs_date(x)))
         assert o.release_date is not None
-        est = precise_from_coarse(o.release_date, o.precision)
         confirmed = o.precision is DatePrecision.EXACT and o.certainty is Certainty.CONFIRMED
+        # only a coarse, unconfirmed date can benefit from a studio-timing bias.
+        refined = (
+            await _studio_narrowed(client, settings, igdb_id, o.release_date, o.precision)
+            if o.precision in _COARSE
+            else None
+        )
+        est = refined or precise_from_coarse(o.release_date, o.precision)
         confidence = est.confidence if confirmed else round(est.confidence * 0.8, 2)
         margin = None if confirmed else (est.margin_days or 7)
         basis = est.basis if confirmed else f"{est.basis} ({o.source_name or 'store'})"
@@ -451,11 +469,46 @@ def _game_claims(
                 o.region,
             )
         )
+        if refined is not None:
+            notes.append("Estimate biased toward the publisher's historical release timing.")
     elif obs:
         notes.append("Listed but no concrete date yet (TBA).")
     else:
         notes.append("No release info found on IGDB/Steam.")
     return claims, price, notes
+
+
+async def _studio_narrowed(
+    client: httpx.AsyncClient,
+    settings: Settings,
+    igdb_id: str | None,
+    when: date,
+    precision: DatePrecision,
+) -> Estimate | None:
+    """Mine (cached) the publisher's release-timing trend and narrow the coarse date."""
+    trend = await _game_trend(client, settings, igdb_id)
+    return narrow_coarse(when, precision, trend) if trend else None
+
+
+async def _game_trend(
+    client: httpx.AsyncClient, settings: Settings, igdb_id: str | None
+) -> StudioTrend | None:
+    """Publisher release-timing trend for an IGDB game, mined on demand and cached."""
+    if not igdb_id:
+        return None
+    src = IgdbSource()
+    pub = await src.game_publisher(client, settings, igdb_id)
+    if pub is None:
+        return None
+    company_id, name = pub
+    studio_key = f"igdb:{company_id}"
+    with TrendCache(settings.trend_cache_path) as cache:
+        if (cached := cache.get(studio_key, MediaKind.GAME)) is not None:
+            return cached
+        months = await src.company_release_months(client, settings, company_id, exclude=igdb_id)
+        trend = compute_trend(studio_key, name, MediaKind.GAME, months)
+        cache.put(trend)
+        return trend
 
 
 def _obs_date(o: ReleaseObservation) -> date:
