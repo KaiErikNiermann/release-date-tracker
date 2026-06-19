@@ -19,6 +19,12 @@ from typing import Self
 from pydantic import BaseModel, Field, model_validator
 
 
+def slugify(text: str) -> str:
+    """Lowercase hyphen-slug: keep alphanumerics and hyphens, collapse the rest."""
+    norm = "-".join(text.lower().split())
+    return "".join(c for c in norm if c.isalnum() or c == "-").strip("-")
+
+
 class MediaKind(enum.StrEnum):
     """The kind of thing being tracked. Maps from the Notion ``Type`` select."""
 
@@ -135,10 +141,8 @@ class Entity(BaseModel):
 
     @staticmethod
     def make_id(title: str, kind: MediaKind) -> str:
-        norm = "-".join(title.lower().split())
-        safe = "".join(c for c in norm if c.isalnum() or c == "-").strip("-")
         digest = hashlib.sha1(f"{kind}:{title}".encode()).hexdigest()[:6]  # noqa: S324
-        return f"{kind.value}-{safe[:48]}-{digest}"
+        return f"{kind.value}-{slugify(title)[:48]}-{digest}"
 
     @classmethod
     def create(cls, title: str, kind: MediaKind, **kw: object) -> Self:
@@ -200,3 +204,144 @@ class BestEstimate(BaseModel):
     price: Money | None
     confidence: float
     supporting_observation_ids: tuple[str, ...]
+
+
+# --- the media graph (who / where / what) ---------------------------------
+# A typed, provenance-tracked graph layered on top of entities/observations.
+# Works keep their detail in `entities`; every other participant is a Node. Every
+# edge carries its source so a claim is auditable, and an `owned` flag separates
+# what the user authored from what was resolved from the world.
+
+
+class NodeKind(enum.StrEnum):
+    """The kind of a graph node."""
+
+    WORK = "work"  # mirrors an Entity (shares its id); detail lives in `entities`
+    PERSON = "person"  # a credited human (director, developer, composer, ...)
+    ORG = "org"  # studio / publisher / developer house / label / network
+    PLATFORM = "platform"  # streaming service or store you consume it on
+    SERIES = "series"  # franchise / collection a work belongs to
+    DESCRIPTOR = "descriptor"  # genre / theme / mood / style (see DescriptorKind)
+
+
+class DescriptorKind(enum.StrEnum):
+    """Sub-type of a DESCRIPTOR node.
+
+    GENRE is high-trust (sourced from TMDB/IGDB); THEME/MOOD/STYLE are soft,
+    model-derived, and treated as falsifiable hypotheses the user can confirm or reject.
+    """
+
+    GENRE = "genre"
+    THEME = "theme"
+    MOOD = "mood"
+    STYLE = "style"
+
+
+class RelationKind(enum.StrEnum):
+    """The edge type in the uniform node->node graph."""
+
+    CREDITED_ON = "credited_on"  # person/org -> work (qualified by CreditRole)
+    AVAILABLE_ON = "available_on"  # work -> platform
+    EXHIBITS = "exhibits"  # work -> descriptor
+    PART_OF_SERIES = "part_of_series"  # work -> series
+    INFLUENCED_BY = "influenced_by"  # node -> node (reserved for the later walk)
+
+
+class CreditRole(enum.StrEnum):
+    """The credited role on a CREDITED_ON edge.
+
+    Spans every medium's authorship structure so one PERSON/ORG node type unifies the
+    "who" across kinds (the artist-divergence problem) — the role carries the medium.
+    """
+
+    DIRECTOR = "director"
+    WRITER = "writer"
+    CREATOR = "creator"
+    SHOWRUNNER = "showrunner"
+    DEVELOPER = "developer"
+    PUBLISHER = "publisher"
+    STUDIO = "studio"
+    ANIMATION_STUDIO = "animation_studio"
+    NETWORK = "network"
+    COMPOSER = "composer"
+    ARTIST = "artist"
+    AUTHOR = "author"
+    HOST = "host"
+    CAST = "cast"
+    VOICE = "voice"
+    OTHER = "other"
+
+
+class Node(BaseModel):
+    """A participant in the media graph. ``owned`` marks user-authored vs world/resolved."""
+
+    id: str
+    node_kind: NodeKind
+    name: str
+    descriptor_kind: DescriptorKind | None = None  # set iff node_kind is DESCRIPTOR
+    owned: bool = False
+    external_ids: dict[str, str] = Field(default_factory=dict)
+
+    @staticmethod
+    def make_id(
+        node_kind: NodeKind,
+        name: str,
+        *,
+        source: str | None = None,
+        source_id: str | None = None,
+        descriptor_kind: DescriptorKind | None = None,
+    ) -> str:
+        """Canonical id so the same person/genre/platform collapses across works.
+
+        Prefers a stable source key (``person:tmdb:287``) so a creative is one node
+        across their whole filmography; falls back to a name slug, namespaced by
+        descriptor kind for descriptors (``descriptor:genre:action``).
+        """
+        if source and source_id:
+            return f"{node_kind.value}:{source}:{source_id}"
+        if descriptor_kind is not None:
+            return f"{node_kind.value}:{descriptor_kind.value}:{slugify(name)}"
+        return f"{node_kind.value}:{slugify(name)}"
+
+    @classmethod
+    def create(cls, node_kind: NodeKind, name: str, **kw: object) -> Self:
+        descriptor_kind = kw.get("descriptor_kind")
+        node_id = cls.make_id(
+            node_kind,
+            name,
+            source=kw.get("source"),  # type: ignore[arg-type]
+            source_id=kw.get("source_id"),  # type: ignore[arg-type]
+            descriptor_kind=descriptor_kind
+            if isinstance(descriptor_kind, DescriptorKind)
+            else None,
+        )
+        kw.pop("source", None)
+        kw.pop("source_id", None)
+        return cls(id=node_id, node_kind=node_kind, name=name, **kw)  # type: ignore[arg-type]
+
+
+class Edge(BaseModel):
+    """One provenance-tracked relation between two nodes. Dedup by ``id``."""
+
+    src_id: str
+    dst_id: str
+    relation: RelationKind
+    role: CreditRole | None = None  # set for CREDITED_ON
+    source_provider: str = "unknown"  # tmdb / igdb / steam / openai / user
+    source_url: str | None = None
+    source_tier: SourceTier = SourceTier.AGGREGATOR
+    confidence: float = 0.7
+    owned: bool = False  # the user asserted this edge (vs resolved from the world)
+    fetched_at: datetime | None = None
+
+    @property
+    def id(self) -> str:
+        """Deterministic dedup key: same relation from same source collapses to one row."""
+        parts = (
+            self.src_id,
+            self.dst_id,
+            self.relation.value,
+            self.role.value if self.role else "",
+            self.source_provider,
+        )
+        return hashlib.sha1("|".join(parts).encode()).hexdigest()  # noqa: S324

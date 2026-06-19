@@ -20,10 +20,16 @@ from pathlib import Path
 
 from release_tracker.models import (
     Certainty,
+    CreditRole,
     DatePrecision,
+    DescriptorKind,
+    Edge,
     Entity,
     MediaKind,
     Money,
+    Node,
+    NodeKind,
+    RelationKind,
     ReleaseChannel,
     ReleaseObservation,
     SourceTier,
@@ -66,6 +72,36 @@ CREATE TABLE IF NOT EXISTS observations (
 
 CREATE INDEX IF NOT EXISTS idx_obs_entity ON observations(entity_id);
 CREATE INDEX IF NOT EXISTS idx_obs_lookup ON observations(entity_id, channel, region);
+
+-- the media graph: who/where/what. Additive; existing dbs gain these on open.
+CREATE TABLE IF NOT EXISTS nodes (
+    id              TEXT PRIMARY KEY,
+    node_kind       TEXT NOT NULL,
+    name            TEXT NOT NULL,
+    descriptor_kind TEXT,
+    owned           INTEGER NOT NULL DEFAULT 0,
+    external_ids    TEXT NOT NULL DEFAULT '{}',
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS edges (
+    id              TEXT PRIMARY KEY,
+    src_id          TEXT NOT NULL,
+    dst_id          TEXT NOT NULL,
+    relation        TEXT NOT NULL,
+    role            TEXT,
+    source_provider TEXT NOT NULL,
+    source_url      TEXT,
+    source_tier     INTEGER NOT NULL,
+    confidence      REAL NOT NULL,
+    owned           INTEGER NOT NULL DEFAULT 0,
+    fetched_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_nodes_kind ON nodes(node_kind);
+CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst_id, relation);
+CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src_id, relation);
 """
 
 
@@ -131,6 +167,16 @@ class Database:
     def get_entity(self, entity_id: str) -> Entity | None:
         row = self._conn.execute("SELECT * FROM entities WHERE id = ?", (entity_id,)).fetchone()
         return _row_to_entity(row) if row else None
+
+    def delete_entity(self, entity_id: str) -> None:
+        """Remove an entity and everything keyed to it (observations cascade; node+edges too).
+
+        Used when re-keying an unresolved capture once its real kind is detected.
+        """
+        with self._tx() as conn:
+            conn.execute("DELETE FROM entities WHERE id = ?", (entity_id,))  # cascades observations
+            conn.execute("DELETE FROM nodes WHERE id = ?", (entity_id,))
+            conn.execute("DELETE FROM edges WHERE src_id = ? OR dst_id = ?", (entity_id, entity_id))
 
     def iter_entities(self, *, watched_only: bool = False) -> Iterator[Entity]:
         sql = "SELECT * FROM entities"
@@ -211,6 +257,92 @@ class Database:
         for row in rows:
             yield _row_to_observation(row)
 
+    # -- graph: nodes ------------------------------------------------------
+    def upsert_node(self, node: Node) -> None:
+        """Idempotent on id. ``owned`` is sticky-true: re-resolving never un-owns."""
+        now = datetime.now(UTC).isoformat()
+        with self._tx() as conn:
+            conn.execute(
+                """
+                INSERT INTO nodes (id, node_kind, name, descriptor_kind, owned,
+                    external_ids, created_at, updated_at)
+                VALUES (:id, :node_kind, :name, :descriptor_kind, :owned,
+                    :external_ids, :now, :now)
+                ON CONFLICT(id) DO UPDATE SET
+                    name=excluded.name,
+                    descriptor_kind=COALESCE(excluded.descriptor_kind, nodes.descriptor_kind),
+                    owned=MAX(nodes.owned, excluded.owned),
+                    external_ids=excluded.external_ids,
+                    updated_at=:now
+                """,
+                {
+                    "id": node.id,
+                    "node_kind": node.node_kind.value,
+                    "name": node.name,
+                    "descriptor_kind": node.descriptor_kind.value if node.descriptor_kind else None,
+                    "owned": int(node.owned),
+                    "external_ids": json.dumps(node.external_ids),
+                    "now": now,
+                },
+            )
+
+    def get_node(self, node_id: str) -> Node | None:
+        row = self._conn.execute("SELECT * FROM nodes WHERE id = ?", (node_id,)).fetchone()
+        return _row_to_node(row) if row else None
+
+    def get_nodes(self, node_ids: Iterable[str]) -> dict[str, Node]:
+        """Batch-fetch nodes by id (for rendering an edge set without N queries)."""
+        ids = list(node_ids)
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        rows = self._conn.execute(
+            f"SELECT * FROM nodes WHERE id IN ({placeholders})",  # noqa: S608 - ids are placeholders
+            ids,
+        )
+        return {row["id"]: _row_to_node(row) for row in rows}
+
+    def find_nodes(self, query: str, *, node_kind: NodeKind | None = None) -> list[Node]:
+        """Resolve a node reference: exact id, else case-insensitive name substring."""
+        exact = self.get_node(query)
+        if exact is not None:
+            return [exact]
+        sql = "SELECT * FROM nodes WHERE lower(name) LIKE ?"
+        params: list[str] = [f"%{query.lower()}%"]
+        if node_kind is not None:
+            sql += " AND node_kind = ?"
+            params.append(node_kind.value)
+        sql += " ORDER BY owned DESC, name"
+        return [_row_to_node(r) for r in self._conn.execute(sql, params)]
+
+    # -- graph: edges ------------------------------------------------------
+    def upsert_edge(self, edge: Edge) -> None:
+        with self._tx() as conn:
+            _insert_edge(conn, edge)
+
+    def upsert_edges(self, edges: Iterable[Edge]) -> int:
+        count = 0
+        with self._tx() as conn:
+            for edge in edges:
+                _insert_edge(conn, edge)
+                count += 1
+        return count
+
+    def edges_from(self, src_id: str, relation: RelationKind | None = None) -> list[Edge]:
+        return self._edges("src_id", src_id, relation)
+
+    def edges_to(self, dst_id: str, relation: RelationKind | None = None) -> list[Edge]:
+        return self._edges("dst_id", dst_id, relation)
+
+    def _edges(self, column: str, value: str, relation: RelationKind | None) -> list[Edge]:
+        sql = f"SELECT * FROM edges WHERE {column} = ?"  # noqa: S608 - column is a literal
+        params: list[str] = [value]
+        if relation is not None:
+            sql += " AND relation = ?"
+            params.append(relation.value)
+        sql += " ORDER BY confidence DESC"
+        return [_row_to_edge(r) for r in self._conn.execute(sql, params)]
+
 
 # --- row mapping ----------------------------------------------------------
 def _insert_observation(conn: sqlite3.Connection, obs: ReleaseObservation) -> None:
@@ -253,6 +385,62 @@ def _insert_observation(conn: sqlite3.Connection, obs: ReleaseObservation) -> No
             "confidence": obs.confidence,
             "fetched_at": (obs.fetched_at or datetime.now(UTC)).isoformat(),
         },
+    )
+
+
+def _insert_edge(conn: sqlite3.Connection, edge: Edge) -> None:
+    conn.execute(
+        """
+        INSERT INTO edges (id, src_id, dst_id, relation, role, source_provider,
+            source_url, source_tier, confidence, owned, fetched_at)
+        VALUES (:id, :src_id, :dst_id, :relation, :role, :source_provider,
+            :source_url, :source_tier, :confidence, :owned, :fetched_at)
+        ON CONFLICT(id) DO UPDATE SET
+            source_url=COALESCE(excluded.source_url, edges.source_url),
+            source_tier=excluded.source_tier,
+            confidence=excluded.confidence,
+            owned=MAX(edges.owned, excluded.owned),
+            fetched_at=excluded.fetched_at
+        """,
+        {
+            "id": edge.id,
+            "src_id": edge.src_id,
+            "dst_id": edge.dst_id,
+            "relation": edge.relation.value,
+            "role": edge.role.value if edge.role else None,
+            "source_provider": edge.source_provider,
+            "source_url": edge.source_url,
+            "source_tier": int(edge.source_tier),
+            "confidence": edge.confidence,
+            "owned": int(edge.owned),
+            "fetched_at": (edge.fetched_at or datetime.now(UTC)).isoformat(),
+        },
+    )
+
+
+def _row_to_node(row: sqlite3.Row) -> Node:
+    return Node(
+        id=row["id"],
+        node_kind=NodeKind(row["node_kind"]),
+        name=row["name"],
+        descriptor_kind=DescriptorKind(row["descriptor_kind"]) if row["descriptor_kind"] else None,
+        owned=bool(row["owned"]),
+        external_ids=json.loads(row["external_ids"]),
+    )
+
+
+def _row_to_edge(row: sqlite3.Row) -> Edge:
+    return Edge(
+        src_id=row["src_id"],
+        dst_id=row["dst_id"],
+        relation=RelationKind(row["relation"]),
+        role=CreditRole(row["role"]) if row["role"] else None,
+        source_provider=row["source_provider"],
+        source_url=row["source_url"],
+        source_tier=SourceTier(row["source_tier"]),
+        confidence=row["confidence"],
+        owned=bool(row["owned"]),
+        fetched_at=datetime.fromisoformat(row["fetched_at"]),
     )
 
 
