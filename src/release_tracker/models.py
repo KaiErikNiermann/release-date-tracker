@@ -291,6 +291,7 @@ class RelationKind(enum.StrEnum):
     AVAILABLE_ON = "available_on"  # work -> platform
     EXHIBITS = "exhibits"  # work -> descriptor
     PART_OF_SERIES = "part_of_series"  # work -> series
+    MEMBER_OF = "member_of"  # person -> org (a member of a group/studio/band)
     INFLUENCED_BY = "influenced_by"  # node -> node (reserved for the later walk)
 
 

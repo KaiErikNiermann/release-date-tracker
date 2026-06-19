@@ -6,7 +6,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 from release_tracker import views
-from release_tracker.artists import build_report, parse_link_spec
+from release_tracker.artists import add_membership, build_report, parse_link_spec
 from release_tracker.config import get_settings
 from release_tracker.db import Database
 from release_tracker.models import (
@@ -150,3 +150,19 @@ def test_build_report_links_and_tracked_works(tmp_path: Path) -> None:
     assert [w["title"] for w in d["tracked_works"]] == ["Dune"]  # type: ignore[union-attr]
     # an unknown artist -> not found
     assert build_report(db, None, "Nobody", get_settings(), date(2026, 6, 19)).found is False
+
+
+def test_membership_links_person_and_group(tmp_path: Path) -> None:
+    db = Database(tmp_path / "a.db")
+    # both nodes are created on demand (membership is independent of following)
+    person, group = add_membership(db, "Thomas Grip", "Frictional Games")
+    assert person.node_kind is NodeKind.PERSON
+    assert group.node_kind is NodeKind.ORG
+    assert [n.name for n in views.members_of(db, group)] == ["Thomas Grip"]
+    assert [n.name for n in views.groups_of(db, person)] == ["Frictional Games"]
+    # the group's report surfaces its members; the person's report surfaces their groups
+    s, today = get_settings(), date(2026, 6, 19)
+    group_report = build_report(db, group, "Frictional Games", s, today)
+    assert [m["name"] for m in group_report.to_dict()["members"]] == ["Thomas Grip"]  # type: ignore[union-attr]
+    person_report = build_report(db, person, "Thomas Grip", s, today)
+    assert [g["name"] for g in person_report.to_dict()["groups"]] == ["Frictional Games"]  # type: ignore[union-attr]

@@ -432,3 +432,17 @@ def artists(
 def _neg_ordinal(last_post: tuple[SocialPlatform, date] | None) -> int:
     """Sort key helper: most recent post first (descending date)."""
     return -last_post[1].toordinal() if last_post else 0
+
+
+def members_of(db: Database, org: Node) -> list[Node]:
+    """People who are members of a group/studio/band (the org -> people walk)."""
+    ids = [e.src_id for e in db.edges_to(org.id, RelationKind.MEMBER_OF)]
+    nodes = db.get_nodes(ids)
+    return sorted((nodes[i] for i in ids if i in nodes), key=lambda n: n.name)
+
+
+def groups_of(db: Database, person: Node) -> list[Node]:
+    """Groups/studios/bands a person belongs to (the person -> orgs walk)."""
+    ids = [e.dst_id for e in db.edges_from(person.id, RelationKind.MEMBER_OF)]
+    nodes = db.get_nodes(ids)
+    return sorted((nodes[i] for i in ids if i in nodes), key=lambda n: n.name)

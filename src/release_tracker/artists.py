@@ -17,7 +17,16 @@ from release_tracker import views
 from release_tracker.config import Settings
 from release_tracker.db import Database
 from release_tracker.logging import get_logger
-from release_tracker.models import ArtistLink, LinkTier, Node, NodeKind, SocialPlatform
+from release_tracker.models import (
+    ArtistLink,
+    Edge,
+    LinkTier,
+    Node,
+    NodeKind,
+    RelationKind,
+    SocialPlatform,
+    SourceTier,
+)
 from release_tracker.social import fetcher_for
 
 log = get_logger("artists")
@@ -58,6 +67,39 @@ def find_artist(db: Database, ref: str) -> Node | None:
         return None
     lowered = ref.lower()
     return next((n for n in nodes if n.name.lower() == lowered), nodes[0])
+
+
+def _resolve_or_create(db: Database, ref: str, kind: NodeKind) -> Node:
+    """Find an existing node of the given kind by ref, else create an owned one."""
+    matches = [n for n in db.find_nodes(ref) if n.node_kind is kind]
+    if matches:
+        lowered = ref.lower()
+        return next((n for n in matches if n.name.lower() == lowered), matches[0])
+    node = Node.create(kind, ref, owned=True)
+    db.upsert_node(node)
+    return db.get_node(node.id) or node
+
+
+def add_membership(db: Database, person_ref: str, group_ref: str) -> tuple[Node, Node]:
+    """Record that a person is a member of a group/studio/band (person -> org edge).
+
+    Creates either node if missing; membership is a structural fact independent of
+    whether you *follow* the person — `rdt artist follow` is separate.
+    """
+    person = _resolve_or_create(db, person_ref, NodeKind.PERSON)
+    group = _resolve_or_create(db, group_ref, NodeKind.ORG)
+    db.upsert_edge(
+        Edge(
+            src_id=person.id,
+            dst_id=group.id,
+            relation=RelationKind.MEMBER_OF,
+            source_provider="user",
+            source_tier=SourceTier.OFFICIAL,
+            confidence=1.0,
+            owned=True,
+        )
+    )
+    return person, group
 
 
 async def add_artist(
@@ -125,6 +167,8 @@ class ArtistReport:
     kind: str | None = None
     links: tuple[ArtistLink, ...] = ()
     tracked_works: tuple[views.CreditedWork, ...] = ()
+    members: tuple[Node, ...] = ()  # for a group: its people
+    groups: tuple[Node, ...] = ()  # for a person: their groups
     notes: tuple[str, ...] = ()
     _freshness: tuple[str | None, ...] = ()  # parallel to links
 
@@ -160,6 +204,8 @@ class ArtistReport:
                 {"title": w.entity.title, "kind": w.entity.kind.value, "role": w.role.value}
                 for w in self.tracked_works
             ],
+            "members": [{"name": n.name, "node_id": n.id} for n in self.members],
+            "groups": [{"name": n.name, "node_id": n.id} for n in self.groups],
             "notes": list(self.notes),
         }
 
@@ -179,5 +225,7 @@ def build_report(
         kind=node.node_kind.value,
         links=links,
         tracked_works=tuple(views.works_by_node(db, node)),
+        members=tuple(views.members_of(db, node)),
+        groups=tuple(views.groups_of(db, node)),
         _freshness=freshness,
     )

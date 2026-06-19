@@ -30,6 +30,7 @@ from release_tracker import matching, views
 from release_tracker.artists import (
     ArtistReport,
     add_artist,
+    add_membership,
     build_report,
     find_artist,
     parse_link_spec,
@@ -536,6 +537,47 @@ def artist_show(
     _render_artist_report(report)
 
 
+@artist_app.command("member")
+def artist_member(
+    person: Annotated[str, typer.Argument(help="the individual")],
+    group: Annotated[str, typer.Argument(help="the group / studio / band")],
+) -> None:
+    """Record that a person is a member of a group (person -> group)."""
+    configure_logging()
+    db = _db()
+    person_node, group_node = add_membership(db, person, group)
+    db.close()
+    console.print(f"[green]Linked[/] {person_node.name} → member of [bold]{group_node.name}[/].")
+
+
+@artist_app.command("members")
+def artist_members(ref: Annotated[str, typer.Argument(help="a group or a person")]) -> None:
+    """List a group's members — or, if given a person, the groups they belong to."""
+    configure_logging()
+    db = _db()
+    node = find_artist(db, ref)
+    if node is None:
+        db.close()
+        console.print(f"[yellow]No person/group[/] matching '{ref}'.")
+        raise typer.Exit(1)
+    members = views.members_of(db, node)
+    groups = views.groups_of(db, node)
+    db.close()
+    if members:
+        table = Table(title=f"{node.name} — {len(members)} member(s)", show_lines=False)
+        table.add_column("Member")
+        table.add_column("Followed")
+        for m in members:
+            table.add_row(m.name, "[green]✓[/]" if m.followed else "[dim]·[/]")
+        console.print(table)
+    if groups:
+        console.print(f"[bold]{node.name}[/] is a member of: {', '.join(g.name for g in groups)}")
+    if not members and not groups:
+        console.print(
+            f'[dim]No memberships for {node.name}. `rdt artist member "<person>" "{node.name}"`.[/]'
+        )
+
+
 # --- artist renderers -----------------------------------------------------
 def _ago(when: date | None) -> str:
     if when is None:
@@ -600,6 +642,10 @@ def _render_artist_report(report: ArtistReport) -> None:
                     f" [dim]· latest: {link.latest_title or 'post'} ({_ago(link.last_post_at)})[/]"
                 )
             console.print(f"  [cyan]{link.platform.value}[/] {link.url}{latest}")
+    if report.members:
+        console.print(f"[bold]Members[/] {', '.join(n.name for n in report.members)}")
+    if report.groups:
+        console.print(f"[bold]Member of[/] {', '.join(n.name for n in report.groups)}")
     if report.tracked_works:
         console.print("[bold]Works you track[/]")
         for w in report.tracked_works:
