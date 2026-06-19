@@ -504,6 +504,12 @@ class Database:
                 count += 1
         return count
 
+    def delete_edge(self, edge_id: str) -> bool:
+        """Remove one edge by id (e.g. an uncredit / un-relate). True if a row went."""
+        with self._tx() as conn:
+            cur = conn.execute("DELETE FROM edges WHERE id = ?", (edge_id,))
+            return cur.rowcount > 0
+
     def edges_from(self, src_id: str, relation: RelationKind | None = None) -> list[Edge]:
         return self._edges("src_id", src_id, relation)
 

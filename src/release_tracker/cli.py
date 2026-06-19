@@ -46,7 +46,9 @@ from release_tracker.models import (
     BestEstimate,
     Certainty,
     ConsumptionState,
+    CreditRole,
     DatePrecision,
+    DescriptorKind,
     Edge,
     Entity,
     MediaKind,
@@ -66,9 +68,11 @@ app = typer.Typer(add_completion=False, help="Free-first release date tracker.")
 seed_app = typer.Typer(help="Manage the entity watchlist (seed).")
 resolve_app = typer.Typer(help="Find canonical ids and pin them to entities (manual matching).")
 artist_app = typer.Typer(help="Artist-radar: follow creators and surface their latest content.")
+edit_app = typer.Typer(help="Freeform edits: retitle, (un)credit, (un)tag, part-split a work.")
 app.add_typer(seed_app, name="seed")
 app.add_typer(resolve_app, name="resolve")
 app.add_typer(artist_app, name="artist")
+app.add_typer(edit_app, name="edit")
 console = Console()
 
 
@@ -866,6 +870,236 @@ def notes(ref: Annotated[str, typer.Argument(help="entity id or title substring"
         console.print(f"  [dim]{when.isoformat()}[/]  {body}")
 
 
+# --- freeform edit surface (the deterministic backing for /rd-edit + a future
+#     web edit form). Each command is one small, idempotent, well-typed mutation
+#     so both an LLM and a human can drive the same primitives. -------------------
+_CREDIT_ROLES = ", ".join(r.value for r in CreditRole)
+
+
+def _edit_entity(db: Database, ref: str) -> Entity | None:
+    """Resolve a work for editing, printing + closing the db on failure."""
+    entity = _resolve_ref(db, ref)
+    if entity is None:
+        db.close()
+    return entity
+
+
+@edit_app.command("rename")
+def edit_rename(
+    ref: Annotated[str, typer.Argument(help="entity id or current title substring")],
+    title: Annotated[str, typer.Argument(help="the new display title")],
+) -> None:
+    """Retitle a work (e.g. a placeholder -> the announced name).
+
+    The stable id never changes — only the display title — so every observation,
+    edge and note stays attached. The old title is kept as a search alias.
+    """
+    configure_logging()
+    db = _db()
+    entity = _edit_entity(db, ref)
+    if entity is None:
+        raise typer.Exit(1)
+    old = entity.title
+    aliases = entity.aliases if old in entity.aliases else (*entity.aliases, old)
+    db.upsert_entity(entity.model_copy(update={"title": title, "aliases": aliases}))
+    if (node := db.get_node(entity.id)) is not None:  # keep the WORK node label in sync
+        db.upsert_node(node.model_copy(update={"name": title}))
+    db.close()
+    console.print(f"[green]Renamed[/] [dim]{old}[/] → [bold]{title}[/] [dim]({entity.id})[/]")
+
+
+@edit_app.command("alias")
+def edit_alias(
+    ref: Annotated[str, typer.Argument(help="entity id or title substring")],
+    alias: Annotated[str, typer.Argument(help="an alternate title to make searchable")],
+) -> None:
+    """Add a search alias (an alternate title) without changing the display title."""
+    configure_logging()
+    db = _db()
+    entity = _edit_entity(db, ref)
+    if entity is None:
+        raise typer.Exit(1)
+    if alias in entity.aliases or alias == entity.title:
+        db.close()
+        console.print(f"[dim]{entity.title} already known as '{alias}'.[/]")
+        return
+    db.upsert_entity(entity.model_copy(update={"aliases": (*entity.aliases, alias)}))
+    db.close()
+    console.print(f"[green]Aliased[/] {entity.title} += [bold]{alias}[/]")
+
+
+@edit_app.command("credit")
+def edit_credit(
+    ref: Annotated[str, typer.Argument(help="the work (id or title)")],
+    name: Annotated[str, typer.Argument(help="the person/studio to credit")],
+    role: Annotated[str, typer.Argument(help=f"one of: {_CREDIT_ROLES}")],
+    org: Annotated[bool, typer.Option("--org", help="credit a studio/org, not a person")] = False,
+) -> None:
+    """Attach a who-edge: credit a person or studio on a work (user-authored)."""
+    configure_logging()
+    try:
+        credit_role = CreditRole(role.lower())
+    except ValueError:
+        raise typer.BadParameter(f"role must be one of: {_CREDIT_ROLES}") from None
+    db = _db()
+    entity = _edit_entity(db, ref)
+    if entity is None:
+        raise typer.Exit(1)
+    node = Node.create(NodeKind.ORG if org else NodeKind.PERSON, name, owned=True)
+    db.upsert_node(node)
+    db.upsert_edge(
+        Edge(
+            src_id=node.id,
+            dst_id=entity.id,
+            relation=RelationKind.CREDITED_ON,
+            role=credit_role,
+            source_provider="user",
+            source_tier=SourceTier.OFFICIAL,
+            confidence=1.0,
+            owned=True,
+        )
+    )
+    db.close()
+    console.print(
+        f"[green]Credited[/] {name} [dim]({credit_role.value})[/] on [bold]{entity.title}[/]"
+    )
+
+
+@edit_app.command("uncredit")
+def edit_uncredit(
+    ref: Annotated[str, typer.Argument(help="the work (id or title)")],
+    name: Annotated[str, typer.Argument(help="the credited person/studio to remove")],
+) -> None:
+    """Remove a who-edge: drop a person/studio's credit(s) from a work."""
+    configure_logging()
+    db = _db()
+    entity = _edit_entity(db, ref)
+    if entity is None:
+        raise typer.Exit(1)
+    nodes = db.find_nodes(name)
+    targets = {n.id for n in nodes}
+    removed = [
+        e
+        for e in db.edges_to(entity.id, RelationKind.CREDITED_ON)
+        if e.src_id in targets and db.delete_edge(e.id)
+    ]
+    db.close()
+    if not removed:
+        console.print(f"[yellow]No credit[/] for '{name}' on {entity.title}.")
+        raise typer.Exit(1)
+    console.print(
+        f"[green]Removed[/] {len(removed)} credit(s) for {name} from [bold]{entity.title}[/]"
+    )
+
+
+@edit_app.command("tag")
+def edit_tag(
+    ref: Annotated[str, typer.Argument(help="the work (id or title)")],
+    descriptor: Annotated[str, typer.Argument(help="a genre or theme to attach")],
+    theme: Annotated[
+        bool, typer.Option("--theme", help="tag as a soft theme instead of a genre")
+    ] = False,
+) -> None:
+    """Attach a what-edge: tag a work with a genre (default) or theme."""
+    configure_logging()
+    db = _db()
+    entity = _edit_entity(db, ref)
+    if entity is None:
+        raise typer.Exit(1)
+    kind = DescriptorKind.THEME if theme else DescriptorKind.GENRE
+    node = Node.create(NodeKind.DESCRIPTOR, descriptor, descriptor_kind=kind, owned=True)
+    db.upsert_node(node)
+    db.upsert_edge(
+        Edge(
+            src_id=entity.id,
+            dst_id=node.id,
+            relation=RelationKind.EXHIBITS,
+            source_provider="user",
+            source_tier=SourceTier.OFFICIAL,
+            confidence=1.0,
+            owned=True,
+        )
+    )
+    db.close()
+    console.print(f"[green]Tagged[/] {entity.title} [dim]({kind.value})[/] [bold]{descriptor}[/]")
+
+
+@edit_app.command("untag")
+def edit_untag(
+    ref: Annotated[str, typer.Argument(help="the work (id or title)")],
+    descriptor: Annotated[str, typer.Argument(help="the genre/theme to remove")],
+) -> None:
+    """Remove a what-edge: drop a genre/theme from a work."""
+    configure_logging()
+    db = _db()
+    entity = _edit_entity(db, ref)
+    if entity is None:
+        raise typer.Exit(1)
+    targets = {n.id for n in db.find_nodes(descriptor, node_kind=NodeKind.DESCRIPTOR)}
+    removed = [
+        e
+        for e in db.edges_from(entity.id, RelationKind.EXHIBITS)
+        if e.dst_id in targets and db.delete_edge(e.id)
+    ]
+    db.close()
+    if not removed:
+        console.print(f"[yellow]No tag[/] '{descriptor}' on {entity.title}.")
+        raise typer.Exit(1)
+    console.print(f"[green]Untagged[/] {descriptor} from [bold]{entity.title}[/]")
+
+
+@edit_app.command("part")
+def edit_part(
+    ref: Annotated[str, typer.Argument(help="the work (id or title)")],
+    season: Annotated[int, typer.Argument(help="the season number")],
+    part: Annotated[
+        int | None, typer.Argument(help="the mid-season cut (Part/Vol/Cour N), if split")
+    ] = None,
+    series: Annotated[
+        str | None,
+        typer.Option("--series", help="series name to link to if no series edge exists yet"),
+    ] = None,
+) -> None:
+    """Set a work's (season, part) coordinates within its series.
+
+    Updates the existing part_of_series edge in place; pass --series to create the
+    link when a now-known split first attaches the work to a franchise.
+    """
+    configure_logging()
+    db = _db()
+    entity = _edit_entity(db, ref)
+    if entity is None:
+        raise typer.Exit(1)
+    existing = db.edges_from(entity.id, RelationKind.PART_OF_SERIES)
+    if existing:
+        base = existing[0]
+        dst_id, provider, tier = base.dst_id, base.source_provider, base.source_tier
+    elif series is not None:
+        node = Node.create(NodeKind.SERIES, series, owned=True)
+        db.upsert_node(node)
+        dst_id, provider, tier = node.id, "user", SourceTier.OFFICIAL
+    else:
+        db.close()
+        console.print(f'[yellow]{entity.title}[/] has no series link — pass --series "<name>".')
+        raise typer.Exit(1)
+    db.upsert_edge(
+        Edge(
+            src_id=entity.id,
+            dst_id=dst_id,
+            relation=RelationKind.PART_OF_SERIES,
+            ordinal=season,
+            part=part,
+            source_provider=provider,
+            source_tier=tier,
+            confidence=1.0,
+            owned=True,
+        )
+    )
+    db.close()
+    coord = f"S{season}" + (f" Pt{part}" if part is not None else "")
+    console.print(f"[green]Set[/] {entity.title} → [bold]{coord}[/]")
+
+
 @app.command()
 def stale(
     days: Annotated[
@@ -1083,12 +1317,18 @@ def _render_card(card: views.WorkCard) -> None:
         where = ", ".join(f"[dim]~{p.name}[/]" if p.predicted else p.name for p in card.platforms)
         console.print(f"[bold]Where[/] {where}")
     if card.tags:
-        genres = [t.name for t in card.tags if not t.predicted]
-        themes = [t.name for t in card.tags if t.predicted]
+        # bucket by descriptor kind (a user-authored theme is OFFICIAL-tier, not a genre);
+        # predicted themes get a "~" prefix, matching the platform convention above.
+        genres = [t.name for t in card.tags if t.kind is DescriptorKind.GENRE]
+        themes = [
+            f"~{t.name}" if t.predicted else t.name
+            for t in card.tags
+            if t.kind is DescriptorKind.THEME
+        ]
         if genres:
             console.print(f"[bold]Genre[/] {', '.join(genres)}")
         if themes:
-            console.print(f"[bold]Themes[/] [dim]{', '.join(themes)} (model-derived)[/]")
+            console.print(f"[bold]Themes[/] [dim]{', '.join(themes)} (~ = model-derived)[/]")
     if card.derived_from:
         for r in card.derived_from:
             console.print(f"[bold]Derived from[/] {r.node.name} [dim]({r.relation.value})[/]")
