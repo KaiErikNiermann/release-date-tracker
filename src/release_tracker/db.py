@@ -479,6 +479,14 @@ class Database:
         )
         return [_row_to_link(r) for r in rows]
 
+    def delete_artist_link(self, node_id: str, platform: SocialPlatform) -> bool:
+        with self._tx() as conn:
+            cur = conn.execute(
+                "DELETE FROM artist_links WHERE node_id = ? AND platform = ?",
+                (node_id, platform.value),
+            )
+            return cur.rowcount > 0
+
     # -- graph: edges ------------------------------------------------------
     def upsert_edge(self, edge: Edge) -> None:
         with self._tx() as conn:

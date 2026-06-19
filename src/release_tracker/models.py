@@ -124,6 +124,7 @@ class SocialPlatform(enum.StrEnum):
     PATREON = "patreon"
     BUYMEACOFFEE = "buymeacoffee"
     DEVIANTART = "deviantart"
+    ARTSTATION = "artstation"
     PIXIV = "pixiv"
     SPOTIFY = "spotify"
     BANDCAMP = "bandcamp"
