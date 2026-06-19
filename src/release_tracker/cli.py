@@ -1,9 +1,18 @@
 """Command-line interface.
 
-rdt seed sync [--source local|notion]   # load watchlist into the DB
-rdt pull [--all]                        # run Tier-0 pullers over watched entities
-rdt show [--region US] [--kind game]    # ranked best estimates
-rdt entities                            # list tracked entities
+Tracker (capture -> enrich -> observe):
+  rdt add "<title>" [--kind K] [--now]  # capture a title instantly
+  rdt enrich [REF | --all]              # resolve + populate who/where/what
+  rdt upcoming [--days N] [--kind K]    # date-sorted overview w/ who/where/what
+  rdt card "<title>"                    # one work's full who/where/what + dates
+  rdt who "<name>"                      # works a person/studio is credited on
+
+Plumbing:
+  rdt seed sync [--source local|notion] # load watchlist into the DB
+  rdt pull [--all]                      # run Tier-0 pullers over watched entities
+  rdt show [--region US] [--kind game]  # ranked best estimates
+  rdt entities                          # list tracked entities
+  rdt rd "<title>"                      # one-shot lookup (the /rd skill engine)
 """
 
 from __future__ import annotations
@@ -17,13 +26,14 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from release_tracker import matching
-from release_tracker.config import get_settings
+from release_tracker import matching, views
+from release_tracker.config import Settings, get_settings
 from release_tracker.db import Database
+from release_tracker.enrich import EnrichSummary, enrich_work
 from release_tracker.logging import configure_logging
 from release_tracker.lookup import RdReport, lookup
-from release_tracker.models import Entity, MediaKind
-from release_tracker.pipeline import pull_all
+from release_tracker.models import DatePrecision, Entity, MediaKind, Node, NodeKind
+from release_tracker.pipeline import pull_all, pull_entity
 from release_tracker.resolve import best_estimates
 from release_tracker.seed import LocalSeed, NotionSeed, SeedProvider
 from release_tracker.sources.base import Candidate, make_client
@@ -57,6 +67,16 @@ def seed_sync(
     db = _db()
     for entity in bundle.entities:
         db.upsert_entity(entity)
+        # the user curated these by hand -> they are owned graph nodes from capture.
+        db.upsert_node(
+            Node(
+                id=entity.id,
+                node_kind=NodeKind.WORK,
+                name=entity.title,
+                owned=True,
+                external_ids=entity.external_ids,
+            )
+        )
     obs_count = db.upsert_observations(bundle.observations) if bundle.observations else 0
     db.close()
     console.print(
@@ -218,6 +238,231 @@ def _render(rows: list[tuple[str, MediaKind, object]]) -> None:
             f"{est.confidence:.2f}",
         )
     console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# tracker: capture / enrich / observe
+# ---------------------------------------------------------------------------
+@app.command()
+def add(
+    name: Annotated[str, typer.Argument(help="title to track, e.g. 'Dishonored 3'")],
+    kind: Annotated[
+        str | None, typer.Option(help="movie|tv|game|anime|tech|...; detected on enrich if omitted")
+    ] = None,
+    now: Annotated[bool, typer.Option("--now", help="resolve + enrich immediately")] = False,
+    no_themes: Annotated[
+        bool, typer.Option("--no-themes", help="skip LLM theme extraction")
+    ] = False,
+) -> None:
+    """Capture a title instantly. Resolve + enrich later (or now with --now)."""
+    configure_logging()
+    settings = get_settings()
+    media = MediaKind(kind) if kind else MediaKind.OTHER
+    db = _db()
+    entity = Entity.create(name, media)
+    db.upsert_entity(entity)
+    db.upsert_node(
+        Node(id=entity.id, node_kind=NodeKind.WORK, name=name, owned=True, external_ids={})
+    )
+    console.print(f"[green]Added[/] {name} [dim]({media.value})[/]")
+    if now:
+        summary = asyncio.run(
+            _resolve_and_enrich(db, settings, entity, include_themes=not no_themes)
+        )
+        _print_enrich(entity, summary)
+    else:
+        console.print(f'[dim]Run `rdt enrich "{name}"` to populate who/where/what.[/]')
+    db.close()
+
+
+@app.command()
+def enrich(
+    ref: Annotated[str | None, typer.Argument(help="entity id/title; omit and use --all")] = None,
+    all_entities: Annotated[
+        bool, typer.Option("--all", help="enrich every watched entity")
+    ] = False,
+    no_themes: Annotated[
+        bool, typer.Option("--no-themes", help="skip LLM theme extraction")
+    ] = False,
+) -> None:
+    """Resolve + populate the who/where/what graph for one entity or --all."""
+    configure_logging()
+    settings = get_settings()
+    db = _db()
+    if all_entities:
+        targets = list(db.iter_entities(watched_only=True))
+    elif ref:
+        entity = _resolve_ref(db, ref)
+        if entity is None:
+            db.close()
+            raise typer.Exit(1)
+        targets = [entity]
+    else:
+        db.close()
+        raise typer.BadParameter("pass an entity ref or --all")
+    for entity in targets:
+        summary = asyncio.run(
+            _resolve_and_enrich(db, settings, entity, include_themes=not no_themes)
+        )
+        _print_enrich(entity, summary)
+    db.close()
+
+
+@app.command()
+def upcoming(
+    days: Annotated[int | None, typer.Option(help="only releases within N days")] = None,
+    kind: Annotated[str | None, typer.Option(help="filter to a MediaKind")] = None,
+) -> None:
+    """Compact, date-sorted overview of upcoming releases with who/where/what."""
+    configure_logging()
+    db = _db()
+    kind_filter = MediaKind(kind) if kind else None
+    rows = views.upcoming(db, _today(), days=days, kind=kind_filter)
+    db.close()
+    _render_upcoming(rows, days)
+
+
+@app.command()
+def card(ref: Annotated[str, typer.Argument(help="entity id or title substring")]) -> None:
+    """Full who/where/what + dates for one tracked work."""
+    configure_logging()
+    db = _db()
+    entity = _resolve_ref(db, ref)
+    if entity is None:
+        db.close()
+        raise typer.Exit(1)
+    work = views.work_card(db, entity)
+    db.close()
+    _render_card(work)
+
+
+@app.command()
+def who(name: Annotated[str, typer.Argument(help="person or studio name")]) -> None:
+    """List the works a person/studio is credited on (one-hop walk over the graph)."""
+    configure_logging()
+    db = _db()
+    nodes = [n for n in db.find_nodes(name) if n.node_kind in (NodeKind.PERSON, NodeKind.ORG)]
+    if not nodes:
+        db.close()
+        console.print(f"[yellow]No person/studio[/] matching '{name}'. Enrich some works first.")
+        raise typer.Exit(1)
+    node = nodes[0]
+    works = views.works_by_node(db, node)
+    db.close()
+    table = Table(title=f"{node.name} — credited on {len(works)} work(s)", show_lines=False)
+    for col in ("Role", "Title", "Kind", "Owned"):
+        table.add_column(col)
+    for w in works:
+        table.add_row(
+            w.role.value,
+            w.entity.title,
+            w.entity.kind.value,
+            "[green]✓ yours[/]" if w.owned else "[dim]world[/]",
+        )
+    console.print(table)
+
+
+# --- tracker helpers ------------------------------------------------------
+async def _resolve_and_enrich(
+    db: Database, settings: Settings, entity: Entity, *, include_themes: bool
+) -> EnrichSummary:
+    entity = await _ensure_resolved(db, settings, entity)
+    async with make_client() as client:
+        return await enrich_work(client, db, settings, entity, include_themes=include_themes)
+
+
+async def _ensure_resolved(db: Database, settings: Settings, entity: Entity) -> Entity:
+    """Make sure the entity has a resolvable kind + canonical ids before enrichment."""
+    if not matching.is_resolvable(entity.kind):
+        # captured without a (usable) kind — auto-detect via the rd lookup, then re-key.
+        report = await lookup(entity.title, settings)
+        if report.found and report.kind and matching.is_resolvable(report.kind):
+            entity = _rekey(db, entity, report.kind, report.canonical)
+    await pull_entity(db, settings, entity)
+    return db.get_entity(entity.id) or entity
+
+
+def _rekey(db: Database, old: Entity, new_kind: MediaKind, canonical: dict[str, str]) -> Entity:
+    """Replace an unresolved capture with a correctly-kinded entity (id changes)."""
+    new = Entity.create(
+        old.title,
+        new_kind,
+        external_ids=dict(canonical),
+        notes=old.notes,
+        watch=old.watch,
+        notion_page_id=old.notion_page_id,
+    )
+    if new.id != old.id:
+        db.delete_entity(old.id)
+    db.upsert_entity(new)
+    console.print(f"[dim]Detected[/] {old.title} → [bold]{new_kind.value}[/]")
+    return new
+
+
+def _print_enrich(entity: Entity, s: EnrichSummary) -> None:
+    if not s.resolved:
+        console.print(
+            f"[yellow]Could not resolve[/] {entity.title} — "
+            f'try `rdt resolve show "{entity.title}"` to pin an id.'
+        )
+        return
+    console.print(
+        f"[green]Enriched[/] {entity.title}: {s.people} people, {s.orgs} orgs, "
+        f"{s.genres} genres, {s.themes} themes, {s.platforms} platforms, {s.series} series."
+    )
+
+
+def _fmt_tag(tag: views.TagLine) -> str:
+    return f"[dim]~{tag.name}[/]" if tag.predicted else tag.name
+
+
+def _render_upcoming(rows: list[views.UpcomingRow], days: int | None) -> None:
+    title = "Upcoming releases" + (f" · next {days}d" if days else "")
+    table = Table(title=title, show_lines=False)
+    for col in ("Date", "", "Title", "Kind", "Who", "Where", "What"):
+        table.add_column(col)
+    for r in rows:
+        when = r.when.isoformat() if r.when else "—"
+        if r.precision is not DatePrecision.EXACT:
+            when += f" [dim]~{r.precision.value[0]}[/]"
+        table.add_row(
+            when,
+            "[green]●[/]" if r.confirmed else "[yellow]○[/]",
+            r.title,
+            r.kind.value,
+            ", ".join(r.who) or "[dim]—[/]",
+            ", ".join(r.where) or "[dim]—[/]",
+            ", ".join(_fmt_tag(t) for t in r.what) or "[dim]—[/]",
+        )
+    console.print(table)
+    if rows:
+        console.print(
+            "[dim]● confirmed  ○ speculative   ~theme = model-derived (a flagged guess)[/]"
+        )
+    else:
+        console.print("[dim]No upcoming releases. `rdt add` then `rdt enrich`.[/]")
+
+
+def _render_card(card: views.WorkCard) -> None:
+    e = card.entity
+    series = f" [dim]· {', '.join(card.series)}[/]" if card.series else ""
+    console.print(f"[bold]{e.title}[/] [dim]({e.kind.value})[/]{series}")
+    _render([(e.title, e.kind, est) for est in card.estimates])
+    if card.credits:
+        console.print("[bold]Who[/]")
+        for c in card.credits:
+            owned = " [green](yours)[/]" if c.owned else ""
+            console.print(f"  [dim]{c.role.value:<10}[/] {c.name}{owned}")
+    if card.platforms:
+        where = ", ".join(f"[dim]~{p.name}[/]" if p.predicted else p.name for p in card.platforms)
+        console.print(f"[bold]Where[/] {where}")
+    if card.tags:
+        genres = [t.name for t in card.tags if not t.predicted]
+        themes = [t.name for t in card.tags if t.predicted]
+        if genres:
+            console.print(f"[bold]Genre[/] {', '.join(genres)}")
+        if themes:
+            console.print(f"[bold]Themes[/] [dim]{', '.join(themes)} (model-derived)[/]")
 
 
 # ---------------------------------------------------------------------------
