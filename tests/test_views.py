@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from release_tracker import views
+from release_tracker.config import Settings, get_settings
 from release_tracker.db import Database
 from release_tracker.models import (
     Certainty,
+    ConsumptionState,
     CreditRole,
     DatePrecision,
     DescriptorKind,
@@ -24,10 +26,25 @@ from release_tracker.models import (
 )
 
 
-def _seed_work(db: Database, title: str, when: date, *, confirmed: bool = True) -> Entity:
-    ent = Entity.create(title, MediaKind.MOVIE)
+def _settings() -> Settings:
+    return get_settings()
+
+
+def _seed_work(
+    db: Database,
+    title: str,
+    when: date,
+    *,
+    confirmed: bool = True,
+    digital: date | None = None,
+    digital_confirmed: bool = True,
+    state: ConsumptionState = ConsumptionState.UNSET,
+    fetched_at: datetime | None = None,
+) -> Entity:
+    ent = Entity.create(title, MediaKind.MOVIE, consumption_state=state)
     db.upsert_entity(ent)
     db.upsert_node(Node(id=ent.id, node_kind=NodeKind.WORK, name=title, owned=True))
+    stamp = fetched_at or datetime.now(UTC)
     db.upsert_observation(
         ReleaseObservation(
             entity_id=ent.id,
@@ -37,9 +54,22 @@ def _seed_work(db: Database, title: str, when: date, *, confirmed: bool = True) 
             certainty=Certainty.CONFIRMED if confirmed else Certainty.ESTIMATED,
             source_tier=SourceTier.AGGREGATOR,
             provider="tmdb",
-            fetched_at=datetime.now(UTC),
+            fetched_at=stamp,
         )
     )
+    if digital is not None:
+        db.upsert_observation(
+            ReleaseObservation(
+                entity_id=ent.id,
+                channel=ReleaseChannel.DIGITAL,
+                release_date=digital,
+                precision=DatePrecision.EXACT,
+                certainty=Certainty.CONFIRMED if digital_confirmed else Certainty.PREDICTED,
+                source_tier=SourceTier.AGGREGATOR if digital_confirmed else SourceTier.MODEL,
+                provider="tmdb" if digital_confirmed else "model",
+                fetched_at=stamp,
+            )
+        )
     return ent
 
 
@@ -63,7 +93,7 @@ def test_upcoming_is_future_only_and_date_sorted(tmp_path: Path) -> None:
     _seed_work(db, "Past Film", date(2026, 1, 1))
     _seed_work(db, "Soon Film", date(2026, 7, 1))
     _seed_work(db, "Later Film", date(2026, 12, 1))
-    rows = views.upcoming(db, today)
+    rows = views.upcoming(db, today, _settings())
     assert [r.title for r in rows] == ["Soon Film", "Later Film"]  # past dropped, sorted
 
 
@@ -72,8 +102,48 @@ def test_upcoming_days_window_and_kind_filter(tmp_path: Path) -> None:
     today = date(2026, 6, 1)
     _seed_work(db, "Within", date(2026, 6, 20))
     _seed_work(db, "Beyond", date(2026, 9, 1))
-    assert [r.title for r in views.upcoming(db, today, days=30)] == ["Within"]
-    assert views.upcoming(db, today, kind=MediaKind.GAME) == []
+    assert [r.title for r in views.upcoming(db, today, _settings(), days=30)] == ["Within"]
+    assert views.upcoming(db, today, _settings(), kind=MediaKind.GAME) == []
+
+
+def test_upcoming_dual_dates_carry_stance(tmp_path: Path) -> None:
+    db = Database(tmp_path / "v.db")
+    today = date(2026, 6, 1)
+    # confirmed theatrical + speculative (PREDICTED) digital, digital still ahead
+    _seed_work(db, "Dune", date(2026, 2, 6), digital=date(2026, 7, 1), digital_confirmed=False)
+    (row,) = views.upcoming(db, today, _settings())
+    assert row.theatrical is not None and row.theatrical.confirmed is True
+    assert row.digital is not None and row.digital.confirmed is False
+    assert row.pivot_when == date(2026, 7, 1)  # digital governs (default channel)
+
+
+def test_available_partition_by_state_and_pivot(tmp_path: Path) -> None:
+    db = Database(tmp_path / "v.db")
+    today = date(2026, 6, 1)
+    # out (digital passed) + want -> available
+    _seed_work(
+        db, "Out & Want", date(2025, 1, 1), digital=date(2025, 3, 1), state=ConsumptionState.WANT
+    )
+    # out + watched -> hidden
+    _seed_work(
+        db, "Out & Done", date(2025, 1, 1), digital=date(2025, 3, 1), state=ConsumptionState.WATCHED
+    )
+    # upcoming digital + want -> not available (still upcoming)
+    _seed_work(
+        db, "Upcoming", date(2026, 7, 1), digital=date(2026, 9, 1), state=ConsumptionState.WANT
+    )
+    titles = [r.title for r in views.available(db, today, _settings())]
+    assert titles == ["Out & Want"]
+
+
+def test_freshness_buckets(tmp_path: Path) -> None:
+    s = _settings()
+    today = date(2026, 6, 1)
+    base = datetime(2026, 6, 1, tzinfo=UTC)
+    assert views.freshness(base - timedelta(days=max(s.fresh_days - 1, 0)), today, s) == "fresh"
+    assert views.freshness(base - timedelta(days=s.fresh_days + 1), today, s) == "aging"
+    assert views.freshness(base - timedelta(days=s.stale_days + 1), today, s) == "stale"
+    assert views.freshness(None, today, s) is None
 
 
 def test_upcoming_surfaces_who_and_flagged_themes(tmp_path: Path) -> None:
@@ -109,7 +179,7 @@ def test_upcoming_surfaces_who_and_flagged_themes(tmp_path: Path) -> None:
             source_tier=SourceTier.MODEL,
         )
     )
-    row = views.upcoming(db, today)[0]
+    row = views.upcoming(db, today, _settings())[0]
     assert row.who == ("Denis Villeneuve",)
     # sourced genre first, flagged theme after
     assert [(t.name, t.predicted) for t in row.what] == [("Sci-Fi", False), ("destiny", True)]

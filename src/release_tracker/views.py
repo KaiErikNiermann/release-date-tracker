@@ -10,12 +10,15 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
+from typing import Literal
 
+from release_tracker.config import Settings
 from release_tracker.db import Database
 from release_tracker.models import (
     BestEstimate,
     Certainty,
+    ConsumptionState,
     CreditRole,
     DatePrecision,
     DescriptorKind,
@@ -27,6 +30,13 @@ from release_tracker.models import (
     SourceTier,
 )
 from release_tracker.resolve import best_estimates
+
+Freshness = Literal["fresh", "aging", "stale"]
+_THEATRICAL = (
+    ReleaseChannel.THEATRICAL,
+    ReleaseChannel.THEATRICAL_LIMITED,
+    ReleaseChannel.PREMIERE,
+)
 
 # Role priority for picking a work's defining creator(s) — the trustworthy fixture
 # (director/creator/dev) leads; cast trails. Lower sorts first.
@@ -78,19 +88,35 @@ class PlatformLine:
 
 
 @dataclass(frozen=True, slots=True)
-class UpcomingRow:
-    """A single line of the date-sorted overview: the headline date + who/where/what."""
+class DateCell:
+    """A single release milestone: when, how precise, and confirmed vs speculative."""
+
+    when: date | None
+    precision: DatePrecision
+    confirmed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class TrackRow:
+    """A row of the upcoming/available surface: dual dates + who/where/what + state.
+
+    ``theatrical`` is movie-only (region-scoped); ``digital`` is the "when can I
+    actually watch it" date (digital for movies, the single release for tv/games).
+    ``pivot_when`` is the date that governs availability per the configured channel.
+    """
 
     entity_id: str
     title: str
     kind: MediaKind
-    when: date | None
-    precision: DatePrecision
-    confidence: float
-    confirmed: bool
+    theatrical: DateCell | None
+    digital: DateCell | None
+    pivot_when: date | None
     who: tuple[str, ...]
     where: tuple[str, ...]
     what: tuple[TagLine, ...]
+    freshness: Freshness | None
+    has_notes: bool
+    state: ConsumptionState
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,19 +142,87 @@ class SeasonEntry:
     owned: bool
 
 
-def next_release(db: Database, entity_id: str, today: date) -> BestEstimate | None:
-    """The soonest *upcoming* milestone (date >= today).
+def freshness(fetched_at: datetime | None, today: date, settings: Settings) -> Freshness | None:
+    """Green/orange/red bucket for how recently the underlying date was refreshed."""
+    if fetched_at is None:
+        return None
+    age = (today - fetched_at.date()).days
+    if age <= settings.fresh_days:
+        return "fresh"
+    if age <= settings.stale_days:
+        return "aging"
+    return "stale"
 
-    Picking the soonest future date — not the global earliest — means a film that
-    already had a festival premiere but releases widely next month still reads as
-    upcoming, with the wide date as its headline.
-    """
-    future = [
-        e
-        for e in best_estimates(db.iter_observations(entity_id))
-        if e.release_date and e.release_date >= today
+
+def _pick(
+    estimates: Iterable[BestEstimate],
+    channels: tuple[ReleaseChannel, ...] | None,
+    *,
+    region: str | None = None,
+) -> BestEstimate | None:
+    """Soonest dated estimate matching ``channels`` (any if None), preferring ``region``."""
+    cands = [e for e in estimates if e.release_date and (channels is None or e.channel in channels)]
+    if region is not None:
+        cands = [e for e in cands if e.region == region] or cands  # fall back to any region
+    return min(cands, key=lambda e: e.release_date or date.max) if cands else None
+
+
+def _cell(est: BestEstimate | None) -> DateCell | None:
+    if est is None:
+        return None
+    return DateCell(est.release_date, est.precision, est.certainty is Certainty.CONFIRMED)
+
+
+def _pivot(
+    theatrical: BestEstimate | None, digital: BestEstimate | None, channel: str
+) -> BestEstimate | None:
+    """The estimate that governs availability, per the configured consumption channel."""
+    if channel == "theatrical":
+        return theatrical or digital
+    if channel == "digital":
+        return digital or theatrical
+    dated = [e for e in (theatrical, digital) if e and e.release_date]
+    return min(dated, key=lambda e: e.release_date or date.max) if dated else None
+
+
+def _track_row(
+    db: Database, entity: Entity, today: date, settings: Settings, has_notes: bool
+) -> TrackRow:
+    estimates = best_estimates(db.iter_observations(entity.id))
+    region = settings.regions[0] if settings.regions else "US"
+    if entity.kind is MediaKind.MOVIE:
+        theatrical = _pick(estimates, _THEATRICAL, region=region)
+        digital = _pick(estimates, (ReleaseChannel.DIGITAL,))
+    else:
+        theatrical = None
+        digital = _pick(estimates, None)  # the single release date
+    pivot = _pivot(theatrical, digital, settings.availability_channel)
+    credits = _credit_lines(db, entity.id)
+    return TrackRow(
+        entity_id=entity.id,
+        title=entity.title,
+        kind=entity.kind,
+        theatrical=_cell(theatrical),
+        digital=_cell(digital),
+        pivot_when=pivot.release_date if pivot else None,
+        who=tuple(dict.fromkeys(c.name for c in credits))[:2],
+        where=tuple(p.name for p in _platform_lines(db, entity.id)[:2]),
+        what=tuple(_tag_lines(db, entity.id)[:4]),
+        freshness=freshness(pivot.fetched_at if pivot else None, today, settings),
+        has_notes=has_notes,
+        state=entity.consumption_state,
+    )
+
+
+def _track_rows(
+    db: Database, today: date, settings: Settings, *, kind: MediaKind | None
+) -> list[TrackRow]:
+    notes = db.note_counts()
+    return [
+        _track_row(db, e, today, settings, notes.get(e.id, 0) > 0)
+        for e in db.iter_entities()
+        if kind is None or e.kind is kind
     ]
-    return min(future, key=lambda e: e.release_date or date.max) if future else None
 
 
 def _collapse_estimates(estimates: Iterable[BestEstimate]) -> tuple[BestEstimate, ...]:
@@ -189,41 +283,38 @@ def _series_names(db: Database, entity_id: str) -> tuple[str, ...]:
 def upcoming(
     db: Database,
     today: date,
+    settings: Settings,
     *,
     days: int | None = None,
     kind: MediaKind | None = None,
-    who_limit: int = 2,
-    where_limit: int = 2,
-    what_limit: int = 4,
-) -> list[UpcomingRow]:
-    """Date-sorted rows for works releasing on/after ``today`` (optionally within ``days``)."""
-    rows: list[UpcomingRow] = []
-    for entity in db.iter_entities():
-        if kind is not None and entity.kind is not kind:
-            continue
-        est = next_release(db, entity.id, today)
-        if est is None or est.release_date is None:
-            continue
-        if days is not None and (est.release_date - today).days > days:
-            continue
-        credits = _credit_lines(db, entity.id)
-        tags = _tag_lines(db, entity.id)
-        rows.append(
-            UpcomingRow(
-                entity_id=entity.id,
-                title=entity.title,
-                kind=entity.kind,
-                when=est.release_date,
-                precision=est.precision,
-                confidence=est.confidence,
-                confirmed=est.certainty is Certainty.CONFIRMED,
-                # dedupe by name (a person credited twice, e.g. director+writer)
-                who=tuple(dict.fromkeys(c.name for c in credits))[:who_limit],
-                where=tuple(p.name for p in _platform_lines(db, entity.id)[:where_limit]),
-                what=tuple(tags[:what_limit]),
-            )
-        )
-    rows.sort(key=lambda r: (r.when or date.max, -r.confidence))
+) -> list[TrackRow]:
+    """Works whose consumption (pivot) date is still in the future, soonest first."""
+    rows = [
+        r
+        for r in _track_rows(db, today, settings, kind=kind)
+        if r.pivot_when is not None
+        and r.pivot_when >= today
+        and (days is None or (r.pivot_when - today).days <= days)
+    ]
+    rows.sort(key=lambda r: r.pivot_when or date.max)
+    return rows
+
+
+def available(
+    db: Database,
+    today: date,
+    settings: Settings,
+    *,
+    kind: MediaKind | None = None,
+) -> list[TrackRow]:
+    """Works that are out (pivot date passed) and unfinished (want/watching), newest first."""
+    watch_states = (ConsumptionState.WANT, ConsumptionState.WATCHING)
+    rows = [
+        r
+        for r in _track_rows(db, today, settings, kind=kind)
+        if r.pivot_when is not None and r.pivot_when < today and r.state in watch_states
+    ]
+    rows.sort(key=lambda r: r.pivot_when or date.min, reverse=True)
     return rows
 
 

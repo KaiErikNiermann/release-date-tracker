@@ -21,8 +21,11 @@ from pydantic import BaseModel, Field
 
 from release_tracker.config import Settings
 from release_tracker.db import Database
+from release_tracker.deltas import estimate_digital, match_studio
 from release_tracker.logging import get_logger
 from release_tracker.models import (
+    Certainty,
+    DatePrecision,
     DescriptorKind,
     Edge,
     Entity,
@@ -30,6 +33,8 @@ from release_tracker.models import (
     Node,
     NodeKind,
     RelationKind,
+    ReleaseChannel,
+    ReleaseObservation,
     SourceTier,
 )
 from release_tracker.platforms import learn_predicted_platform
@@ -39,6 +44,11 @@ from release_tracker.sources.tmdb import TmdbSource
 from release_tracker.titles import split_season
 
 _TV_KINDS = (MediaKind.TV, MediaKind.ANIME)
+_THEATRICAL_CHANNELS = (
+    ReleaseChannel.THEATRICAL,
+    ReleaseChannel.THEATRICAL_LIMITED,
+    ReleaseChannel.PREMIERE,
+)
 
 log = get_logger("enrich")
 
@@ -119,8 +129,52 @@ async def enrich_work(
             )
             summary.themes += 1
 
+    if entity.kind is MediaKind.MOVIE:
+        _persist_speculative_digital(db, entity, graph, now)
+
     log.info("enrich.done", entity=entity.title, **asdict(summary))
     return summary
+
+
+def _persist_speculative_digital(
+    db: Database, entity: Entity, graph: MediaGraph, now: datetime
+) -> None:
+    """Movie with a confirmed theatrical but no confirmed digital: store the
+    theatrical + studio-window estimate as a PREDICTED digital observation, so the
+    speculative digital date is a first-class, freshness-tracked fact (not live-only).
+    """
+    obs = list(db.iter_observations(entity.id))
+    if any(o.channel is ReleaseChannel.DIGITAL and o.certainty is Certainty.CONFIRMED for o in obs):
+        return
+    theatricals = [
+        o.release_date
+        for o in obs
+        if o.channel in _THEATRICAL_CHANNELS
+        and o.release_date
+        and o.certainty is Certainty.CONFIRMED
+    ]
+    if not theatricals:
+        return
+    studio = match_studio([c.name for c in graph.credits if c.node_kind is NodeKind.ORG])
+    est = estimate_digital(min(theatricals), studio)
+    db.upsert_observations(
+        [
+            ReleaseObservation(
+                entity_id=entity.id,
+                channel=ReleaseChannel.DIGITAL,
+                region="WW",
+                release_date=est.when,
+                precision=DatePrecision.EXACT,
+                certainty=Certainty.PREDICTED,
+                source_tier=SourceTier.MODEL,
+                provider="model",
+                source_name="theatrical + studio window",
+                source_quote=est.basis,
+                confidence=est.confidence,
+                fetched_at=now,
+            )
+        ]
+    )
 
 
 # --- edge writers (each: ensure node, then provenance-tagged edge) --------

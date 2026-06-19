@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -43,6 +44,17 @@ class Settings(BaseSettings):
     )
     # self-growing distributor -> streaming-home map, learned as we meet new studios
     platform_db_path: Path = Field(default=Path("data/platforms.db"), alias="RDT_PLATFORM_DB_PATH")
+
+    # --- consumption / availability ---
+    # which release channel decides "available to me": digital (can't do theatrical),
+    # theatrical, or any (soonest). Drives the upcoming/available split.
+    availability_channel: Literal["digital", "theatrical", "any"] = Field(
+        default="digital", alias="RDT_AVAILABILITY_CHANNEL"
+    )
+
+    # --- data freshness thresholds (days) ---
+    fresh_days: int = Field(default=14, alias="RDT_FRESH_DAYS")  # green if refreshed within
+    stale_days: int = Field(default=60, alias="RDT_STALE_DAYS")  # orange up to here, then red
 
     @property
     def regions(self) -> tuple[str, ...]:

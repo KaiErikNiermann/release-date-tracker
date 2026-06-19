@@ -108,6 +108,7 @@ def best_estimates(observations: Iterable[ReleaseObservation]) -> list[BestEstim
                 price=winner.price,
                 confidence=winner.confidence,
                 supporting_observation_ids=tuple(o.id for o in ranked),
+                fetched_at=winner.fetched_at,
             )
         )
     results.sort(key=lambda e: (e.release_date or date.max, -e.confidence))

@@ -32,7 +32,16 @@ from release_tracker.db import Database
 from release_tracker.enrich import EnrichSummary, enrich_work
 from release_tracker.logging import configure_logging
 from release_tracker.lookup import RdReport, lookup
-from release_tracker.models import DatePrecision, Entity, MediaKind, Node, NodeKind
+from release_tracker.models import (
+    BestEstimate,
+    Certainty,
+    ConsumptionState,
+    DatePrecision,
+    Entity,
+    MediaKind,
+    Node,
+    NodeKind,
+)
 from release_tracker.pipeline import pull_all, pull_entity
 from release_tracker.resolve import best_estimates
 from release_tracker.seed import LocalSeed, NotionSeed, SeedProvider
@@ -326,11 +335,26 @@ def upcoming(
 ) -> None:
     """Compact, date-sorted overview of upcoming releases with who/where/what."""
     configure_logging()
+    settings = get_settings()
     db = _db()
     kind_filter = MediaKind(kind) if kind else None
-    rows = views.upcoming(db, _today(), days=days, kind=kind_filter)
+    rows = views.upcoming(db, _today(), settings, days=days, kind=kind_filter)
     db.close()
     _render_upcoming(rows, days)
+
+
+@app.command()
+def available(
+    kind: Annotated[str | None, typer.Option(help="filter to a MediaKind")] = None,
+) -> None:
+    """Things out now that you haven't finished (want/watching), newest first."""
+    configure_logging()
+    settings = get_settings()
+    db = _db()
+    kind_filter = MediaKind(kind) if kind else None
+    rows = views.available(db, _today(), settings, kind=kind_filter)
+    db.close()
+    _render_available(rows)
 
 
 @app.command()
@@ -343,8 +367,13 @@ def card(ref: Annotated[str, typer.Argument(help="entity id or title substring")
         db.close()
         raise typer.Exit(1)
     work = views.work_card(db, entity)
+    media_notes = db.iter_notes(entity.id)
     db.close()
     _render_card(work)
+    if media_notes:
+        console.print("[bold]Notes[/]")
+        for when, body in media_notes:
+            console.print(f"  [dim]{when.isoformat()}[/]  {body}")
 
 
 @app.command()
@@ -397,6 +426,105 @@ def seasons(show: Annotated[str, typer.Argument(help="show / franchise name")]) 
             "[green]✓ yours[/]" if s.owned else "[dim]world[/]",
         )
     console.print(table)
+
+
+@app.command()
+def state(
+    ref: Annotated[str, typer.Argument(help="entity id or title substring")],
+    value: Annotated[str, typer.Argument(help="unset | want | watching | watched | dropped")],
+) -> None:
+    """Set a title's watch/play state (want/watching/watched/dropped)."""
+    configure_logging()
+    db = _db()
+    entity = _resolve_ref(db, ref)
+    if entity is None:
+        db.close()
+        raise typer.Exit(1)
+    try:
+        new_state = ConsumptionState(value.lower())
+    except ValueError:
+        db.close()
+        raise typer.BadParameter(
+            f"state must be one of: {', '.join(s.value for s in ConsumptionState)}"
+        ) from None
+    db.set_consumption_state(entity.id, new_state)
+    db.close()
+    console.print(f"[green]Set[/] {entity.title} → [bold]{new_state.value}[/]")
+
+
+@app.command()
+def note(
+    ref: Annotated[str, typer.Argument(help="entity id or title substring")],
+    text: Annotated[
+        str, typer.Argument(help="freeform note, e.g. 'production halted, resume 2027'")
+    ],
+) -> None:
+    """Append a timestamped freeform note to a tracked work."""
+    configure_logging()
+    db = _db()
+    entity = _resolve_ref(db, ref)
+    if entity is None:
+        db.close()
+        raise typer.Exit(1)
+    db.add_note(entity.id, text)
+    db.close()
+    console.print(f"[green]Noted[/] on {entity.title}.")
+
+
+@app.command()
+def notes(ref: Annotated[str, typer.Argument(help="entity id or title substring")]) -> None:
+    """List the freeform notes for a work, newest first."""
+    configure_logging()
+    db = _db()
+    entity = _resolve_ref(db, ref)
+    if entity is None:
+        db.close()
+        raise typer.Exit(1)
+    items = db.iter_notes(entity.id)
+    db.close()
+    if not items:
+        console.print(f"[dim]No notes for {entity.title}.[/]")
+        return
+    console.print(f"[bold]{entity.title}[/] — notes")
+    for when, body in items:
+        console.print(f"  [dim]{when.isoformat()}[/]  {body}")
+
+
+@app.command()
+def stale(
+    days: Annotated[
+        int | None, typer.Option(help="older than N days (default: RDT_STALE_DAYS)")
+    ] = None,
+) -> None:
+    """Speculative dates not refreshed recently — candidates to re-`pull`/`enrich`."""
+    configure_logging()
+    settings = get_settings()
+    threshold = days if days is not None else settings.stale_days
+    today = _today()
+    db = _db()
+    flagged: list[tuple[int, str, object]] = []
+    for entity in db.iter_entities():
+        for est in best_estimates(db.iter_observations(entity.id)):
+            speculative = est.certainty in (Certainty.PREDICTED, Certainty.ESTIMATED)
+            if speculative and est.fetched_at and (today - est.fetched_at.date()).days > threshold:
+                flagged.append(((today - est.fetched_at.date()).days, entity.title, est))
+    db.close()
+    flagged.sort(key=lambda t: t[0], reverse=True)
+    table = Table(title=f"Stale speculative dates (> {threshold}d)", show_lines=False)
+    for col in ("Age", "Title", "Channel", "Date", "Certainty"):
+        table.add_column(col)
+    for age, title, est in flagged:
+        assert isinstance(est, BestEstimate)
+        table.add_row(
+            f"{age}d",
+            title,
+            est.channel.value,
+            est.release_date.isoformat() if est.release_date else "—",
+            est.certainty.value,
+        )
+    console.print(table)
+    if not flagged:
+        console.print("[dim]No stale speculative dates. `rdt pull --all` keeps them fresh.[/]")
 
 
 # --- tracker helpers ------------------------------------------------------
@@ -468,43 +596,96 @@ def _fmt_when(when: date | None, precision: DatePrecision) -> str:
             return when.isoformat()
 
 
-def _render_upcoming(rows: list[views.UpcomingRow], days: int | None) -> None:
-    title = "Upcoming releases" + (f" · next {days}d" if days else "")
-    table = Table(title=title, show_lines=False)
-    # one line per row (ellipsis on overflow) so it reads as a compact spreadsheet;
-    # Date is never wrapped/truncated — it's the column the whole view is sorted on.
-    # all columns bounded so the total fits the terminal and rich never crushes the
-    # fixed sort-key (Date) / Kind to fit an unbounded column.
-    table.add_column("Date", min_width=10, no_wrap=True)  # hard floor: full date always
-    table.add_column("", width=1, no_wrap=True)
-    table.add_column("Title", min_width=18, max_width=32, no_wrap=True, overflow="ellipsis")
-    table.add_column("Kind", min_width=5, no_wrap=True)
-    table.add_column("Who", max_width=18, no_wrap=True, overflow="ellipsis")
+_FRESH_COLOR: dict[str, str] = {"fresh": "green", "aging": "yellow", "stale": "red"}
+
+
+def _fmt_cell(cell: views.DateCell | None) -> str:
+    """A date colored by stance: green = confirmed, yellow = speculative."""
+    if cell is None or cell.when is None:
+        return "[dim]—[/]"
+    text = _fmt_when(cell.when, cell.precision)
+    return f"[green]{text}[/]" if cell.confirmed else f"[yellow]{text}[/]"
+
+
+def _fresh_dot(freshness: views.Freshness | None) -> str:
+    return f"[{_FRESH_COLOR[freshness]}]●[/]" if freshness else "[dim]·[/]"
+
+
+def _title_cell(row: views.TrackRow) -> str:
+    return f"{row.title} [yellow]*[/]" if row.has_notes else row.title
+
+
+def _wcw(table: Table) -> None:
+    """The shared who/where/what columns."""
+    table.add_column("Who", max_width=16, no_wrap=True, overflow="ellipsis")
     table.add_column("Where", max_width=12, no_wrap=True, overflow="ellipsis")
-    table.add_column("What", max_width=46, no_wrap=True, overflow="ellipsis")
+    table.add_column("What", max_width=40, no_wrap=True, overflow="ellipsis")
+
+
+def _wcw_cells(r: views.TrackRow) -> tuple[str, str, str]:
+    return (
+        ", ".join(r.who) or "[dim]—[/]",
+        ", ".join(r.where) or "[dim]—[/]",
+        ", ".join(_fmt_tag(t) for t in r.what) or "[dim]—[/]",
+    )
+
+
+def _render_upcoming(rows: list[views.TrackRow], days: int | None) -> None:
+    title = "Upcoming releases" + (f" · next {days}d" if days else "")
+    region = (get_settings().regions or ("US",))[0]
+    table = Table(title=title, show_lines=False)
+    table.add_column(f"Theatrical {region}", min_width=10, no_wrap=True)
+    table.add_column("Digital", min_width=10, no_wrap=True)
+    table.add_column("⟳", width=1, no_wrap=True)
+    table.add_column("Title", min_width=18, max_width=30, no_wrap=True, overflow="ellipsis")
+    table.add_column("Kind", min_width=5, no_wrap=True)
+    _wcw(table)
     prev_month: tuple[int, int] | None = None
     for r in rows:
-        # a section line between months, so the spreadsheet clusters by month
-        month = (r.when.year, r.when.month) if r.when else (9999, 12)
+        month = (r.pivot_when.year, r.pivot_when.month) if r.pivot_when else (9999, 12)
         if prev_month is not None and month != prev_month:
-            table.add_section()
+            table.add_section()  # cluster the spreadsheet by month
         prev_month = month
         table.add_row(
-            _fmt_when(r.when, r.precision),
-            "[green]●[/]" if r.confirmed else "[yellow]○[/]",
-            r.title,
+            _fmt_cell(r.theatrical),
+            _fmt_cell(r.digital),
+            _fresh_dot(r.freshness),
+            _title_cell(r),
             r.kind.value,
-            ", ".join(r.who) or "[dim]—[/]",
-            ", ".join(r.where) or "[dim]—[/]",
-            ", ".join(_fmt_tag(t) for t in r.what) or "[dim]—[/]",
+            *_wcw_cells(r),
         )
     console.print(table)
     if rows:
         console.print(
-            "[dim]● confirmed  ○ speculative   ~theme = model-derived (a flagged guess)[/]"
+            "[dim]dates: [green]confirmed[/] / [yellow]speculative[/]   "
+            "⟳ [green]●[/]fresh [yellow]●[/]aging [red]●[/]stale   [yellow]*[/]=notes[/]"
         )
     else:
         console.print("[dim]No upcoming releases. `rdt add` then `rdt enrich`.[/]")
+
+
+def _render_available(rows: list[views.TrackRow]) -> None:
+    table = Table(title="Available now · unwatched", show_lines=False)
+    table.add_column("⟳", width=1, no_wrap=True)
+    table.add_column("Title", min_width=18, max_width=32, no_wrap=True, overflow="ellipsis")
+    table.add_column("Kind", min_width=5, no_wrap=True)
+    table.add_column("State", min_width=8, no_wrap=True)
+    _wcw(table)
+    for r in rows:
+        table.add_row(
+            _fresh_dot(r.freshness),
+            _title_cell(r),
+            r.kind.value,
+            r.state.value,
+            *_wcw_cells(r),
+        )
+    console.print(table)
+    if rows:
+        console.print(
+            "[dim]⟳ data freshness   [yellow]*[/]=notes   `rdt state <title> watched` to clear[/]"
+        )
+    else:
+        console.print("[dim]Nothing out + unwatched. Set state with `rdt state <title> want`.[/]")
 
 
 def _render_card(card: views.WorkCard) -> None:
