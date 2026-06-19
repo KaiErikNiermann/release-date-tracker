@@ -33,9 +33,12 @@ from release_tracker.models import (
     SourceTier,
 )
 from release_tracker.platforms import learn_predicted_platform
-from release_tracker.sources.base import Credit, MediaGraph
+from release_tracker.sources.base import Credit, MediaGraph, pinned_id
 from release_tracker.sources.igdb import IgdbSource
 from release_tracker.sources.tmdb import TmdbSource
+from release_tracker.titles import split_season
+
+_TV_KINDS = (MediaKind.TV, MediaKind.ANIME)
 
 log = get_logger("enrich")
 
@@ -101,7 +104,8 @@ async def enrich_work(
         summary.genres += 1
 
     if graph.series is not None:
-        _write_series(db, entity, graph.series, provider, now)
+        season = split_season(entity.title)[1] if entity.kind in _TV_KINDS else None
+        _write_series(db, entity, graph.series, provider, now, ordinal=season)
         summary.series = 1
 
     for name, predicted in platforms:
@@ -166,7 +170,13 @@ def _write_descriptor(
 
 
 def _write_series(
-    db: Database, entity: Entity, series: tuple[str, str | None], provider: str, now: datetime
+    db: Database,
+    entity: Entity,
+    series: tuple[str, str | None],
+    provider: str,
+    now: datetime,
+    *,
+    ordinal: int | None = None,
 ) -> None:
     name, source_id = series
     node = Node.create(NodeKind.SERIES, name, source=provider, source_id=source_id, owned=False)
@@ -176,6 +186,7 @@ def _write_series(
             src_id=entity.id,
             dst_id=node.id,
             relation=RelationKind.PART_OF_SERIES,
+            ordinal=ordinal,  # the season/part number, for "all seasons of X" queries
             source_provider=provider,
             source_tier=SourceTier.AGGREGATOR,
             confidence=0.9,
@@ -209,8 +220,8 @@ async def _fetch(
     key = settings.tmdb_api_key
     match entity.kind:
         case MediaKind.MOVIE:
-            tmdb_id = entity.external_ids.get("tmdb")
-            if not (tmdb_id and key):
+            tmdb_id, skip = pinned_id(entity.external_ids, "tmdb")
+            if skip or not (tmdb_id and key):
                 return None, []
             src = TmdbSource()
             graph = await src.movie_graph(client, key, tmdb_id)
@@ -218,16 +229,16 @@ async def _fetch(
             where = [(p, False) for p in actual] or await _predicted_where(graph, settings)
             return graph, where
         case MediaKind.TV | MediaKind.ANIME:
-            tmdb_id = entity.external_ids.get("tmdb")
-            if not (tmdb_id and key):
+            tmdb_id, skip = pinned_id(entity.external_ids, "tmdb")
+            if skip or not (tmdb_id and key):
                 return None, []
             src = TmdbSource()
             graph = await src.tv_graph(client, key, tmdb_id)
             actual = await src.tv_platforms(client, key, tmdb_id, settings.regions)
             return graph, [(p, False) for p in actual]
         case MediaKind.GAME:
-            igdb_id = entity.external_ids.get("igdb")
-            if not igdb_id:
+            igdb_id, skip = pinned_id(entity.external_ids, "igdb")
+            if skip or not igdb_id:
                 return None, []
             graph = await IgdbSource().game_graph(client, settings, igdb_id)
             return graph, [(p, False) for p in graph.platforms]

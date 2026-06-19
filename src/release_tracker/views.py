@@ -103,6 +103,17 @@ class WorkCard:
     platforms: tuple[PlatformLine, ...]
     tags: tuple[TagLine, ...]
     series: tuple[str, ...] = field(default_factory=tuple)
+    season: int | None = None  # this work's season/part number within its series
+
+
+@dataclass(frozen=True, slots=True)
+class SeasonEntry:
+    """One tracked season/part of a series, for the `seasons` walk."""
+
+    entity: Entity
+    season: int | None
+    when: date | None
+    owned: bool
 
 
 def next_release(db: Database, entity_id: str, today: date) -> BestEstimate | None:
@@ -216,8 +227,17 @@ def upcoming(
     return rows
 
 
+def _earliest_date(db: Database, entity_id: str) -> date | None:
+    dates = [
+        e.release_date for e in best_estimates(db.iter_observations(entity_id)) if e.release_date
+    ]
+    return min(dates) if dates else None
+
+
 def work_card(db: Database, entity: Entity) -> WorkCard:
-    """Full who/where/what + dates for one work (the `show` surface)."""
+    """Full who/where/what + dates for one work (the `card` surface)."""
+    series_edges = db.edges_from(entity.id, RelationKind.PART_OF_SERIES)
+    season = next((e.ordinal for e in series_edges if e.ordinal is not None), None)
     return WorkCard(
         entity=entity,
         estimates=_collapse_estimates(best_estimates(db.iter_observations(entity.id))),
@@ -225,7 +245,23 @@ def work_card(db: Database, entity: Entity) -> WorkCard:
         platforms=tuple(_platform_lines(db, entity.id)),
         tags=tuple(_tag_lines(db, entity.id)),
         series=_series_names(db, entity.id),
+        season=season,
     )
+
+
+def seasons_of_series(db: Database, series_node: Node) -> list[SeasonEntry]:
+    """Tracked seasons/parts of a series, ordered by season number (the `seasons` walk)."""
+    out: list[SeasonEntry] = []
+    for edge in db.edges_to(series_node.id, RelationKind.PART_OF_SERIES):
+        work = db.get_entity(edge.src_id)
+        if work is not None:
+            out.append(
+                SeasonEntry(
+                    work, edge.ordinal, _earliest_date(db, work.id), work_is_owned(db, work.id)
+                )
+            )
+    out.sort(key=lambda s: (s.season is None, s.season or 0, s.entity.title))
+    return out
 
 
 @dataclass(frozen=True, slots=True)

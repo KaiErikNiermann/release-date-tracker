@@ -91,6 +91,7 @@ CREATE TABLE IF NOT EXISTS edges (
     dst_id          TEXT NOT NULL,
     relation        TEXT NOT NULL,
     role            TEXT,
+    ordinal         INTEGER,
     source_provider TEXT NOT NULL,
     source_url      TEXT,
     source_tier     INTEGER NOT NULL,
@@ -116,7 +117,14 @@ class Database:
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.execute("PRAGMA journal_mode = WAL")
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Additive column migrations for dbs created before a column existed."""
+        edge_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(edges)")}
+        if "ordinal" not in edge_cols:
+            self._conn.execute("ALTER TABLE edges ADD COLUMN ordinal INTEGER")
 
     def close(self) -> None:
         self._conn.close()
@@ -391,11 +399,12 @@ def _insert_observation(conn: sqlite3.Connection, obs: ReleaseObservation) -> No
 def _insert_edge(conn: sqlite3.Connection, edge: Edge) -> None:
     conn.execute(
         """
-        INSERT INTO edges (id, src_id, dst_id, relation, role, source_provider,
+        INSERT INTO edges (id, src_id, dst_id, relation, role, ordinal, source_provider,
             source_url, source_tier, confidence, owned, fetched_at)
-        VALUES (:id, :src_id, :dst_id, :relation, :role, :source_provider,
+        VALUES (:id, :src_id, :dst_id, :relation, :role, :ordinal, :source_provider,
             :source_url, :source_tier, :confidence, :owned, :fetched_at)
         ON CONFLICT(id) DO UPDATE SET
+            ordinal=COALESCE(excluded.ordinal, edges.ordinal),
             source_url=COALESCE(excluded.source_url, edges.source_url),
             source_tier=excluded.source_tier,
             confidence=excluded.confidence,
@@ -408,6 +417,7 @@ def _insert_edge(conn: sqlite3.Connection, edge: Edge) -> None:
             "dst_id": edge.dst_id,
             "relation": edge.relation.value,
             "role": edge.role.value if edge.role else None,
+            "ordinal": edge.ordinal,
             "source_provider": edge.source_provider,
             "source_url": edge.source_url,
             "source_tier": int(edge.source_tier),
@@ -435,6 +445,7 @@ def _row_to_edge(row: sqlite3.Row) -> Edge:
         dst_id=row["dst_id"],
         relation=RelationKind(row["relation"]),
         role=CreditRole(row["role"]) if row["role"] else None,
+        ordinal=row["ordinal"],
         source_provider=row["source_provider"],
         source_url=row["source_url"],
         source_tier=SourceTier(row["source_tier"]),

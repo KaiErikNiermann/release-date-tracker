@@ -348,9 +348,12 @@ class TmdbSource:
         ]
         networks = _company_orgs(detail.get("networks"), CreditRole.NETWORK)
         cast_people = _cast_people(cast("dict[str, Any]", detail.get("credits", {})))
+        # the show itself is the series a tracked "Show: Season N" belongs to.
+        show_name = str(detail["name"]) if detail.get("name") else None
         return MediaGraph(
             credits=tuple(creators + networks + cast_people),
             genres=_genre_names(detail.get("genres")),
+            series=(show_name, str(tmdb_id)) if show_name else None,
             summary=str(detail["overview"]) if detail.get("overview") else None,
         )
 

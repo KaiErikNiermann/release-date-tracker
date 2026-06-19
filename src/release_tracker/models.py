@@ -327,6 +327,7 @@ class Edge(BaseModel):
     dst_id: str
     relation: RelationKind
     role: CreditRole | None = None  # set for CREDITED_ON
+    ordinal: int | None = None  # the season/part number for PART_OF_SERIES, if any
     source_provider: str = "unknown"  # tmdb / igdb / steam / openai / user
     source_url: str | None = None
     source_tier: SourceTier = SourceTier.AGGREGATOR

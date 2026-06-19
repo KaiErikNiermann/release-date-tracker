@@ -126,6 +126,39 @@ def test_works_by_node_one_hop(tmp_path: Path) -> None:
     assert all(w.owned for w in works)  # the works themselves are user-owned
 
 
+def test_seasons_of_series_orders_by_ordinal(tmp_path: Path) -> None:
+    db = Database(tmp_path / "v.db")
+    show = Node.create(NodeKind.SERIES, "Severance", source="tmdb", source_id="95396")
+    db.upsert_node(show)
+    for title, season, when in (
+        ("Severance: Season 3", 3, date(2027, 1, 1)),  # inserted out of order
+        ("Severance: Season 2", 2, date(2025, 1, 17)),
+    ):
+        work = _seed_work(db, title, when)
+        db.upsert_edge(
+            Edge(
+                src_id=work.id,
+                dst_id=show.id,
+                relation=RelationKind.PART_OF_SERIES,
+                ordinal=season,
+                source_provider="tmdb",
+                source_tier=SourceTier.AGGREGATOR,
+            )
+        )
+    stored = db.get_node(show.id)
+    assert stored is not None
+    entries = views.seasons_of_series(db, stored)
+    assert [(e.season, e.entity.title) for e in entries] == [
+        (2, "Severance: Season 2"),
+        (3, "Severance: Season 3"),
+    ]
+    assert entries[0].when == date(2025, 1, 17)  # ordinal + date survive the round-trip
+    # and the work card exposes the season number
+    card = views.work_card(db, entries[1].entity)
+    assert card.season == 3
+    assert card.series == ("Severance",)
+
+
 def test_work_card_groups_who_where_what(tmp_path: Path) -> None:
     db = Database(tmp_path / "v.db")
     work = _seed_work(db, "Dune", date(2026, 7, 1))
