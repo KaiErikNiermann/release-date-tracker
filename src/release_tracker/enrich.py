@@ -43,7 +43,6 @@ from release_tracker.sources.igdb import IgdbSource
 from release_tracker.sources.tmdb import TmdbSource
 from release_tracker.titles import extract_part, split_season
 
-_TV_KINDS = (MediaKind.TV, MediaKind.ANIME)
 _THEATRICAL_CHANNELS = (
     ReleaseChannel.THEATRICAL,
     ReleaseChannel.THEATRICAL_LIMITED,
@@ -113,8 +112,13 @@ async def enrich_work(
         )
         summary.genres += 1
 
+    if graph.is_anime:  # medium/origin tag (orthogonal to format), sourced + high-trust
+        _write_descriptor(
+            db, entity, "anime", DescriptorKind.ORIGIN, provider, SourceTier.AGGREGATOR, now
+        )
+
     if graph.series is not None:
-        is_tv = entity.kind in _TV_KINDS
+        is_tv = entity.kind is MediaKind.TV
         season = split_season(entity.title)[1] if is_tv else None
         part = extract_part(entity.title) if is_tv else None
         _write_series(db, entity, graph.series, provider, now, ordinal=season, part=part)
@@ -286,7 +290,7 @@ async def _fetch(
             actual = await src.movie_platforms(client, key, tmdb_id, settings.regions)
             where = [(p, False) for p in actual] or await _predicted_where(graph, settings)
             return graph, where
-        case MediaKind.TV | MediaKind.ANIME:
+        case MediaKind.TV:
             tmdb_id, skip = pinned_id(entity.external_ids, "tmdb")
             if skip or not (tmdb_id and key):
                 return None, []

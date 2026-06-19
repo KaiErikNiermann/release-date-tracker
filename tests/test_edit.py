@@ -59,6 +59,43 @@ def test_rename_keeps_id_and_aliases_old_title(edit_db: Path) -> None:
     assert node is not None and node.name == "The Announced Name"  # node label synced
 
 
+def test_kind_reclassifies_in_place(edit_db: Path) -> None:
+    # an anime film mis-captured as the wrong format -> fix the kind, keep the id
+    db0 = Database(edit_db)
+    ent = next(db0.iter_entities())  # seeded as MOVIE
+    db0.close()
+    res = runner.invoke(cli.app, ["edit", "kind", ent.id, "tv"])
+    assert res.exit_code == 0
+    db = Database(edit_db)
+    changed = db.get_entity(ent.id)
+    db.close()
+    assert changed is not None and changed.kind is MediaKind.TV
+    assert changed.id == ent.id  # stable handle survives a re-kind
+
+
+def test_kind_rejects_unknown_and_noops_on_same(edit_db: Path) -> None:
+    db0 = Database(edit_db)
+    ent = next(db0.iter_entities())
+    db0.close()
+    assert runner.invoke(cli.app, ["edit", "kind", ent.id, "nonsense"]).exit_code != 0
+    same = runner.invoke(cli.app, ["edit", "kind", ent.id, "movie"])  # already movie
+    assert same.exit_code == 0 and "already" in same.output
+
+
+def test_tag_origin_attaches_origin_descriptor(edit_db: Path) -> None:
+    db0 = Database(edit_db)
+    ent = next(db0.iter_entities())
+    db0.close()
+    runner.invoke(cli.app, ["edit", "tag", ent.id, "anime", "--origin"])
+    db = Database(edit_db)
+    (edge,) = db.edges_from(ent.id, RelationKind.EXHIBITS)
+    node = db.get_node(edge.dst_id)
+    db.close()
+    assert node is not None
+    assert node.descriptor_kind is DescriptorKind.ORIGIN
+    assert node.name == "anime"
+
+
 def test_credit_then_uncredit_round_trips(edit_db: Path) -> None:
     db0 = Database(edit_db)
     ent = next(db0.iter_entities())
@@ -110,9 +147,7 @@ def test_credit_rejects_malformed_pin(edit_db: Path) -> None:
     db0 = Database(edit_db)
     ent = next(db0.iter_entities())
     db0.close()
-    res = runner.invoke(
-        cli.app, ["edit", "credit", ent.id, "X", "director", "--pin", "nocolon"]
-    )
+    res = runner.invoke(cli.app, ["edit", "credit", ent.id, "X", "director", "--pin", "nocolon"])
     assert res.exit_code != 0
 
 

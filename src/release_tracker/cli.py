@@ -183,7 +183,7 @@ def entities() -> None:
 def rd(
     name: Annotated[str, typer.Argument(help="title to look up, e.g. 'Dune Part Two'")],
     kind: Annotated[
-        str | None, typer.Option(help="movie|tv|game|anime|tech — auto-detected if omitted")
+        str | None, typer.Option(help="movie|tv|game|tech — auto-detected if omitted")
     ] = None,
     region: Annotated[
         str | None,
@@ -316,7 +316,7 @@ def _render(rows: list[tuple[str, MediaKind, object]]) -> None:
 def add(
     name: Annotated[str, typer.Argument(help="title to track, e.g. 'Dishonored 3'")],
     kind: Annotated[
-        str | None, typer.Option(help="movie|tv|game|anime|tech|...; detected on enrich if omitted")
+        str | None, typer.Option(help="movie|tv|game|tech|...; detected on enrich if omitted")
     ] = None,
     now: Annotated[bool, typer.Option("--now", help="resolve + enrich immediately")] = False,
     no_themes: Annotated[
@@ -921,6 +921,40 @@ def edit_rename(
     console.print(f"[green]Renamed[/] [dim]{old}[/] → [bold]{title}[/] [dim]({entity.id})[/]")
 
 
+@edit_app.command("kind")
+def edit_kind(
+    ref: Annotated[str, typer.Argument(help="entity id or title substring")],
+    kind: Annotated[str, typer.Argument(help="movie | tv | game | book | comic | …")],
+) -> None:
+    """Reclassify a work's format (e.g. an anime film mis-captured as tv -> movie).
+
+    The kind drives source routing (movie vs tv graph); the stable id is unchanged,
+    so observations/edges/notes stay attached. "anime" is NOT a kind — it's an origin
+    tag, so capture an anime film as movie / a series as tv (`rdt edit tag … --origin`).
+    """
+    configure_logging()
+    try:
+        new_kind = MediaKind(kind.lower())
+    except ValueError:
+        valid = ", ".join(k.value for k in MediaKind)
+        raise typer.BadParameter(f"kind must be one of: {valid}") from None
+    db = _db()
+    entity = _edit_entity(db, ref)
+    if entity is None:
+        raise typer.Exit(1)
+    if entity.kind is new_kind:
+        db.close()
+        console.print(f"[dim]{entity.title} is already {new_kind.value}.[/]")
+        return
+    old = entity.kind
+    db.upsert_entity(entity.model_copy(update={"kind": new_kind}))
+    db.close()
+    console.print(
+        f"[green]Reclassified[/] {entity.title}: [dim]{old.value}[/] → [bold]{new_kind.value}[/] "
+        f'[dim](re-run `rdt enrich "{entity.title}"` to refresh the graph)[/]'
+    )
+
+
 @edit_app.command("alias")
 def edit_alias(
     ref: Annotated[str, typer.Argument(help="entity id or title substring")],
@@ -1028,18 +1062,23 @@ def edit_uncredit(
 @edit_app.command("tag")
 def edit_tag(
     ref: Annotated[str, typer.Argument(help="the work (id or title)")],
-    descriptor: Annotated[str, typer.Argument(help="a genre or theme to attach")],
+    descriptor: Annotated[str, typer.Argument(help="a genre, theme, or origin to attach")],
     theme: Annotated[
         bool, typer.Option("--theme", help="tag as a soft theme instead of a genre")
     ] = False,
+    origin: Annotated[
+        bool, typer.Option("--origin", help="tag as a medium/origin, e.g. anime")
+    ] = False,
 ) -> None:
-    """Attach a what-edge: tag a work with a genre (default) or theme."""
+    """Attach a what-edge: tag a work with a genre (default), theme, or origin."""
     configure_logging()
     db = _db()
     entity = _edit_entity(db, ref)
     if entity is None:
         raise typer.Exit(1)
-    kind = DescriptorKind.THEME if theme else DescriptorKind.GENRE
+    kind = (
+        DescriptorKind.ORIGIN if origin else DescriptorKind.THEME if theme else DescriptorKind.GENRE
+    )
     node = Node.create(NodeKind.DESCRIPTOR, descriptor, descriptor_kind=kind, owned=True)
     db.upsert_node(node)
     db.upsert_edge(
@@ -1352,6 +1391,9 @@ def _render_card(card: views.WorkCard) -> None:
     if card.tags:
         # bucket by descriptor kind (a user-authored theme is OFFICIAL-tier, not a genre);
         # predicted themes get a "~" prefix, matching the platform convention above.
+        origins = [t.name for t in card.tags if t.kind is DescriptorKind.ORIGIN]
+        if origins:
+            console.print(f"[bold]Origin[/] {', '.join(origins)}")
         genres = [t.name for t in card.tags if t.kind is DescriptorKind.GENRE]
         themes = [
             f"~{t.name}" if t.predicted else t.name
@@ -1452,7 +1494,7 @@ def resolve_list(
 @resolve_app.command("search")
 def resolve_search(
     query: str,
-    kind: Annotated[str, typer.Option(help="movie|tv|game|anime")] = "movie",
+    kind: Annotated[str, typer.Option(help="movie|tv|game")] = "movie",
     limit: Annotated[int, typer.Option()] = 6,
 ) -> None:
     """Hardened candidate search for a raw query (no entity needed)."""

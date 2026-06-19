@@ -40,6 +40,7 @@ class MediaGraph:
     platforms: tuple[str, ...] = ()
     series: tuple[str, str | None] | None = None  # (name, source_id)
     summary: str | None = None  # plot/overview — grounding for LLM theme extraction
+    is_anime: bool = False  # Japanese animation -> an "anime" origin tag (orthogonal to format)
 
 
 @dataclass(slots=True)

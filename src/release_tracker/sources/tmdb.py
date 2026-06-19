@@ -69,7 +69,7 @@ class TmdbSource:
     name = "tmdb"
 
     def supports(self, kind: MediaKind) -> bool:
-        return kind in (MediaKind.MOVIE, MediaKind.TV, MediaKind.ANIME)
+        return kind in (MediaKind.MOVIE, MediaKind.TV)
 
     async def pull(
         self, client: httpx.AsyncClient, entity: Entity, settings: Settings
@@ -324,11 +324,13 @@ class TmdbSource:
             if isinstance(collection, dict) and collection.get("name")
             else None
         )
+        genres = _genre_names(detail.get("genres"))
         return MediaGraph(
             credits=tuple(people + orgs),
-            genres=_genre_names(detail.get("genres")),
+            genres=genres,
             series=series,
             summary=str(detail["overview"]) if detail.get("overview") else None,
+            is_anime=is_anime(detail, genres),
         )
 
     async def tv_graph(self, client: httpx.AsyncClient, key: str, tmdb_id: str) -> MediaGraph:
@@ -350,11 +352,13 @@ class TmdbSource:
         cast_people = _cast_people(cast("dict[str, Any]", detail.get("credits", {})))
         # the show itself is the series a tracked "Show: Season N" belongs to.
         show_name = str(detail["name"]) if detail.get("name") else None
+        genres = _genre_names(detail.get("genres"))
         return MediaGraph(
             credits=tuple(creators + networks + cast_people),
-            genres=_genre_names(detail.get("genres")),
+            genres=genres,
             series=(show_name, str(tmdb_id)) if show_name else None,
             summary=str(detail["overview"]) if detail.get("overview") else None,
+            is_anime=is_anime(detail, genres),
         )
 
     async def tv_platforms(
@@ -425,6 +429,22 @@ def _genre_names(genres: object) -> tuple[str, ...]:
         for g in cast("list[Any]", genres or [])
         if isinstance(g, dict) and g.get("name")
     )
+
+
+def is_anime(detail: dict[str, Any], genres: tuple[str, ...]) -> bool:
+    """Japanese-origin animation => anime. Keyless heuristic: Animation genre AND a JP
+    signal (origin/production country JP, or Japanese original language). Country, not
+    language, is the load-bearing test — JP/US co-pros (e.g. Lazarus) air in English.
+    """
+    if "Animation" not in genres:
+        return False
+    countries = set(cast("list[str]", detail.get("origin_country") or []))
+    countries.update(
+        str(c["iso_3166_1"])
+        for c in cast("list[Any]", detail.get("production_countries") or [])
+        if isinstance(c, dict) and c.get("iso_3166_1")
+    )
+    return "JP" in countries or detail.get("original_language") == "ja"
 
 
 def _parse_tmdb_date(value: object) -> date | None:

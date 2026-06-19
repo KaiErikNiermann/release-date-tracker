@@ -195,7 +195,7 @@ async def lookup(
                     client, settings, tmdb_id, observations
                 )
                 price = None
-            case MediaKind.TV | MediaKind.ANIME:
+            case MediaKind.TV:
                 claims, streaming, notes = await _tv_claims(client, settings, tmdb_id, observations)
                 price = None
             case _:  # game / tech

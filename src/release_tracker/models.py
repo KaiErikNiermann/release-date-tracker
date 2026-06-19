@@ -36,8 +36,10 @@ class MediaKind(enum.StrEnum):
     MUSIC = "music"
     PODCAST = "podcast"
     COMIC = "comic"
-    ANIME = "anime"
     OTHER = "other"
+    # NOTE: "anime" is deliberately NOT a kind — it's a medium/origin, orthogonal to
+    # format. An anime film is kind=MOVIE, an anime series is kind=TV; the anime-ness
+    # is a DescriptorKind.ORIGIN tag (see enrich's JP-animation detection).
 
 
 class ReleaseChannel(enum.StrEnum):
@@ -301,6 +303,7 @@ class DescriptorKind(enum.StrEnum):
     THEME = "theme"
     MOOD = "mood"
     STYLE = "style"
+    ORIGIN = "origin"  # medium/provenance, e.g. "anime" — sourced, high-trust like GENRE
 
 
 class RelationKind(enum.StrEnum):

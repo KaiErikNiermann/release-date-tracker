@@ -30,7 +30,6 @@ log = get_logger("matching")
 REQUIRED_ID: dict[MediaKind, str] = {
     MediaKind.MOVIE: "tmdb",
     MediaKind.TV: "tmdb",
-    MediaKind.ANIME: "tmdb",
     MediaKind.GAME: "igdb",
 }
 

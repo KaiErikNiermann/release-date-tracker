@@ -17,7 +17,10 @@ NOTION_TYPE_TO_KIND: dict[str, MediaKind] = {
     "Music Album": MediaKind.MUSIC,
     "Podcast": MediaKind.PODCAST,
     "Comic/Manga": MediaKind.COMIC,
-    "Anime": MediaKind.ANIME,
+    # "Anime" is a medium, not a format — default to a series (the common case);
+    # enrich tags the anime origin, and an anime film is re-kinded to movie by hand
+    # (`rdt edit kind`). Notion has no movie/series split for it, so TV is the guess.
+    "Anime": MediaKind.TV,
     "Technology": MediaKind.TECH,
 }
 
