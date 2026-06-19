@@ -134,7 +134,7 @@ def entities() -> None:
     configure_logging()
     db = _db()
     table = Table(title="Tracked entities", show_lines=False)
-    table.add_column("Title")
+    table.add_column("Title", width=40)
     table.add_column("Kind")
     table.add_column("Watch")
     table.add_column("External IDs")
@@ -281,6 +281,9 @@ def enrich(
     all_entities: Annotated[
         bool, typer.Option("--all", help="enrich every watched entity")
     ] = False,
+    kind: Annotated[
+        str | None, typer.Option(help="with --all, restrict to a MediaKind (e.g. tv)")
+    ] = None,
     no_themes: Annotated[
         bool, typer.Option("--no-themes", help="skip LLM theme extraction")
     ] = False,
@@ -288,9 +291,14 @@ def enrich(
     """Resolve + populate the who/where/what graph for one entity or --all."""
     configure_logging()
     settings = get_settings()
+    kind_filter = MediaKind(kind) if kind else None
     db = _db()
     if all_entities:
-        targets = list(db.iter_entities(watched_only=True))
+        targets = [
+            e
+            for e in db.iter_entities(watched_only=True)
+            if kind_filter is None or e.kind is kind_filter
+        ]
     elif ref:
         entity = _resolve_ref(db, ref)
         if entity is None:
@@ -301,10 +309,13 @@ def enrich(
         db.close()
         raise typer.BadParameter("pass an entity ref or --all")
     for entity in targets:
-        summary = asyncio.run(
-            _resolve_and_enrich(db, settings, entity, include_themes=not no_themes)
-        )
-        _print_enrich(entity, summary)
+        try:
+            summary = asyncio.run(
+                _resolve_and_enrich(db, settings, entity, include_themes=not no_themes)
+            )
+            _print_enrich(entity, summary)
+        except Exception as exc:  # one bad entity must not abort a 120-item batch
+            console.print(f"[red]Failed[/] {entity.title}: {exc}")
     db.close()
 
 
@@ -358,6 +369,32 @@ def who(name: Annotated[str, typer.Argument(help="person or studio name")]) -> N
             w.entity.title,
             w.entity.kind.value,
             "[green]✓ yours[/]" if w.owned else "[dim]world[/]",
+        )
+    console.print(table)
+
+
+@app.command()
+def seasons(show: Annotated[str, typer.Argument(help="show / franchise name")]) -> None:
+    """List the tracked seasons or parts of a series, ordered (a one-hop walk)."""
+    configure_logging()
+    db = _db()
+    nodes = db.find_nodes(show, node_kind=NodeKind.SERIES)
+    if not nodes:
+        db.close()
+        console.print(f"[yellow]No series[/] matching '{show}'. Enrich some TV/movie works first.")
+        raise typer.Exit(1)
+    node = nodes[0]
+    entries = views.seasons_of_series(db, node)
+    db.close()
+    table = Table(title=f"{node.name} — {len(entries)} tracked", show_lines=False)
+    for col in ("Season", "Title", "Date", "Owned"):
+        table.add_column(col)
+    for s in entries:
+        table.add_row(
+            f"S{s.season}" if s.season is not None else "[dim]—[/]",
+            s.entity.title,
+            s.when.isoformat() if s.when else "—",
+            "[green]✓ yours[/]" if s.owned else "[dim]world[/]",
         )
     console.print(table)
 
@@ -416,17 +453,44 @@ def _fmt_tag(tag: views.TagLine) -> str:
     return f"[dim]~{tag.name}[/]" if tag.predicted else tag.name
 
 
+def _fmt_when(when: date | None, precision: DatePrecision) -> str:
+    """Render a date at its own precision, so the string conveys how firm it is."""
+    if when is None:
+        return "—"
+    match precision:
+        case DatePrecision.YEAR:
+            return str(when.year)
+        case DatePrecision.QUARTER:
+            return f"{when.year} Q{(when.month - 1) // 3 + 1}"
+        case DatePrecision.MONTH:
+            return when.strftime("%Y-%m")
+        case _:
+            return when.isoformat()
+
+
 def _render_upcoming(rows: list[views.UpcomingRow], days: int | None) -> None:
     title = "Upcoming releases" + (f" · next {days}d" if days else "")
     table = Table(title=title, show_lines=False)
-    for col in ("Date", "", "Title", "Kind", "Who", "Where", "What"):
-        table.add_column(col)
+    # one line per row (ellipsis on overflow) so it reads as a compact spreadsheet;
+    # Date is never wrapped/truncated — it's the column the whole view is sorted on.
+    # all columns bounded so the total fits the terminal and rich never crushes the
+    # fixed sort-key (Date) / Kind to fit an unbounded column.
+    table.add_column("Date", min_width=10, no_wrap=True)  # hard floor: full date always
+    table.add_column("", width=1, no_wrap=True)
+    table.add_column("Title", min_width=18, max_width=32, no_wrap=True, overflow="ellipsis")
+    table.add_column("Kind", min_width=5, no_wrap=True)
+    table.add_column("Who", max_width=18, no_wrap=True, overflow="ellipsis")
+    table.add_column("Where", max_width=12, no_wrap=True, overflow="ellipsis")
+    table.add_column("What", max_width=46, no_wrap=True, overflow="ellipsis")
+    prev_month: tuple[int, int] | None = None
     for r in rows:
-        when = r.when.isoformat() if r.when else "—"
-        if r.precision is not DatePrecision.EXACT:
-            when += f" [dim]~{r.precision.value[0]}[/]"
+        # a section line between months, so the spreadsheet clusters by month
+        month = (r.when.year, r.when.month) if r.when else (9999, 12)
+        if prev_month is not None and month != prev_month:
+            table.add_section()
+        prev_month = month
         table.add_row(
-            when,
+            _fmt_when(r.when, r.precision),
             "[green]●[/]" if r.confirmed else "[yellow]○[/]",
             r.title,
             r.kind.value,
@@ -445,7 +509,12 @@ def _render_upcoming(rows: list[views.UpcomingRow], days: int | None) -> None:
 
 def _render_card(card: views.WorkCard) -> None:
     e = card.entity
-    series = f" [dim]· {', '.join(card.series)}[/]" if card.series else ""
+    if card.series:
+        name = ", ".join(card.series)
+        label = f"Season {card.season} of {name}" if card.season is not None else name
+        series = f" [dim]· {label}[/]"
+    else:
+        series = ""
     console.print(f"[bold]{e.title}[/] [dim]({e.kind.value})[/]{series}")
     _render([(e.title, e.kind, est) for est in card.estimates])
     if card.credits:
