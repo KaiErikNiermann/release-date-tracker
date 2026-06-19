@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
 from release_tracker.config import Settings
-from release_tracker.models import Entity, MediaKind, ReleaseObservation
+from release_tracker.models import ConsumptionState, Entity, MediaKind, ReleaseObservation
 
 # Notion `Type` select option -> our MediaKind.
 NOTION_TYPE_TO_KIND: dict[str, MediaKind] = {
@@ -20,6 +20,19 @@ NOTION_TYPE_TO_KIND: dict[str, MediaKind] = {
     "Anime": MediaKind.ANIME,
     "Technology": MediaKind.TECH,
 }
+
+# Notion `Status` (watch progress) -> our ConsumptionState.
+NOTION_STATUS_TO_STATE: dict[str, ConsumptionState] = {
+    "to Watch": ConsumptionState.WANT,
+    "Want to Watch/Play": ConsumptionState.WANT,
+    "Currently Watching/Playing": ConsumptionState.WATCHING,
+    "Watched/Played": ConsumptionState.WATCHED,
+}
+
+
+def parse_consumption_state(value: str | None) -> ConsumptionState:
+    """Map a Notion Status option to a ConsumptionState (UNSET when unknown/empty)."""
+    return NOTION_STATUS_TO_STATE.get(value or "", ConsumptionState.UNSET)
 
 
 @dataclass(slots=True)

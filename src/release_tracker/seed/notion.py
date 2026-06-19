@@ -27,7 +27,7 @@ from release_tracker.models import (
     ReleaseObservation,
     SourceTier,
 )
-from release_tracker.seed.base import SeedBundle, parse_kind
+from release_tracker.seed.base import SeedBundle, parse_consumption_state, parse_kind
 
 log = get_logger("seed.notion")
 
@@ -94,6 +94,7 @@ class NotionSeed:
             kind=kind,
             notes=_rich_text(props.get("Notes")) or None,
             notion_page_id=str(page.get("id")),
+            consumption_state=parse_consumption_state(_status(props.get("Status"))),
         )
         bundle.entities.append(entity)
 

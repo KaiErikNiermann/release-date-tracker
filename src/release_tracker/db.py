@@ -20,6 +20,7 @@ from pathlib import Path
 
 from release_tracker.models import (
     Certainty,
+    ConsumptionState,
     CreditRole,
     DatePrecision,
     DescriptorKind,
@@ -45,6 +46,7 @@ CREATE TABLE IF NOT EXISTS entities (
     notion_page_id  TEXT,
     notes           TEXT,
     watch           INTEGER NOT NULL DEFAULT 1,
+    consumption_state TEXT NOT NULL DEFAULT 'unset',
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
 );
@@ -103,6 +105,15 @@ CREATE TABLE IF NOT EXISTS edges (
 CREATE INDEX IF NOT EXISTS idx_nodes_kind ON nodes(node_kind);
 CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst_id, relation);
 CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src_id, relation);
+
+-- freeform, timestamped per-media notes (a log; distinct from Entity.notes)
+CREATE TABLE IF NOT EXISTS media_notes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id   TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    body        TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_notes_entity ON media_notes(entity_id);
 """
 
 
@@ -125,6 +136,11 @@ class Database:
         edge_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(edges)")}
         if "ordinal" not in edge_cols:
             self._conn.execute("ALTER TABLE edges ADD COLUMN ordinal INTEGER")
+        entity_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(entities)")}
+        if "consumption_state" not in entity_cols:
+            self._conn.execute(
+                "ALTER TABLE entities ADD COLUMN consumption_state TEXT NOT NULL DEFAULT 'unset'"
+            )
 
     def close(self) -> None:
         self._conn.close()
@@ -145,9 +161,9 @@ class Database:
             conn.execute(
                 """
                 INSERT INTO entities (id, title, kind, aliases, external_ids,
-                    notion_page_id, notes, watch, created_at, updated_at)
+                    notion_page_id, notes, watch, consumption_state, created_at, updated_at)
                 VALUES (:id, :title, :kind, :aliases, :external_ids,
-                    :notion_page_id, :notes, :watch, :now, :now)
+                    :notion_page_id, :notes, :watch, :consumption_state, :now, :now)
                 ON CONFLICT(id) DO UPDATE SET
                     title=excluded.title,
                     kind=excluded.kind,
@@ -157,6 +173,11 @@ class Database:
                     notion_page_id=COALESCE(excluded.notion_page_id, entities.notion_page_id),
                     notes=COALESCE(excluded.notes, entities.notes),
                     watch=excluded.watch,
+                    -- a stateless pull (unset) must not clobber a known state; a real
+                    -- state (Notion seed / CLI) does update.
+                    consumption_state=CASE
+                        WHEN excluded.consumption_state = 'unset' THEN entities.consumption_state
+                        ELSE excluded.consumption_state END,
                     updated_at=:now
                 """,
                 {
@@ -168,6 +189,7 @@ class Database:
                     "notion_page_id": entity.notion_page_id,
                     "notes": entity.notes,
                     "watch": int(entity.watch),
+                    "consumption_state": entity.consumption_state.value,
                     "now": now,
                 },
             )
@@ -185,6 +207,36 @@ class Database:
             conn.execute("DELETE FROM entities WHERE id = ?", (entity_id,))  # cascades observations
             conn.execute("DELETE FROM nodes WHERE id = ?", (entity_id,))
             conn.execute("DELETE FROM edges WHERE src_id = ? OR dst_id = ?", (entity_id, entity_id))
+
+    def set_consumption_state(self, entity_id: str, state: ConsumptionState) -> bool:
+        """Directly set an entity's watch/play state (can also clear to UNSET)."""
+        with self._tx() as conn:
+            cur = conn.execute(
+                "UPDATE entities SET consumption_state = ?, updated_at = ? WHERE id = ?",
+                (state.value, datetime.now(UTC).isoformat(), entity_id),
+            )
+            return cur.rowcount > 0
+
+    # -- media notes (freeform, timestamped) -------------------------------
+    def add_note(self, entity_id: str, body: str) -> None:
+        with self._tx() as conn:
+            conn.execute(
+                "INSERT INTO media_notes (entity_id, body, created_at) VALUES (?, ?, ?)",
+                (entity_id, body, datetime.now(UTC).isoformat()),
+            )
+
+    def iter_notes(self, entity_id: str) -> list[tuple[date, str]]:
+        """All notes for an entity, newest first, as (created_date, body)."""
+        rows = self._conn.execute(
+            "SELECT created_at, body FROM media_notes WHERE entity_id = ? ORDER BY created_at DESC",
+            (entity_id,),
+        )
+        return [(datetime.fromisoformat(r[0]).date(), r[1]) for r in rows]
+
+    def note_counts(self) -> dict[str, int]:
+        """entity_id -> number of notes, for cheaply flagging which works have notes."""
+        rows = self._conn.execute("SELECT entity_id, count(*) FROM media_notes GROUP BY entity_id")
+        return {r[0]: r[1] for r in rows}
 
     def iter_entities(self, *, watched_only: bool = False) -> Iterator[Entity]:
         sql = "SELECT * FROM entities"
@@ -465,6 +517,7 @@ def _row_to_entity(row: sqlite3.Row) -> Entity:
         notion_page_id=row["notion_page_id"],
         notes=row["notes"],
         watch=bool(row["watch"]),
+        consumption_state=ConsumptionState(row["consumption_state"]),
     )
 
 

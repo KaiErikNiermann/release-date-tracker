@@ -99,6 +99,20 @@ class Certainty(enum.StrEnum):
     DELAYED = "delayed"  # a superseding claim that pushes a date back
 
 
+class ConsumptionState(enum.StrEnum):
+    """The user's watch/play progress for a title (seeded from Notion's Status).
+
+    Orthogonal to availability (whether it's released — that's derived from dates)
+    and to ``Entity.watch`` (whether the pipeline should re-resolve it).
+    """
+
+    UNSET = "unset"
+    WANT = "want"  # to watch / want to watch/play
+    WATCHING = "watching"  # currently watching/playing
+    WATCHED = "watched"  # watched / played (done)
+    DROPPED = "dropped"  # abandoned
+
+
 class SourceTier(enum.IntEnum):
     """Trust ranking of a source — higher wins ties and weights confidence."""
 
@@ -138,6 +152,8 @@ class Entity(BaseModel):
     notes: str | None = None
     # whether the pipeline should actively re-resolve this entity
     watch: bool = True
+    # the user's watch/play progress (seeded from Notion Status, set via `rdt state`)
+    consumption_state: ConsumptionState = ConsumptionState.UNSET
 
     @staticmethod
     def make_id(title: str, kind: MediaKind) -> str:
@@ -204,6 +220,7 @@ class BestEstimate(BaseModel):
     price: Money | None
     confidence: float
     supporting_observation_ids: tuple[str, ...]
+    fetched_at: datetime | None = None  # when the winning observation was last refreshed
 
 
 # --- the media graph (who / where / what) ---------------------------------
