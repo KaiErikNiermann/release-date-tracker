@@ -106,7 +106,9 @@ class TrackRow:
 
     ``theatrical`` is movie-only (region-scoped); ``digital`` is the "when can I
     actually watch it" date (digital for movies, the single release for tv/games).
-    ``pivot_when`` is the date that governs availability per the configured channel.
+    ``pivot_when`` is the date that governs availability per the configured channel;
+    ``pivot_confirmed`` is whether that date is a confirmed release (vs a speculative
+    estimate) — only a confirmed, elapsed pivot makes a work actually "available".
     """
 
     entity_id: str
@@ -115,6 +117,7 @@ class TrackRow:
     theatrical: DateCell | None
     digital: DateCell | None
     pivot_when: date | None
+    pivot_confirmed: bool
     who: tuple[str, ...]
     where: tuple[str, ...]
     what: tuple[TagLine, ...]
@@ -167,11 +170,18 @@ def _pick(
     *,
     region: str | None = None,
 ) -> BestEstimate | None:
-    """Soonest dated estimate matching ``channels`` (any if None), preferring ``region``."""
+    """Soonest dated estimate matching ``channels`` (any if None), preferring ``region``.
+
+    Confirmed dates win over speculative ones: a wishlist/early *estimated* date must
+    not shadow the real *confirmed* release (e.g. a game with a speculative early-access
+    guess and a confirmed launch). Only fall back to speculative when nothing is confirmed.
+    """
     cands = [e for e in estimates if e.release_date and (channels is None or e.channel in channels)]
     if region is not None:
         cands = [e for e in cands if e.region == region] or cands  # fall back to any region
-    return min(cands, key=lambda e: e.release_date or date.max) if cands else None
+    confirmed = [e for e in cands if e.certainty is Certainty.CONFIRMED]
+    pool = confirmed or cands
+    return min(pool, key=lambda e: e.release_date or date.max) if pool else None
 
 
 def _cell(est: BestEstimate | None) -> DateCell | None:
@@ -212,6 +222,7 @@ def _track_row(
         theatrical=_cell(theatrical),
         digital=_cell(digital),
         pivot_when=pivot.release_date if pivot else None,
+        pivot_confirmed=pivot is not None and pivot.certainty is Certainty.CONFIRMED,
         who=tuple(dict.fromkeys(c.name for c in credits))[:2],
         where=tuple(p.name for p in _platform_lines(db, entity.id)[:2]),
         what=tuple(_tag_lines(db, entity.id)[:4]),
@@ -316,12 +327,20 @@ def available(
     *,
     kind: MediaKind | None = None,
 ) -> list[TrackRow]:
-    """Works that are out (pivot date passed) and unfinished (want/watching), newest first."""
+    """Works that are out and unfinished (want/watching), newest first.
+
+    "Out" requires a *confirmed* consumption date that has elapsed — a speculative
+    estimate that happens to be in the past does not make a work available (we don't
+    actually know it released).
+    """
     watch_states = (ConsumptionState.WANT, ConsumptionState.WATCHING)
     rows = [
         r
         for r in _track_rows(db, today, settings, kind=kind)
-        if r.pivot_when is not None and r.pivot_when < today and r.state in watch_states
+        if r.pivot_when is not None
+        and r.pivot_when < today
+        and r.pivot_confirmed
+        and r.state in watch_states
     ]
     rows.sort(key=lambda r: r.pivot_when or date.min, reverse=True)
     return rows

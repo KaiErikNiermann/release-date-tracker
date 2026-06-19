@@ -137,6 +137,48 @@ def test_available_partition_by_state_and_pivot(tmp_path: Path) -> None:
     assert titles == ["Out & Want"]
 
 
+def _obs(
+    entity_id: str, channel: ReleaseChannel, when: date, *, confirmed: bool
+) -> ReleaseObservation:
+    return ReleaseObservation(
+        entity_id=entity_id,
+        channel=channel,
+        release_date=when,
+        precision=DatePrecision.EXACT,
+        certainty=Certainty.CONFIRMED if confirmed else Certainty.ESTIMATED,
+        source_tier=SourceTier.AGGREGATOR if confirmed else SourceTier.MODEL,
+        provider="tmdb" if confirmed else "model",
+        fetched_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+
+def test_speculative_past_date_is_not_available(tmp_path: Path) -> None:
+    # a speculative estimate that happens to be in the past must NOT mark a work
+    # available — we don't actually know it released (the Steam-Frame/ONTOS bug).
+    db = Database(tmp_path / "v.db")
+    today = date(2026, 6, 19)
+    ent = Entity.create("Speculative", MediaKind.GAME, consumption_state=ConsumptionState.WANT)
+    db.upsert_entity(ent)
+    db.upsert_node(Node(id=ent.id, node_kind=NodeKind.WORK, name=ent.title, owned=True))
+    db.upsert_observation(_obs(ent.id, ReleaseChannel.DIGITAL, date(2026, 6, 18), confirmed=False))
+    assert [r.title for r in views.available(db, today, _settings())] == []
+
+
+def test_confirmed_date_preferred_over_earlier_speculative(tmp_path: Path) -> None:
+    # ONTOS: a speculative early date + a confirmed later one. The confirmed date is
+    # the pivot, so it's UPCOMING (not falsely available off the speculative past date).
+    db = Database(tmp_path / "v.db")
+    today = date(2026, 6, 19)
+    ent = Entity.create("Ontos", MediaKind.GAME, consumption_state=ConsumptionState.WANT)
+    db.upsert_entity(ent)
+    db.upsert_node(Node(id=ent.id, node_kind=NodeKind.WORK, name=ent.title, owned=True))
+    db.upsert_observation(_obs(ent.id, ReleaseChannel.DIGITAL, date(2026, 1, 1), confirmed=False))
+    db.upsert_observation(_obs(ent.id, ReleaseChannel.DIGITAL, date(2026, 12, 31), confirmed=True))
+    assert [r.title for r in views.available(db, today, _settings())] == []
+    up = views.upcoming(db, today, _settings())
+    assert [(r.title, r.pivot_when) for r in up] == [("Ontos", date(2026, 12, 31))]
+
+
 def test_freshness_buckets(tmp_path: Path) -> None:
     s = _settings()
     today = date(2026, 6, 1)
