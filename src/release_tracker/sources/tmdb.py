@@ -150,6 +150,10 @@ class TmdbSource:
         air: date | None = None
 
         if season_no is not None:
+            # a specific season: use ITS air_date only. A future season with no date
+            # yet is TBA — do NOT fall back to the show's first_air_date / next episode,
+            # those belong to a *different* (already-aired) season and would stamp the
+            # unaired season with a wrong, ancient "confirmed" date (e.g. S3 -> S1's date).
             season = cast(
                 "dict[str, Any]",
                 await get_json(
@@ -157,9 +161,8 @@ class TmdbSource:
                 ),
             )
             air = _parse_tmdb_date(season.get("air_date"))
-
-        if air is None:
-            # whole-show fallback: next episode to air, else first air date
+        else:
+            # whole show (no season pinned): next episode to air, else first air date
             detail = cast(
                 "dict[str, Any]",
                 await get_json(client, f"{BASE}/tv/{tmdb_id}", params={"api_key": key}),

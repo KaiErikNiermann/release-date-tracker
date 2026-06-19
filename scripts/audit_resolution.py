@@ -34,7 +34,9 @@ def audit(db: Database) -> list[Finding]:
     findings: list[Finding] = []
     for entity in db.iter_entities():
         obs = list(db.iter_observations(entity.id))
-        notion_years = [o.release_date.year for o in obs if o.provider == "notion" and o.release_date]
+        notion_years = [
+            o.release_date.year for o in obs if o.provider == "notion" and o.release_date
+        ]
         source_by_provider: dict[str, list[int]] = defaultdict(list)
         for o in obs:
             if o.provider in ("tmdb", "igdb") and o.release_date:
@@ -49,7 +51,11 @@ def audit(db: Database) -> list[Finding]:
             continue
         if resolved and not source_years:
             findings.append(
-                Finding(entity, "NO_SOURCE_DATE", f"notion={_years(notion_years)} but source has no date")
+                Finding(
+                    entity,
+                    "NO_SOURCE_DATE",
+                    f"notion={_years(notion_years)} but source has no date",
+                )
             )
             continue
         if notion_years and source_years:
@@ -59,7 +65,8 @@ def audit(db: Database) -> list[Finding]:
                     Finding(
                         entity,
                         "YEAR_MISMATCH",
-                        f"notion={_years(notion_years)} vs source={_years(source_years)} (gap {gap}y)",
+                        f"notion={_years(notion_years)} vs "
+                        f"source={_years(source_years)} (gap {gap}y)",
                     )
                 )
     return findings
