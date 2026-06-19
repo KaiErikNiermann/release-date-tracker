@@ -12,7 +12,7 @@ Plumbing:
   rdt pull [--all]                      # run Tier-0 pullers over watched entities
   rdt show [--region US] [--kind game]  # ranked best estimates
   rdt entities                          # list tracked entities
-  rdt rd "<title>"                      # one-shot lookup (the /rd skill engine)
+  rdt rd "<title>" [--track]            # one-shot lookup (/rd); --track also captures (/rd-add)
 """
 
 from __future__ import annotations
@@ -181,19 +181,58 @@ def rd(
         str | None,
         typer.Option(help="ISO country for tech (hard constraint; defaults to RDT_REGIONS[0])"),
     ] = None,
+    track: Annotated[
+        bool,
+        typer.Option("--track", "--add", help="also capture it into the tracker (state: want)"),
+    ] = False,
     as_json: Annotated[
         bool, typer.Option("--json", help="emit machine-readable JSON (for the /rd skill)")
     ] = False,
 ) -> None:
-    """One-shot lookup: confirmed + speculative release dates for a single title."""
+    """One-shot lookup: confirmed + speculative release dates for a single title.
+
+    With --track, also captures the resolved title into the tracker (the /rd-add path):
+    pins its canonical id, pulls dates + enriches who/where/what, marks it 'want'.
+    """
     configure_logging()
     settings = get_settings()
     kind_hint = MediaKind(kind) if kind else None
     report = asyncio.run(lookup(name, settings, kind_hint=kind_hint, region=region))
+    tracked = asyncio.run(_track_from_report(settings, name, report)) if track else False
     if as_json:
-        print(json.dumps(report.to_dict(), indent=2))
+        out = report.to_dict()
+        if track:
+            out["tracked"] = tracked
+        print(json.dumps(out, indent=2))
         return
     _render_report(report)
+    if track:
+        if tracked:
+            console.print(f"[green]Tracked[/] {report.matched_title} [dim](state: want)[/].")
+        else:
+            console.print("[yellow]Not tracked[/] — no resolvable canonical match to capture.")
+
+
+async def _track_from_report(settings: Settings, name: str, report: RdReport) -> bool:
+    """Capture a looked-up title into the tracker using the already-resolved ids."""
+    if not (report.found and report.kind and matching.is_resolvable(report.kind)):
+        return False
+    db = _db()
+    entity = Entity.create(
+        name,
+        report.kind,
+        external_ids=dict(report.canonical),
+        consumption_state=ConsumptionState.WANT,
+    )
+    db.upsert_entity(entity)
+    db.upsert_node(
+        Node(id=entity.id, node_kind=NodeKind.WORK, name=name, owned=True, external_ids={})
+    )
+    async with make_client() as client:
+        await pull_entity(db, settings, entity, client=client)  # dates via the pinned ids
+        await enrich_work(client, db, settings, entity)  # who/where/what
+    db.close()
+    return True
 
 
 def _render_report(r: RdReport) -> None:
