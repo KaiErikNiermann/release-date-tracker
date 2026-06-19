@@ -19,6 +19,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 from release_tracker.models import (
+    ArtistLink,
     Certainty,
     ConsumptionState,
     CreditRole,
@@ -26,6 +27,7 @@ from release_tracker.models import (
     DescriptorKind,
     Edge,
     Entity,
+    LinkTier,
     MediaKind,
     Money,
     Node,
@@ -33,6 +35,7 @@ from release_tracker.models import (
     RelationKind,
     ReleaseChannel,
     ReleaseObservation,
+    SocialPlatform,
     SourceTier,
 )
 
@@ -82,6 +85,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     name            TEXT NOT NULL,
     descriptor_kind TEXT,
     owned           INTEGER NOT NULL DEFAULT 0,
+    followed        INTEGER NOT NULL DEFAULT 0,
     external_ids    TEXT NOT NULL DEFAULT '{}',
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
@@ -114,6 +118,21 @@ CREATE TABLE IF NOT EXISTS media_notes (
     created_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_notes_entity ON media_notes(entity_id);
+
+-- artist-radar: a followed creator's links (free/paid/aux) + latest surfaced content
+CREATE TABLE IF NOT EXISTS artist_links (
+    node_id        TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    platform       TEXT NOT NULL,
+    tier           TEXT NOT NULL,
+    url            TEXT NOT NULL,
+    handle         TEXT,
+    latest_title   TEXT,
+    latest_url     TEXT,
+    last_post_at   TEXT,
+    fetched_at     TEXT,
+    PRIMARY KEY (node_id, platform)
+);
+CREATE INDEX IF NOT EXISTS idx_links_node ON artist_links(node_id);
 """
 
 
@@ -141,6 +160,9 @@ class Database:
             self._conn.execute(
                 "ALTER TABLE entities ADD COLUMN consumption_state TEXT NOT NULL DEFAULT 'unset'"
             )
+        node_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(nodes)")}
+        if "followed" not in node_cols:
+            self._conn.execute("ALTER TABLE nodes ADD COLUMN followed INTEGER NOT NULL DEFAULT 0")
 
     def close(self) -> None:
         self._conn.close()
@@ -324,14 +346,15 @@ class Database:
         with self._tx() as conn:
             conn.execute(
                 """
-                INSERT INTO nodes (id, node_kind, name, descriptor_kind, owned,
+                INSERT INTO nodes (id, node_kind, name, descriptor_kind, owned, followed,
                     external_ids, created_at, updated_at)
-                VALUES (:id, :node_kind, :name, :descriptor_kind, :owned,
+                VALUES (:id, :node_kind, :name, :descriptor_kind, :owned, :followed,
                     :external_ids, :now, :now)
                 ON CONFLICT(id) DO UPDATE SET
                     name=excluded.name,
                     descriptor_kind=COALESCE(excluded.descriptor_kind, nodes.descriptor_kind),
                     owned=MAX(nodes.owned, excluded.owned),
+                    followed=MAX(nodes.followed, excluded.followed),
                     external_ids=excluded.external_ids,
                     updated_at=:now
                 """,
@@ -341,6 +364,7 @@ class Database:
                     "name": node.name,
                     "descriptor_kind": node.descriptor_kind.value if node.descriptor_kind else None,
                     "owned": int(node.owned),
+                    "followed": int(node.followed),
                     "external_ids": json.dumps(node.external_ids),
                     "now": now,
                 },
@@ -374,6 +398,86 @@ class Database:
             params.append(node_kind.value)
         sql += " ORDER BY owned DESC, name"
         return [_row_to_node(r) for r in self._conn.execute(sql, params)]
+
+    # -- artist radar (followed creators + their links) --------------------
+    def set_followed(self, node_id: str, followed: bool) -> bool:
+        with self._tx() as conn:
+            cur = conn.execute(
+                "UPDATE nodes SET followed = ?, updated_at = ? WHERE id = ?",
+                (int(followed), datetime.now(UTC).isoformat(), node_id),
+            )
+            return cur.rowcount > 0
+
+    def followed_artists(self) -> list[Node]:
+        rows = self._conn.execute(
+            "SELECT * FROM nodes WHERE followed = 1 ORDER BY name",
+        )
+        return [_row_to_node(r) for r in rows]
+
+    def upsert_artist_link(self, link: ArtistLink) -> None:
+        """Add/update a creator's platform link. Activity fields are merged, not wiped."""
+        with self._tx() as conn:
+            conn.execute(
+                """
+                INSERT INTO artist_links (node_id, platform, tier, url, handle,
+                    latest_title, latest_url, last_post_at, fetched_at)
+                VALUES (:node_id, :platform, :tier, :url, :handle,
+                    :latest_title, :latest_url, :last_post_at, :fetched_at)
+                ON CONFLICT(node_id, platform) DO UPDATE SET
+                    tier=excluded.tier,
+                    url=excluded.url,
+                    handle=COALESCE(excluded.handle, artist_links.handle),
+                    latest_title=COALESCE(excluded.latest_title, artist_links.latest_title),
+                    latest_url=COALESCE(excluded.latest_url, artist_links.latest_url),
+                    last_post_at=COALESCE(excluded.last_post_at, artist_links.last_post_at),
+                    fetched_at=COALESCE(excluded.fetched_at, artist_links.fetched_at)
+                """,
+                {
+                    "node_id": link.node_id,
+                    "platform": link.platform.value,
+                    "tier": link.tier.value,
+                    "url": link.url,
+                    "handle": link.handle,
+                    "latest_title": link.latest_title,
+                    "latest_url": link.latest_url,
+                    "last_post_at": link.last_post_at.isoformat() if link.last_post_at else None,
+                    "fetched_at": link.fetched_at.isoformat() if link.fetched_at else None,
+                },
+            )
+
+    def update_link_activity(
+        self,
+        node_id: str,
+        platform: SocialPlatform,
+        *,
+        title: str | None,
+        url: str | None,
+        posted_at: date | None,
+        fetched_at: datetime,
+    ) -> None:
+        """Record the latest fetched content for one link (always stamps fetched_at)."""
+        with self._tx() as conn:
+            conn.execute(
+                """
+                UPDATE artist_links SET latest_title = ?, latest_url = ?,
+                    last_post_at = ?, fetched_at = ? WHERE node_id = ? AND platform = ?
+                """,
+                (
+                    title,
+                    url,
+                    posted_at.isoformat() if posted_at else None,
+                    fetched_at.isoformat(),
+                    node_id,
+                    platform.value,
+                ),
+            )
+
+    def iter_artist_links(self, node_id: str) -> list[ArtistLink]:
+        rows = self._conn.execute(
+            "SELECT * FROM artist_links WHERE node_id = ? ORDER BY tier, platform",
+            (node_id,),
+        )
+        return [_row_to_link(r) for r in rows]
 
     # -- graph: edges ------------------------------------------------------
     def upsert_edge(self, edge: Edge) -> None:
@@ -487,7 +591,22 @@ def _row_to_node(row: sqlite3.Row) -> Node:
         name=row["name"],
         descriptor_kind=DescriptorKind(row["descriptor_kind"]) if row["descriptor_kind"] else None,
         owned=bool(row["owned"]),
+        followed=bool(row["followed"]),
         external_ids=json.loads(row["external_ids"]),
+    )
+
+
+def _row_to_link(row: sqlite3.Row) -> ArtistLink:
+    return ArtistLink(
+        node_id=row["node_id"],
+        platform=SocialPlatform(row["platform"]),
+        tier=LinkTier(row["tier"]),
+        url=row["url"],
+        handle=row["handle"],
+        latest_title=row["latest_title"],
+        latest_url=row["latest_url"],
+        last_post_at=date.fromisoformat(row["last_post_at"]) if row["last_post_at"] else None,
+        fetched_at=datetime.fromisoformat(row["fetched_at"]) if row["fetched_at"] else None,
     )
 
 

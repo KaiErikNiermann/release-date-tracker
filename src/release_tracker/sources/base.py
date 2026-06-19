@@ -141,6 +141,26 @@ async def get_json(
     stop=stop_after_attempt(4),
     reraise=True,
 )
+async def get_text(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    params: dict[str, str] | None = None,
+    headers: dict[str, str] | None = None,
+) -> str:
+    """GET returning the raw response text (RSS/Atom feeds, HTML), retrying transient errors."""
+    resp = await client.get(url, params=params, headers=headers)
+    if resp.status_code in (429, 500, 502, 503, 504):
+        resp.raise_for_status()
+    return resp.text
+
+
+@retry(
+    retry=retry_if_exception_type((httpx.TransportError, httpx.HTTPStatusError)),
+    wait=wait_exponential(multiplier=0.5, min=0.5, max=8),
+    stop=stop_after_attempt(4),
+    reraise=True,
+)
 async def post_text(
     client: httpx.AsyncClient,
     url: str,

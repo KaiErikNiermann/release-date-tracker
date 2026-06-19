@@ -113,6 +113,36 @@ class ConsumptionState(enum.StrEnum):
     DROPPED = "dropped"  # abandoned
 
 
+class SocialPlatform(enum.StrEnum):
+    """A creator's content/social platform, for the artist-radar."""
+
+    YOUTUBE = "youtube"
+    BLUESKY = "bluesky"
+    REDDIT = "reddit"
+    TWITTER = "twitter"
+    TWITCH = "twitch"
+    PATREON = "patreon"
+    BUYMEACOFFEE = "buymeacoffee"
+    DEVIANTART = "deviantart"
+    PIXIV = "pixiv"
+    SPOTIFY = "spotify"
+    BANDCAMP = "bandcamp"
+    SOUNDCLOUD = "soundcloud"
+    INSTAGRAM = "instagram"
+    TUMBLR = "tumblr"
+    MASTODON = "mastodon"
+    WEBSITE = "website"
+    OTHER = "other"
+
+
+class LinkTier(enum.StrEnum):
+    """How a creator's link is consumed — the radar stratifies on this."""
+
+    FREE = "free"  # primary free content pipeline
+    PAID = "paid"  # primary paid pipeline (Patreon, BuyMeACoffee, ...)
+    AUXILIARY = "auxiliary"  # secondary socials (announcements/chatter, not primary output)
+
+
 class SourceTier(enum.IntEnum):
     """Trust ranking of a source — higher wins ties and weights confidence."""
 
@@ -297,6 +327,7 @@ class Node(BaseModel):
     name: str
     descriptor_kind: DescriptorKind | None = None  # set iff node_kind is DESCRIPTOR
     owned: bool = False
+    followed: bool = False  # on the artist-radar (a creator the user actively tracks)
     external_ids: dict[str, str] = Field(default_factory=dict)
 
     @staticmethod
@@ -363,3 +394,22 @@ class Edge(BaseModel):
             self.source_provider,
         )
         return hashlib.sha1("|".join(parts).encode()).hexdigest()  # noqa: S324
+
+
+class ArtistLink(BaseModel):
+    """A followed creator's link on one platform, with its latest surfaced content.
+
+    One row per (artist node, platform). ``latest_*``/``last_post_at`` are filled by a
+    fetcher where one exists (YouTube/Bluesky/Reddit); otherwise the link is just
+    documented (stratified by :class:`LinkTier`).
+    """
+
+    node_id: str
+    platform: SocialPlatform
+    tier: LinkTier
+    url: str
+    handle: str | None = None
+    latest_title: str | None = None
+    latest_url: str | None = None
+    last_post_at: date | None = None
+    fetched_at: datetime | None = None
