@@ -23,10 +23,13 @@ from release_tracker.models import (
     DatePrecision,
     DescriptorKind,
     Entity,
+    LinkTier,
     MediaKind,
     Node,
+    NodeKind,
     RelationKind,
     ReleaseChannel,
+    SocialPlatform,
     SourceTier,
 )
 from release_tracker.resolve import best_estimates
@@ -380,3 +383,52 @@ def works_by_node(db: Database, node: Node) -> list[CreditedWork]:
 def work_is_owned(db: Database, entity_id: str) -> bool:
     node = db.get_node(entity_id)
     return node.owned if node else False
+
+
+# --- artist radar ---------------------------------------------------------
+@dataclass(frozen=True, slots=True)
+class ArtistRow:
+    """A row of the creator radar: who posted most recently + their pipelines."""
+
+    node_id: str
+    name: str
+    kind: NodeKind
+    last_post: tuple[SocialPlatform, date] | None  # (platform, date) of newest content
+    freshness: Freshness | None  # how recently we *checked* (vs when they posted)
+    free: tuple[SocialPlatform, ...]
+    paid: tuple[SocialPlatform, ...]
+    n_works: int
+
+
+def artists(
+    db: Database, today: date, settings: Settings, *, sort: str = "recency"
+) -> list[ArtistRow]:
+    """The followed-creator radar. ``sort`` is 'recency' (newest content first) or 'name'."""
+    rows: list[ArtistRow] = []
+    for node in db.followed_artists():
+        links = db.iter_artist_links(node.id)
+        dated = [(link.platform, link.last_post_at) for link in links if link.last_post_at]
+        last_post = max(dated, key=lambda p: p[1]) if dated else None
+        fetched = [link.fetched_at for link in links if link.fetched_at]
+        rows.append(
+            ArtistRow(
+                node_id=node.id,
+                name=node.name,
+                kind=node.node_kind,
+                last_post=last_post,
+                freshness=freshness(max(fetched) if fetched else None, today, settings),
+                free=tuple(link.platform for link in links if link.tier is LinkTier.FREE),
+                paid=tuple(link.platform for link in links if link.tier is LinkTier.PAID),
+                n_works=len(db.edges_from(node.id, RelationKind.CREDITED_ON)),
+            )
+        )
+    if sort == "name":
+        rows.sort(key=lambda r: r.name.lower())
+    else:  # recency: newest post first, undated artists last (by name)
+        rows.sort(key=lambda r: (r.last_post is None, _neg_ordinal(r.last_post), r.name.lower()))
+    return rows
+
+
+def _neg_ordinal(last_post: tuple[SocialPlatform, date] | None) -> int:
+    """Sort key helper: most recent post first (descending date)."""
+    return -last_post[1].toordinal() if last_post else 0

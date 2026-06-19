@@ -27,12 +27,21 @@ from rich.console import Console
 from rich.table import Table
 
 from release_tracker import matching, views
+from release_tracker.artists import (
+    ArtistReport,
+    add_artist,
+    build_report,
+    find_artist,
+    parse_link_spec,
+    refresh_artist,
+)
 from release_tracker.config import Settings, get_settings
 from release_tracker.db import Database
 from release_tracker.enrich import EnrichSummary, enrich_work
 from release_tracker.logging import configure_logging
 from release_tracker.lookup import RdReport, lookup
 from release_tracker.models import (
+    ArtistLink,
     BestEstimate,
     Certainty,
     ConsumptionState,
@@ -41,6 +50,7 @@ from release_tracker.models import (
     MediaKind,
     Node,
     NodeKind,
+    SocialPlatform,
 )
 from release_tracker.pipeline import pull_all, pull_entity
 from release_tracker.resolve import best_estimates
@@ -50,8 +60,10 @@ from release_tracker.sources.base import Candidate, make_client
 app = typer.Typer(add_completion=False, help="Free-first release date tracker.")
 seed_app = typer.Typer(help="Manage the entity watchlist (seed).")
 resolve_app = typer.Typer(help="Find canonical ids and pin them to entities (manual matching).")
+artist_app = typer.Typer(help="Artist-radar: follow creators and surface their latest content.")
 app.add_typer(seed_app, name="seed")
 app.add_typer(resolve_app, name="resolve")
+app.add_typer(artist_app, name="artist")
 console = Console()
 
 
@@ -400,6 +412,200 @@ def who(name: Annotated[str, typer.Argument(help="person or studio name")]) -> N
             "[green]✓ yours[/]" if w.owned else "[dim]world[/]",
         )
     console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# artist radar
+# ---------------------------------------------------------------------------
+@app.command()
+def artists(
+    sort: Annotated[str, typer.Option(help="recency | name")] = "recency",
+) -> None:
+    """The creator radar: followed artists, whoever posted most recently first."""
+    configure_logging()
+    settings = get_settings()
+    db = _db()
+    rows = views.artists(db, _today(), settings, sort=sort)
+    db.close()
+    _render_artists(rows)
+
+
+@artist_app.command("add")
+def artist_add(
+    name: Annotated[str, typer.Argument(help="creator name")],
+    link: Annotated[list[str] | None, typer.Option(help="platform:tier:url (repeatable)")] = None,
+    kind: Annotated[str, typer.Option(help="person | org")] = "person",
+    no_fetch: Annotated[
+        bool, typer.Option("--no-fetch", help="skip fetching latest content")
+    ] = False,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="emit ArtistReport JSON (the skill)")
+    ] = False,
+) -> None:
+    """Follow a creator + attach stratified links (the /rd-artist entrypoint)."""
+    configure_logging()
+    settings = get_settings()
+    node_kind = NodeKind.ORG if kind.lower() == "org" else NodeKind.PERSON
+    try:
+        specs = [parse_link_spec(t) for t in (link or [])]
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
+    db = _db()
+
+    async def go() -> Node:
+        async with make_client() as client:
+            return await add_artist(
+                client, db, name, kind=node_kind, links=specs, fetch=not no_fetch
+            )
+
+    node = asyncio.run(go())
+    report = build_report(db, node, name, settings, _today())
+    db.close()
+    if as_json:
+        print(json.dumps(report.to_dict(), indent=2))
+        return
+    _render_artist_report(report)
+
+
+@artist_app.command("follow")
+def artist_follow(
+    ref: Annotated[str, typer.Argument(help="existing person/studio (id or name)")],
+) -> None:
+    """Add an existing media-graph person/studio onto the radar."""
+    configure_logging()
+    db = _db()
+    node = find_artist(db, ref)
+    if node is None:
+        db.close()
+        console.print(f"[yellow]No person/studio[/] matching '{ref}'. Enrich a work first.")
+        raise typer.Exit(1)
+    db.set_followed(node.id, followed=True)
+    db.close()
+    console.print(
+        f'[green]Following[/] {node.name}. Add links with `rdt artist add "{node.name}"`.'
+    )
+
+
+@artist_app.command("refresh")
+def artist_refresh(
+    ref: Annotated[str | None, typer.Argument(help="creator id/name; omit with --all")] = None,
+    all_artists: Annotated[
+        bool, typer.Option("--all", help="refresh every followed artist")
+    ] = False,
+) -> None:
+    """Re-fetch the latest content for one artist or --all."""
+    configure_logging()
+    db = _db()
+    if all_artists:
+        targets = db.followed_artists()
+    elif ref:
+        node = find_artist(db, ref)
+        targets = [node] if node else []
+    else:
+        db.close()
+        raise typer.BadParameter("pass an artist ref or --all")
+
+    async def go() -> None:
+        async with make_client() as client:
+            for node in targets:
+                n = await refresh_artist(client, db, node)
+                console.print(f"[green]Refreshed[/] {node.name}: {n} link(s) updated.")
+
+    asyncio.run(go())
+    db.close()
+
+
+@artist_app.command("show")
+def artist_show(
+    name: Annotated[str, typer.Argument(help="creator id or name")],
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Show a followed creator's links + latest content + the works of theirs you track."""
+    configure_logging()
+    settings = get_settings()
+    db = _db()
+    node = find_artist(db, name)
+    report = build_report(db, node, name, settings, _today())
+    db.close()
+    if as_json:
+        print(json.dumps(report.to_dict(), indent=2))
+        return
+    if not report.found:
+        console.print(f"[yellow]Not on the radar:[/] '{name}'. `rdt artist add \"{name}\"` first.")
+        raise typer.Exit(1)
+    _render_artist_report(report)
+
+
+# --- artist renderers -----------------------------------------------------
+def _ago(when: date | None) -> str:
+    if when is None:
+        return ""
+    days = (_today() - when).days
+    if days <= 0:
+        return "today"
+    if days < 60:
+        return f"{days}d ago"
+    return f"{days // 30}mo ago"
+
+
+def _platforms(platforms: tuple[SocialPlatform, ...]) -> str:
+    return ", ".join(p.value for p in platforms) or "[dim]—[/]"
+
+
+def _render_artists(rows: list[views.ArtistRow]) -> None:
+    table = Table(title="Artist radar", show_lines=False)
+    table.add_column("⟳", width=1, no_wrap=True)
+    table.add_column("Artist", min_width=16, max_width=28, no_wrap=True, overflow="ellipsis")
+    table.add_column("Kind", min_width=6, no_wrap=True)
+    table.add_column("Last post", min_width=16, no_wrap=True)
+    table.add_column("Free", max_width=22, no_wrap=True, overflow="ellipsis")
+    table.add_column("Paid", max_width=16, no_wrap=True, overflow="ellipsis")
+    table.add_column("Works", justify="right", no_wrap=True)
+    for r in rows:
+        if r.last_post is not None:
+            platform, when = r.last_post
+            last = f"{platform.value} [dim]{_ago(when)}[/]"
+        else:
+            last = "[dim]—[/]"
+        table.add_row(
+            _fresh_dot(r.freshness),
+            r.name,
+            r.kind.value,
+            last,
+            _platforms(r.free),
+            _platforms(r.paid),
+            str(r.n_works) if r.n_works else "[dim]—[/]",
+        )
+    console.print(table)
+    if rows:
+        console.print("[dim]⟳ how recently we checked   `rdt artist refresh --all` to update[/]")
+    else:
+        console.print("[dim]No followed artists. `/rd-artist <name>` or `rdt artist add`.[/]")
+
+
+def _render_artist_report(report: ArtistReport) -> None:
+    console.print(f"[bold]{report.name}[/] [dim]({report.kind})[/]")
+    by_tier: dict[str, list[ArtistLink]] = {"free": [], "paid": [], "auxiliary": []}
+    for link in report.links:
+        by_tier[link.tier.value].append(link)
+    labels = {"free": "Free pipeline", "paid": "Paid pipeline", "auxiliary": "Auxiliary socials"}
+    for tier, label in labels.items():
+        if not by_tier[tier]:
+            continue
+        console.print(f"[bold]{label}[/]")
+        for link in by_tier[tier]:
+            latest = ""
+            if link.latest_url:
+                latest = (
+                    f" [dim]· latest: {link.latest_title or 'post'} ({_ago(link.last_post_at)})[/]"
+                )
+            console.print(f"  [cyan]{link.platform.value}[/] {link.url}{latest}")
+    if report.tracked_works:
+        console.print("[bold]Works you track[/]")
+        for w in report.tracked_works:
+            console.print(f"  [dim]{w.role.value:<10}[/] {w.entity.title} ({w.entity.kind.value})")
+    for note in report.notes:
+        console.print(f"[dim]• {note}[/]")
 
 
 @app.command()
