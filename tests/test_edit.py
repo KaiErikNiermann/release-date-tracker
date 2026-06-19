@@ -83,6 +83,39 @@ def test_credit_then_uncredit_round_trips(edit_db: Path) -> None:
     assert remaining == {person.id}  # only the org credit was dropped
 
 
+def test_credit_pin_canonicalizes_onto_resolved_node(edit_db: Path) -> None:
+    # a world-resolved (unowned) node already exists at the canonical source key
+    db0 = Database(edit_db)
+    ent = next(db0.iter_entities())
+    db0.upsert_node(
+        Node.create(NodeKind.PERSON, "Denis Villeneuve", source="tmdb", source_id="287")
+    )
+    db0.close()
+    res = runner.invoke(
+        cli.app,
+        ["edit", "credit", ent.id, "Denis Villeneuve", "director", "--pin", "tmdb:287"],
+    )
+    assert res.exit_code == 0
+    db = Database(edit_db)
+    villeneuve = db.find_nodes("villeneuve")
+    (edge,) = db.edges_to(ent.id, RelationKind.CREDITED_ON)
+    db.close()
+    # collapses onto the one canonical node (not a separate name-slug node)...
+    assert [n.id for n in villeneuve] == ["person:tmdb:287"]
+    assert villeneuve[0].owned is True  # ...and the hand-credit claims it (MAX(owned))
+    assert edge.src_id == "person:tmdb:287"
+
+
+def test_credit_rejects_malformed_pin(edit_db: Path) -> None:
+    db0 = Database(edit_db)
+    ent = next(db0.iter_entities())
+    db0.close()
+    res = runner.invoke(
+        cli.app, ["edit", "credit", ent.id, "X", "director", "--pin", "nocolon"]
+    )
+    assert res.exit_code != 0
+
+
 def test_credit_rejects_unknown_role(edit_db: Path) -> None:
     db0 = Database(edit_db)
     ent = next(db0.iter_entities())

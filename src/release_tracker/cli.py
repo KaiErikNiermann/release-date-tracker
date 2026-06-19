@@ -876,6 +876,19 @@ def notes(ref: Annotated[str, typer.Argument(help="entity id or title substring"
 _CREDIT_ROLES = ", ".join(r.value for r in CreditRole)
 
 
+def _parse_pin(pin: str) -> tuple[str, str]:
+    """'tmdb:287' -> ('tmdb', '287'); the canonical (source, source_id) key.
+
+    Pinning a credit to a source key makes its node id ``person:tmdb:287``, so a
+    hand-authored credit collapses onto the same node enrich resolves from that
+    source (instead of a separate name-slug node).
+    """
+    source, sep, source_id = pin.partition(":")
+    if not sep or not source.strip() or not source_id.strip():
+        raise typer.BadParameter("--pin must be <source>:<id>, e.g. tmdb:287")
+    return source.strip(), source_id.strip()
+
+
 def _edit_entity(db: Database, ref: str) -> Entity | None:
     """Resolve a work for editing, printing + closing the db on failure."""
     entity = _resolve_ref(db, ref)
@@ -934,18 +947,36 @@ def edit_credit(
     name: Annotated[str, typer.Argument(help="the person/studio to credit")],
     role: Annotated[str, typer.Argument(help=f"one of: {_CREDIT_ROLES}")],
     org: Annotated[bool, typer.Option("--org", help="credit a studio/org, not a person")] = False,
+    pin: Annotated[
+        str | None,
+        typer.Option(
+            "--pin",
+            help="canonicalize onto a source key, <source>:<id> (e.g. tmdb:287), so the "
+            "credit collapses onto the same node enrich resolves",
+        ),
+    ] = None,
 ) -> None:
-    """Attach a who-edge: credit a person or studio on a work (user-authored)."""
+    """Attach a who-edge: credit a person or studio on a work (user-authored).
+
+    By default a credit-by-name makes a name-slug node (``person:denis-villeneuve``).
+    Pass --pin <source>:<id> to instead use the canonical id (``person:tmdb:287``),
+    so it's the *same* node a resolved credit from that source maps to.
+    """
     configure_logging()
     try:
         credit_role = CreditRole(role.lower())
     except ValueError:
         raise typer.BadParameter(f"role must be one of: {_CREDIT_ROLES}") from None
+    kind = NodeKind.ORG if org else NodeKind.PERSON
+    if pin is not None:
+        source, source_id = _parse_pin(pin)
+        node = Node.create(kind, name, source=source, source_id=source_id, owned=True)
+    else:
+        node = Node.create(kind, name, owned=True)
     db = _db()
     entity = _edit_entity(db, ref)
     if entity is None:
         raise typer.Exit(1)
-    node = Node.create(NodeKind.ORG if org else NodeKind.PERSON, name, owned=True)
     db.upsert_node(node)
     db.upsert_edge(
         Edge(
@@ -960,8 +991,10 @@ def edit_credit(
         )
     )
     db.close()
+    pinned = f" [dim]→ {node.id}[/]" if pin is not None else ""
     console.print(
-        f"[green]Credited[/] {name} [dim]({credit_role.value})[/] on [bold]{entity.title}[/]"
+        f"[green]Credited[/] {name} [dim]({credit_role.value})[/] "
+        f"on [bold]{entity.title}[/]{pinned}"
     )
 
 
