@@ -20,14 +20,23 @@ from release_tracker.config import Settings
 from release_tracker.logging import get_logger
 from release_tracker.models import (
     Certainty,
+    CreditRole,
     DatePrecision,
     Entity,
     MediaKind,
+    NodeKind,
     ReleaseChannel,
     ReleaseObservation,
     SourceTier,
 )
-from release_tracker.sources.base import Candidate, SourceResult, get_json, pinned_id
+from release_tracker.sources.base import (
+    Candidate,
+    Credit,
+    MediaGraph,
+    SourceResult,
+    get_json,
+    pinned_id,
+)
 from release_tracker.titles import split_season
 
 log = get_logger("tmdb")
@@ -296,6 +305,55 @@ class TmdbSource:
         """Where the film actually streams now (empty until it lands somewhere)."""
         return tuple(await self._flatrate_providers(client, key, "movie", tmdb_id, regions))
 
+    async def movie_graph(self, client: httpx.AsyncClient, key: str, tmdb_id: str) -> MediaGraph:
+        """Who/what/series for a film, in one call (detail + appended credits)."""
+        detail = cast(
+            "dict[str, Any]",
+            await get_json(
+                client,
+                f"{BASE}/movie/{tmdb_id}",
+                params={"api_key": key, "append_to_response": "credits"},
+            ),
+        )
+        credits = cast("dict[str, Any]", detail.get("credits", {}))
+        people = _crew_people(credits) + _cast_people(credits)
+        orgs = _company_orgs(detail.get("production_companies"), CreditRole.STUDIO)
+        collection = detail.get("belongs_to_collection")
+        series = (
+            (str(collection["name"]), str(collection.get("id")))
+            if isinstance(collection, dict) and collection.get("name")
+            else None
+        )
+        return MediaGraph(
+            credits=tuple(people + orgs),
+            genres=_genre_names(detail.get("genres")),
+            series=series,
+            summary=str(detail["overview"]) if detail.get("overview") else None,
+        )
+
+    async def tv_graph(self, client: httpx.AsyncClient, key: str, tmdb_id: str) -> MediaGraph:
+        """Who/what for a show: creators + networks + genres (+ top cast)."""
+        detail = cast(
+            "dict[str, Any]",
+            await get_json(
+                client,
+                f"{BASE}/tv/{tmdb_id}",
+                params={"api_key": key, "append_to_response": "credits"},
+            ),
+        )
+        creators = [
+            Credit(NodeKind.PERSON, CreditRole.CREATOR, str(c["name"]), str(c.get("id")))
+            for c in cast("list[dict[str, Any]]", detail.get("created_by", []))
+            if c.get("name")
+        ]
+        networks = _company_orgs(detail.get("networks"), CreditRole.NETWORK)
+        cast_people = _cast_people(cast("dict[str, Any]", detail.get("credits", {})))
+        return MediaGraph(
+            credits=tuple(creators + networks + cast_people),
+            genres=_genre_names(detail.get("genres")),
+            summary=str(detail["overview"]) if detail.get("overview") else None,
+        )
+
     async def tv_platforms(
         self, client: httpx.AsyncClient, key: str, tmdb_id: str, regions: tuple[str, ...]
     ) -> tuple[str, ...]:
@@ -316,6 +374,54 @@ class TmdbSource:
         for name in await self._flatrate_providers(client, key, "tv", tmdb_id, regions):
             add(name)
         return tuple(names)
+
+
+# job titles in TMDB crew -> our CreditRole (anything else is dropped)
+_CREW_ROLES: dict[str, CreditRole] = {
+    "Director": CreditRole.DIRECTOR,
+    "Writer": CreditRole.WRITER,
+    "Screenplay": CreditRole.WRITER,
+    "Story": CreditRole.WRITER,
+    "Original Music Composer": CreditRole.COMPOSER,
+}
+_MAX_CAST = 5
+
+
+def _crew_people(credits: dict[str, Any]) -> list[Credit]:
+    out: list[Credit] = []
+    seen: set[tuple[str, str]] = set()
+    for member in cast("list[dict[str, Any]]", credits.get("crew", [])):
+        role = _CREW_ROLES.get(str(member.get("job", "")))
+        name = str(member.get("name", ""))
+        if role is None or not name or (key := (role.value, name)) in seen:
+            continue
+        seen.add(key)
+        out.append(Credit(NodeKind.PERSON, role, name, str(member.get("id"))))
+    return out
+
+
+def _cast_people(credits: dict[str, Any]) -> list[Credit]:
+    return [
+        Credit(NodeKind.PERSON, CreditRole.CAST, str(c["name"]), str(c.get("id")))
+        for c in cast("list[dict[str, Any]]", credits.get("cast", []))[:_MAX_CAST]
+        if c.get("name")
+    ]
+
+
+def _company_orgs(companies: object, role: CreditRole) -> list[Credit]:
+    return [
+        Credit(NodeKind.ORG, role, str(c["name"]), str(c.get("id")))
+        for c in cast("list[Any]", companies or [])
+        if isinstance(c, dict) and c.get("name")
+    ]
+
+
+def _genre_names(genres: object) -> tuple[str, ...]:
+    return tuple(
+        str(g["name"])
+        for g in cast("list[Any]", genres or [])
+        if isinstance(g, dict) and g.get("name")
+    )
 
 
 def _parse_tmdb_date(value: object) -> date | None:

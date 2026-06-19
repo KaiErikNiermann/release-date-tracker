@@ -14,10 +14,32 @@ from tenacity import (
 )
 
 from release_tracker.config import Settings
-from release_tracker.models import Entity, MediaKind, ReleaseObservation
+from release_tracker.models import CreditRole, Entity, MediaKind, NodeKind, ReleaseObservation
 
 USER_AGENT = "release-date-tracker/0.1 (+https://github.com/local/release-date-tracker)"
 DEFAULT_TIMEOUT = httpx.Timeout(20.0, connect=10.0)
+
+
+@dataclass(slots=True, frozen=True)
+class Credit:
+    """One who/where/what fact a source extracted for a work (a graph edge-to-be)."""
+
+    node_kind: NodeKind  # PERSON or ORG
+    role: CreditRole
+    name: str
+    source_id: str | None = None  # source-native id, collapses the node across works
+
+
+@dataclass(slots=True, frozen=True)
+class MediaGraph:
+    """Source-extracted who/what/series for a work. ``where`` (platforms) is filled
+    for games here (hardware/storefronts); movies/TV resolve it via watch-providers."""
+
+    credits: tuple[Credit, ...] = ()
+    genres: tuple[str, ...] = ()
+    platforms: tuple[str, ...] = ()
+    series: tuple[str, str | None] | None = None  # (name, source_id)
+    summary: str | None = None  # plot/overview — grounding for LLM theme extraction
 
 
 @dataclass(slots=True)

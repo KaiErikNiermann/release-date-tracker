@@ -20,15 +20,19 @@ from release_tracker.config import Settings
 from release_tracker.logging import get_logger
 from release_tracker.models import (
     Certainty,
+    CreditRole,
     DatePrecision,
     Entity,
     MediaKind,
+    NodeKind,
     ReleaseChannel,
     ReleaseObservation,
     SourceTier,
 )
 from release_tracker.sources.base import (
     Candidate,
+    Credit,
+    MediaGraph,
     SourceResult,
     pinned_id,
     post_json,
@@ -234,6 +238,53 @@ class IgdbSource:
             months.append(d.month)
         return tuple(months)
 
+    async def game_graph(
+        self, client: httpx.AsyncClient, settings: Settings, game_id: str
+    ) -> MediaGraph:
+        """Who (dev/publisher orgs) / what (genres) / where (platforms) / series for a game."""
+        headers = await self._headers(client, settings)
+        if headers is None:
+            return MediaGraph()
+        body = (
+            "fields involved_companies.company.id,involved_companies.company.name,"
+            "involved_companies.developer,involved_companies.publisher,"
+            "genres.name,platforms.name,collection.name,collection.id,summary; "
+            f"where id = {int(game_id)};"
+        )
+        rows = cast(
+            "list[dict[str, Any]]",
+            await post_text(client, GAMES_URL, content=body, headers=headers),
+        )
+        if not rows:
+            return MediaGraph()
+        row = rows[0]
+        credits: list[Credit] = []
+        for ic in cast("list[dict[str, Any]]", row.get("involved_companies", [])):
+            company = ic.get("company")
+            if not isinstance(company, dict) or not company.get("name"):
+                continue
+            role = (
+                CreditRole.DEVELOPER
+                if ic.get("developer")
+                else CreditRole.PUBLISHER
+                if ic.get("publisher")
+                else CreditRole.STUDIO
+            )
+            credits.append(Credit(NodeKind.ORG, role, str(company["name"]), str(company.get("id"))))
+        collection = row.get("collection")
+        series = (
+            (str(collection["name"]), str(collection.get("id")))
+            if isinstance(collection, dict) and collection.get("name")
+            else None
+        )
+        return MediaGraph(
+            credits=tuple(credits),
+            genres=_names(row.get("genres")),
+            platforms=_names(row.get("platforms")),
+            series=series,
+            summary=str(row["summary"]) if row.get("summary") else None,
+        )
+
     async def _search(
         self, client: httpx.AsyncClient, headers: dict[str, str], title: str
     ) -> str | None:
@@ -296,3 +347,12 @@ def _ts_to_date(value: object) -> date | None:
     if not isinstance(value, (int, float)):
         return None
     return datetime.fromtimestamp(int(value), tz=UTC).date()
+
+
+def _names(items: object) -> tuple[str, ...]:
+    """Extract the ``name`` field from an IGDB expanded-list (genres/platforms)."""
+    return tuple(
+        str(item["name"])
+        for item in cast("list[Any]", items or [])
+        if isinstance(item, dict) and item.get("name")
+    )

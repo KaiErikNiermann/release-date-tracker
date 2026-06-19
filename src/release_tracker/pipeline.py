@@ -74,6 +74,24 @@ async def _pull_entity(
     stats.entities += 1
 
 
+async def pull_entity(
+    db: Database, settings: Settings, entity: Entity, *, client: httpx.AsyncClient | None = None
+) -> PullStats:
+    """Resolve + pull one entity (canonical ids + observations). Reuses the batch path.
+
+    Opens its own client when not given one, so callers (e.g. enrich) can run a single
+    title through the same resolution/persistence logic as a full ``pull``.
+    """
+    stats = PullStats()
+    sem = asyncio.Semaphore(1)
+    if client is not None:
+        await _pull_entity(client, db, entity, settings, sem, stats)
+        return stats
+    async with make_client() as owned_client:
+        await _pull_entity(owned_client, db, entity, settings, sem, stats)
+    return stats
+
+
 async def pull_all(
     db: Database, settings: Settings, *, concurrency: int = 6, watched_only: bool = True
 ) -> PullStats:
