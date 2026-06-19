@@ -116,22 +116,40 @@ class ConsumptionState(enum.StrEnum):
 class SocialPlatform(enum.StrEnum):
     """A creator's content/social platform, for the artist-radar."""
 
+    # video / streaming
     YOUTUBE = "youtube"
-    BLUESKY = "bluesky"
-    REDDIT = "reddit"
-    TWITTER = "twitter"
     TWITCH = "twitch"
-    PATREON = "patreon"
-    BUYMEACOFFEE = "buymeacoffee"
-    DEVIANTART = "deviantart"
+    TIKTOK = "tiktok"
+    NEBULA = "nebula"
+    VIMEO = "vimeo"
+    # social
+    BLUESKY = "bluesky"
+    TWITTER = "twitter"
+    REDDIT = "reddit"
+    INSTAGRAM = "instagram"
+    THREADS = "threads"
+    TUMBLR = "tumblr"
+    MASTODON = "mastodon"
+    # art
     ARTSTATION = "artstation"
+    DEVIANTART = "deviantart"
     PIXIV = "pixiv"
+    CARA = "cara"
+    NEWGROUNDS = "newgrounds"
+    # music
     SPOTIFY = "spotify"
     BANDCAMP = "bandcamp"
     SOUNDCLOUD = "soundcloud"
-    INSTAGRAM = "instagram"
-    TUMBLR = "tumblr"
-    MASTODON = "mastodon"
+    # support / paid
+    PATREON = "patreon"
+    KOFI = "kofi"
+    BUYMEACOFFEE = "buymeacoffee"
+    GUMROAD = "gumroad"
+    SUBSTACK = "substack"
+    FANBOX = "fanbox"
+    BOOSTY = "boosty"
+    ITCH = "itch"
+    # catch-all
     WEBSITE = "website"
     OTHER = "other"
 
