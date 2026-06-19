@@ -15,6 +15,7 @@ from release_tracker.models import (
     NodeKind,
     RelationKind,
     SourceTier,
+    WorkRelation,
 )
 
 
@@ -112,6 +113,55 @@ def test_find_nodes_by_name_and_kind(tmp_path: Path) -> None:
     people = db.find_nodes("reznor", node_kind=NodeKind.PERSON)
     assert [n.name for n in people] == ["Trent Reznor"]
     assert len(db.find_nodes("reznor")) == 2
+
+
+def test_part_ordinal_roundtrips_on_part_of_series(tmp_path: Path) -> None:
+    # a mid-season cut: (season, part) coordinates ride the part_of_series edge
+    db = _db(tmp_path)
+    show = Node.create(NodeKind.SERIES, "Stranger Things", source="tmdb", source_id="66732")
+    db.upsert_node(show)
+    ent = Entity.create("Stranger Things: Season 5, Part 2", MediaKind.TV)
+    db.upsert_entity(ent)
+    db.upsert_node(Node(id=ent.id, node_kind=NodeKind.WORK, name=ent.title, owned=True))
+    db.upsert_edge(
+        Edge(
+            src_id=ent.id,
+            dst_id=show.id,
+            relation=RelationKind.PART_OF_SERIES,
+            ordinal=5,
+            part=2,
+            source_provider="tmdb",
+            source_tier=SourceTier.AGGREGATOR,
+        )
+    )
+    (stored,) = db.edges_from(ent.id, RelationKind.PART_OF_SERIES)
+    assert (stored.ordinal, stored.part) == (5, 2)
+
+
+def test_derived_from_carries_work_relation_role(tmp_path: Path) -> None:
+    # cross-media lineage: a spinoff DERIVED_FROM its parent, role = the nature
+    db = _db(tmp_path)
+    parent = Entity.create("Arcane", MediaKind.TV)
+    spinoff = Entity.create("Arcane: Noxus", MediaKind.TV)
+    for ent in (parent, spinoff):
+        db.upsert_entity(ent)
+        db.upsert_node(Node(id=ent.id, node_kind=NodeKind.WORK, name=ent.title, owned=True))
+    db.upsert_edge(
+        Edge(
+            src_id=spinoff.id,
+            dst_id=parent.id,
+            relation=RelationKind.DERIVED_FROM,
+            role=WorkRelation.SPINOFF,
+            source_provider="user",
+            source_tier=SourceTier.OFFICIAL,
+        )
+    )
+    # the role parses back to a WorkRelation (not a CreditRole)
+    (up,) = db.edges_from(spinoff.id, RelationKind.DERIVED_FROM)
+    assert up.role is WorkRelation.SPINOFF
+    # and the reverse: what derives from the parent
+    (down,) = db.edges_to(parent.id, RelationKind.DERIVED_FROM)
+    assert down.src_id == spinoff.id and down.role is WorkRelation.SPINOFF
 
 
 def test_existing_entity_ids_unchanged_after_slug_refactor() -> None:

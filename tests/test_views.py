@@ -23,6 +23,7 @@ from release_tracker.models import (
     ReleaseChannel,
     ReleaseObservation,
     SourceTier,
+    WorkRelation,
 )
 
 
@@ -227,6 +228,58 @@ def test_seasons_of_series_orders_by_ordinal(tmp_path: Path) -> None:
     card = views.work_card(db, entries[1].entity)
     assert card.season == 3
     assert card.series == ("Severance",)
+
+
+def test_seasons_order_by_part_within_a_season(tmp_path: Path) -> None:
+    # a mid-season split: Part 2 must sort after Part 1 of the same season
+    db = Database(tmp_path / "v.db")
+    show = Node.create(NodeKind.SERIES, "Stranger Things", source="tmdb", source_id="66732")
+    db.upsert_node(show)
+    for title, part, when in (
+        ("Stranger Things: Season 5, Part 2", 2, date(2026, 12, 25)),  # out of order
+        ("Stranger Things: Season 5, Part 1", 1, date(2026, 11, 26)),
+    ):
+        work = _seed_work(db, title, when)
+        db.upsert_edge(
+            Edge(
+                src_id=work.id,
+                dst_id=show.id,
+                relation=RelationKind.PART_OF_SERIES,
+                ordinal=5,
+                part=part,
+                source_provider="tmdb",
+                source_tier=SourceTier.AGGREGATOR,
+            )
+        )
+    stored = db.get_node(show.id)
+    assert stored is not None
+    entries = views.seasons_of_series(db, stored)
+    assert [(e.season, e.part) for e in entries] == [(5, 1), (5, 2)]
+
+
+def test_derived_from_and_derivatives_walk(tmp_path: Path) -> None:
+    db = Database(tmp_path / "v.db")
+    parent = _seed_work(db, "Arcane", date(2021, 11, 6))
+    spinoff = _seed_work(db, "Arcane: Noxus", date(2027, 1, 1))
+    db.upsert_edge(
+        Edge(
+            src_id=spinoff.id,
+            dst_id=parent.id,
+            relation=RelationKind.DERIVED_FROM,
+            role=WorkRelation.SPINOFF,
+            source_provider="user",
+            source_tier=SourceTier.OFFICIAL,
+            owned=True,
+        )
+    )
+    up = views.derived_from(db, spinoff.id)
+    assert [(r.node.name, r.relation) for r in up] == [("Arcane", WorkRelation.SPINOFF)]
+    down = views.derivatives_of(db, parent.id)
+    assert [(r.node.name, r.relation) for r in down] == [("Arcane: Noxus", WorkRelation.SPINOFF)]
+    # and the parent's card surfaces its derivative
+    card = views.work_card(db, parent)
+    assert [r.node.name for r in card.derivatives] == ["Arcane: Noxus"]
+    assert views.work_card(db, spinoff).derived_from[0].node.name == "Arcane"
 
 
 def test_work_card_groups_who_where_what(tmp_path: Path) -> None:

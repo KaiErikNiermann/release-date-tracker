@@ -47,11 +47,15 @@ from release_tracker.models import (
     Certainty,
     ConsumptionState,
     DatePrecision,
+    Edge,
     Entity,
     MediaKind,
     Node,
     NodeKind,
+    RelationKind,
     SocialPlatform,
+    SourceTier,
+    WorkRelation,
 )
 from release_tracker.pipeline import pull_all, pull_entity
 from release_tracker.resolve import best_estimates
@@ -710,13 +714,94 @@ def seasons(show: Annotated[str, typer.Argument(help="show / franchise name")]) 
     for col in ("Season", "Title", "Date", "Owned"):
         table.add_column(col)
     for s in entries:
+        if s.season is None:
+            label = "[dim]—[/]"
+        else:
+            label = f"S{s.season}" + (f" Pt{s.part}" if s.part is not None else "")
         table.add_row(
-            f"S{s.season}" if s.season is not None else "[dim]—[/]",
+            label,
             s.entity.title,
             s.when.isoformat() if s.when else "—",
             "[green]✓ yours[/]" if s.owned else "[dim]world[/]",
         )
     console.print(table)
+
+
+_WORK_RELATIONS = ", ".join(r.value for r in WorkRelation)
+
+
+def _resolve_to_node(db: Database, ref: str) -> Node | None:
+    """Resolve a work reference to its graph node (prefers a tracked entity)."""
+    entities = db.find_entities(ref)
+    entity = next((e for e in entities if e.title.lower() == ref.lower()), None) or next(
+        iter(entities), None
+    )
+    if entity is not None:
+        node = db.get_node(entity.id)
+        if node is None:  # tracked but never noded -> create the work node
+            node = Node(id=entity.id, node_kind=NodeKind.WORK, name=entity.title, owned=True)
+            db.upsert_node(node)
+        return node
+    nodes = db.find_nodes(ref)
+    return nodes[0] if nodes else None
+
+
+@app.command()
+def relate(
+    work: Annotated[str, typer.Argument(help="the derivative work (id or title)")],
+    relation: Annotated[str, typer.Argument(help=f"one of: {_WORK_RELATIONS}")],
+    other: Annotated[str, typer.Argument(help="the work/franchise it derives from")],
+) -> None:
+    """Record cross-media lineage, e.g. `relate "Arcane: Noxus" spinoff "Arcane"`."""
+    configure_logging()
+    try:
+        rel = WorkRelation(relation.lower())
+    except ValueError:
+        raise typer.BadParameter(f"relation must be one of: {_WORK_RELATIONS}") from None
+    db = _db()
+    src = _resolve_to_node(db, work)
+    dst = _resolve_to_node(db, other)
+    if src is None or dst is None:
+        missing = work if src is None else other
+        db.close()
+        console.print(f"[red]No work/node matches[/] '{missing}'.")
+        raise typer.Exit(1)
+    db.upsert_edge(
+        Edge(
+            src_id=src.id,
+            dst_id=dst.id,
+            relation=RelationKind.DERIVED_FROM,
+            role=rel,
+            source_provider="user",
+            source_tier=SourceTier.OFFICIAL,
+            confidence=1.0,
+            owned=True,
+        )
+    )
+    db.close()
+    console.print(f"[green]Linked[/] {src.name} [dim]({rel.value} of)[/] [bold]{dst.name}[/].")
+
+
+@app.command()
+def related(ref: Annotated[str, typer.Argument(help="a work (id or title)")]) -> None:
+    """Show a work's cross-media lineage — what it derives from and what derives from it."""
+    configure_logging()
+    db = _db()
+    node = _resolve_to_node(db, ref)
+    if node is None:
+        db.close()
+        console.print(f"[yellow]No work[/] matching '{ref}'.")
+        raise typer.Exit(1)
+    upstream = views.derived_from(db, node.id)
+    downstream = views.derivatives_of(db, node.id)
+    db.close()
+    console.print(f"[bold]{node.name}[/]")
+    for r in upstream:
+        console.print(f"  [dim]{r.relation.value} of[/] → {r.node.name}")
+    for r in downstream:
+        console.print(f"  [dim]← {r.relation.value}[/] {r.node.name}")
+    if not upstream and not downstream:
+        console.print(f'  [dim]No relations. `rdt relate "<work>" spinoff "{node.name}"`.[/]')
 
 
 @app.command()
@@ -1004,6 +1089,12 @@ def _render_card(card: views.WorkCard) -> None:
             console.print(f"[bold]Genre[/] {', '.join(genres)}")
         if themes:
             console.print(f"[bold]Themes[/] [dim]{', '.join(themes)} (model-derived)[/]")
+    if card.derived_from:
+        for r in card.derived_from:
+            console.print(f"[bold]Derived from[/] {r.node.name} [dim]({r.relation.value})[/]")
+    if card.derivatives:
+        grouped = ", ".join(f"{r.node.name} [dim]({r.relation.value})[/]" for r in card.derivatives)
+        console.print(f"[bold]Derivatives[/] {grouped}")
 
 
 # ---------------------------------------------------------------------------

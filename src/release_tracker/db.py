@@ -37,6 +37,7 @@ from release_tracker.models import (
     ReleaseObservation,
     SocialPlatform,
     SourceTier,
+    WorkRelation,
 )
 
 _SCHEMA = """
@@ -98,6 +99,7 @@ CREATE TABLE IF NOT EXISTS edges (
     relation        TEXT NOT NULL,
     role            TEXT,
     ordinal         INTEGER,
+    part            INTEGER,
     source_provider TEXT NOT NULL,
     source_url      TEXT,
     source_tier     INTEGER NOT NULL,
@@ -155,6 +157,8 @@ class Database:
         edge_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(edges)")}
         if "ordinal" not in edge_cols:
             self._conn.execute("ALTER TABLE edges ADD COLUMN ordinal INTEGER")
+        if "part" not in edge_cols:
+            self._conn.execute("ALTER TABLE edges ADD COLUMN part INTEGER")
         entity_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(entities)")}
         if "consumption_state" not in entity_cols:
             self._conn.execute(
@@ -563,12 +567,13 @@ def _insert_observation(conn: sqlite3.Connection, obs: ReleaseObservation) -> No
 def _insert_edge(conn: sqlite3.Connection, edge: Edge) -> None:
     conn.execute(
         """
-        INSERT INTO edges (id, src_id, dst_id, relation, role, ordinal, source_provider,
+        INSERT INTO edges (id, src_id, dst_id, relation, role, ordinal, part, source_provider,
             source_url, source_tier, confidence, owned, fetched_at)
-        VALUES (:id, :src_id, :dst_id, :relation, :role, :ordinal, :source_provider,
+        VALUES (:id, :src_id, :dst_id, :relation, :role, :ordinal, :part, :source_provider,
             :source_url, :source_tier, :confidence, :owned, :fetched_at)
         ON CONFLICT(id) DO UPDATE SET
             ordinal=COALESCE(excluded.ordinal, edges.ordinal),
+            part=COALESCE(excluded.part, edges.part),
             source_url=COALESCE(excluded.source_url, edges.source_url),
             source_tier=excluded.source_tier,
             confidence=excluded.confidence,
@@ -582,6 +587,7 @@ def _insert_edge(conn: sqlite3.Connection, edge: Edge) -> None:
             "relation": edge.relation.value,
             "role": edge.role.value if edge.role else None,
             "ordinal": edge.ordinal,
+            "part": edge.part,
             "source_provider": edge.source_provider,
             "source_url": edge.source_url,
             "source_tier": int(edge.source_tier),
@@ -618,13 +624,26 @@ def _row_to_link(row: sqlite3.Row) -> ArtistLink:
     )
 
 
+def _parse_role(relation: RelationKind, raw: str | None) -> CreditRole | WorkRelation | None:
+    """The role column means CreditRole for credits, WorkRelation for derived-from."""
+    if raw is None:
+        return None
+    if relation is RelationKind.DERIVED_FROM:
+        return WorkRelation(raw)
+    if relation is RelationKind.CREDITED_ON:
+        return CreditRole(raw)
+    return None
+
+
 def _row_to_edge(row: sqlite3.Row) -> Edge:
+    relation = RelationKind(row["relation"])
     return Edge(
         src_id=row["src_id"],
         dst_id=row["dst_id"],
-        relation=RelationKind(row["relation"]),
-        role=CreditRole(row["role"]) if row["role"] else None,
+        relation=relation,
+        role=_parse_role(relation, row["role"]),
         ordinal=row["ordinal"],
+        part=row["part"],
         source_provider=row["source_provider"],
         source_url=row["source_url"],
         source_tier=SourceTier(row["source_tier"]),

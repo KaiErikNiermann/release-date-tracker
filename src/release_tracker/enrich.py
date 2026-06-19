@@ -41,7 +41,7 @@ from release_tracker.platforms import learn_predicted_platform
 from release_tracker.sources.base import Credit, MediaGraph, pinned_id
 from release_tracker.sources.igdb import IgdbSource
 from release_tracker.sources.tmdb import TmdbSource
-from release_tracker.titles import split_season
+from release_tracker.titles import extract_part, split_season
 
 _TV_KINDS = (MediaKind.TV, MediaKind.ANIME)
 _THEATRICAL_CHANNELS = (
@@ -114,8 +114,10 @@ async def enrich_work(
         summary.genres += 1
 
     if graph.series is not None:
-        season = split_season(entity.title)[1] if entity.kind in _TV_KINDS else None
-        _write_series(db, entity, graph.series, provider, now, ordinal=season)
+        is_tv = entity.kind in _TV_KINDS
+        season = split_season(entity.title)[1] if is_tv else None
+        part = extract_part(entity.title) if is_tv else None
+        _write_series(db, entity, graph.series, provider, now, ordinal=season, part=part)
         summary.series = 1
 
     for name, predicted in platforms:
@@ -231,6 +233,7 @@ def _write_series(
     now: datetime,
     *,
     ordinal: int | None = None,
+    part: int | None = None,
 ) -> None:
     name, source_id = series
     node = Node.create(NodeKind.SERIES, name, source=provider, source_id=source_id, owned=False)
@@ -240,7 +243,8 @@ def _write_series(
             src_id=entity.id,
             dst_id=node.id,
             relation=RelationKind.PART_OF_SERIES,
-            ordinal=ordinal,  # the season/part number, for "all seasons of X" queries
+            ordinal=ordinal,  # the season number, for "all seasons of X" queries
+            part=part,  # the mid-season cut (Part/Volume/Cour N) within the season
             source_provider=provider,
             source_tier=SourceTier.AGGREGATOR,
             confidence=0.9,

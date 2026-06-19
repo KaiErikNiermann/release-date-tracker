@@ -23,11 +23,20 @@ _WS_RE = re.compile(r"\s+")
 _PAREN_RE = re.compile(r"\s*\([^)]*\)\s*")
 
 
+_PART_RE = re.compile(r"\b(?:Part|Pt\.?|Volume|Vol\.?|Cour)\s*(\d+)\b", re.IGNORECASE)
+
+
 def split_season(title: str) -> tuple[str, int | None]:
     """('The Boys: Season 5') -> ('The Boys', 5); strip Part/Finale qualifiers too."""
     if (m := _SEASON_RE.match(title)) is not None:
         return m.group("show").strip(), int(m.group("n"))
     return _QUALIFIER_RE.sub("", title).strip(), None
+
+
+def extract_part(title: str) -> int | None:
+    """('Stranger Things: Season 5, Part 2') -> 2; a mid-season cut (Part/Volume/Cour N)."""
+    m = _PART_RE.search(title)
+    return int(m.group(1)) if m else None
 
 
 def search_title(title: str) -> str:

@@ -31,6 +31,7 @@ from release_tracker.models import (
     ReleaseChannel,
     SocialPlatform,
     SourceTier,
+    WorkRelation,
 )
 from release_tracker.resolve import best_estimates
 
@@ -133,6 +134,8 @@ class WorkCard:
     tags: tuple[TagLine, ...]
     series: tuple[str, ...] = field(default_factory=tuple)
     season: int | None = None  # this work's season/part number within its series
+    derived_from: tuple[RelatedWork, ...] = ()  # what it descends from
+    derivatives: tuple[RelatedWork, ...] = ()  # what descends from it
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +144,7 @@ class SeasonEntry:
 
     entity: Entity
     season: int | None
+    part: int | None  # mid-season cut (Part/Volume/Cour N), if any
     when: date | None
     owned: bool
 
@@ -243,7 +247,9 @@ def _credit_lines(db: Database, entity_id: str) -> list[CreditLine]:
     edges = db.edges_to(entity_id, RelationKind.CREDITED_ON)
     nodes = db.get_nodes(e.src_id for e in edges)
     lines = [
-        CreditLine(e.role or CreditRole.OTHER, n.name, n.id, n.owned)
+        CreditLine(
+            e.role if isinstance(e.role, CreditRole) else CreditRole.OTHER, n.name, n.id, n.owned
+        )
         for e in edges
         if (n := nodes.get(e.src_id))
     ]
@@ -340,6 +346,8 @@ def work_card(db: Database, entity: Entity) -> WorkCard:
         tags=tuple(_tag_lines(db, entity.id)),
         series=_series_names(db, entity.id),
         season=season,
+        derived_from=tuple(derived_from(db, entity.id)),
+        derivatives=tuple(derivatives_of(db, entity.id)),
     )
 
 
@@ -351,10 +359,14 @@ def seasons_of_series(db: Database, series_node: Node) -> list[SeasonEntry]:
         if work is not None:
             out.append(
                 SeasonEntry(
-                    work, edge.ordinal, _earliest_date(db, work.id), work_is_owned(db, work.id)
+                    work,
+                    edge.ordinal,
+                    edge.part,
+                    _earliest_date(db, work.id),
+                    work_is_owned(db, work.id),
                 )
             )
-    out.sort(key=lambda s: (s.season is None, s.season or 0, s.entity.title))
+    out.sort(key=lambda s: (s.season is None, s.season or 0, s.part or 0, s.entity.title))
     return out
 
 
@@ -374,7 +386,11 @@ def works_by_node(db: Database, node: Node) -> list[CreditedWork]:
         work = db.get_entity(edge.dst_id)
         if work is not None:
             out.append(
-                CreditedWork(work, edge.role or CreditRole.OTHER, work_is_owned(db, work.id))
+                CreditedWork(
+                    work,
+                    edge.role if isinstance(edge.role, CreditRole) else CreditRole.OTHER,
+                    work_is_owned(db, work.id),
+                )
             )
     out.sort(key=lambda w: w.entity.title)
     return out
@@ -446,3 +462,34 @@ def groups_of(db: Database, person: Node) -> list[Node]:
     ids = [e.dst_id for e in db.edges_from(person.id, RelationKind.MEMBER_OF)]
     nodes = db.get_nodes(ids)
     return sorted((nodes[i] for i in ids if i in nodes), key=lambda n: n.name)
+
+
+# --- cross-media lineage (derived_from) -----------------------------------
+@dataclass(frozen=True, slots=True)
+class RelatedWork:
+    """One end of a DERIVED_FROM edge, with the relation that links them."""
+
+    node: Node
+    relation: WorkRelation
+
+
+def derived_from(db: Database, node_id: str) -> list[RelatedWork]:
+    """What this work descends from: adaptation source, parent show, original, ..."""
+    edges = db.edges_from(node_id, RelationKind.DERIVED_FROM)
+    nodes = db.get_nodes(e.dst_id for e in edges)
+    return [
+        RelatedWork(n, e.role)
+        for e in edges
+        if isinstance(e.role, WorkRelation) and (n := nodes.get(e.dst_id))
+    ]
+
+
+def derivatives_of(db: Database, node_id: str) -> list[RelatedWork]:
+    """What descends from this work: spinoffs, sequels, adaptations, tie-ins, ..."""
+    edges = db.edges_to(node_id, RelationKind.DERIVED_FROM)
+    nodes = db.get_nodes(e.src_id for e in edges)
+    return [
+        RelatedWork(n, e.role)
+        for e in edges
+        if isinstance(e.role, WorkRelation) and (n := nodes.get(e.src_id))
+    ]

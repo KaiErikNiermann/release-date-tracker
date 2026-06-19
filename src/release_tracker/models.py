@@ -309,9 +309,28 @@ class RelationKind(enum.StrEnum):
     CREDITED_ON = "credited_on"  # person/org -> work (qualified by CreditRole)
     AVAILABLE_ON = "available_on"  # work -> platform
     EXHIBITS = "exhibits"  # work -> descriptor
-    PART_OF_SERIES = "part_of_series"  # work -> series
+    PART_OF_SERIES = "part_of_series"  # work -> series (ordinal=season, part=mid-season cut)
     MEMBER_OF = "member_of"  # person -> org (a member of a group/studio/band)
+    DERIVED_FROM = "derived_from"  # work -> work/series (qualified by WorkRelation)
     INFLUENCED_BY = "influenced_by"  # node -> node (reserved for the later walk)
+
+
+class WorkRelation(enum.StrEnum):
+    """The nature of a DERIVED_FROM edge between two works — cross-media lineage.
+
+    Unifies every "how works relate" link under one edge type + a role vocabulary,
+    the same way CreditRole unifies the "who" across mediums.
+    """
+
+    SPINOFF = "spinoff"  # Arcane: Noxus -> Arcane
+    ADAPTATION = "adaptation"  # a film/series -> the book it adapts
+    SEQUEL = "sequel"
+    PREQUEL = "prequel"
+    REMAKE = "remake"
+    REMASTER = "remaster"
+    TIE_IN = "tie_in"  # an art book / soundtrack / companion -> the work
+    SAME_UNIVERSE = "same_universe"
+    BASED_ON = "based_on"  # looser "inspired by / based on"
 
 
 class CreditRole(enum.StrEnum):
@@ -394,8 +413,10 @@ class Edge(BaseModel):
     src_id: str
     dst_id: str
     relation: RelationKind
-    role: CreditRole | None = None  # set for CREDITED_ON
-    ordinal: int | None = None  # the season/part number for PART_OF_SERIES, if any
+    # CreditRole for CREDITED_ON; WorkRelation for DERIVED_FROM; else None
+    role: CreditRole | WorkRelation | None = None
+    ordinal: int | None = None  # the season number for PART_OF_SERIES, if any
+    part: int | None = None  # the mid-season cut (Part/Volume/Cour N) within a season
     source_provider: str = "unknown"  # tmdb / igdb / steam / openai / user
     source_url: str | None = None
     source_tier: SourceTier = SourceTier.AGGREGATOR
