@@ -224,6 +224,10 @@ class ReleaseObservation(BaseModel):
     entity_id: str
     channel: ReleaseChannel
     region: str = "WW"  # ISO 3166-1 alpha-2, or "WW" for worldwide/unknown
+    # extra availability facets beyond region/channel — the open, extensible contingency set
+    # (e.g. {"platform": "ps5", "os": "linux", "language": "en"}). A facet absent here is a
+    # wildcard against the user's profile; region/channel stay native columns.
+    contingencies: dict[str, str] = Field(default_factory=dict[str, str])
     release_date: date | None = None
     date_end: date | None = None  # for windows/ranges; NULL for single dates
     precision: DatePrecision = DatePrecision.TBA
@@ -249,15 +253,24 @@ class ReleaseObservation(BaseModel):
 
     @property
     def id(self) -> str:
-        """Deterministic dedup key: same claim from same source collapses to one row."""
-        parts = (
+        """Deterministic dedup key: same claim from same source collapses to one row.
+
+        Facet-tagged rows are distinct claims (a PS5 date != a PC date), so contingencies
+        fold into the hash — but ONLY when present, so every pre-contingency row keeps its
+        existing id byte-for-byte (no re-pull churn on migration).
+        """
+        parts = [
             self.entity_id,
             self.channel.value,
             self.region,
             self.release_date.isoformat() if self.release_date else "",
             self.provider,
             self.source_url or "",
-        )
+        ]
+        if self.contingencies:
+            parts.append(
+                ";".join(f"{k}={self.contingencies[k]}" for k in sorted(self.contingencies))
+            )
         return hashlib.sha1("|".join(parts).encode()).hexdigest()  # noqa: S324
 
 
@@ -267,6 +280,7 @@ class BestEstimate(BaseModel):
     entity_id: str
     channel: ReleaseChannel
     region: str
+    contingencies: dict[str, str] = Field(default_factory=dict[str, str])  # carried from winner
     release_date: date | None
     date_end: date | None = None  # upper bound for a window/range; NULL for a single date
     precision: DatePrecision = DatePrecision.TBA
@@ -293,6 +307,9 @@ class NodeKind(enum.StrEnum):
     PLATFORM = "platform"  # streaming service or store you consume it on
     SERIES = "series"  # franchise / collection a work belongs to
     DESCRIPTOR = "descriptor"  # genre / theme / mood / style (see DescriptorKind)
+    CONDITION = (
+        "condition"  # an external blocker (e.g. "EAC Linux support"); resolution in `conditions`
+    )
 
 
 class DescriptorKind(enum.StrEnum):
@@ -319,6 +336,7 @@ class RelationKind(enum.StrEnum):
     MEMBER_OF = "member_of"  # person -> org (a member of a group/studio/band)
     DERIVED_FROM = "derived_from"  # work -> work/series (qualified by WorkRelation)
     INFLUENCED_BY = "influenced_by"  # node -> node (reserved for the later walk)
+    BLOCKED_BY = "blocked_by"  # work -> condition (availability gated on the condition resolving)
 
 
 class WorkRelation(enum.StrEnum):

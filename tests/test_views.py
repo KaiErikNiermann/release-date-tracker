@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from release_tracker import views
 from release_tracker.config import Settings, get_settings
 from release_tracker.db import Database
@@ -447,3 +449,36 @@ def test_work_card_groups_who_where_what(tmp_path: Path) -> None:
     assert card.platforms[0].name == "HBO Max"
     assert card.platforms[0].predicted is False
     assert len(card.estimates) >= 1
+
+
+def test_region_gating_blocks_a_non_profile_only_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = Database(tmp_path / "v.db")
+    today = date(2026, 6, 1)
+    ent = Entity.create("RegionLocked", MediaKind.MOVIE, consumption_state=ConsumptionState.WANT)
+    db.upsert_entity(ent)
+    db.upsert_node(Node(id=ent.id, node_kind=NodeKind.WORK, name=ent.title, owned=True))
+    # a confirmed, elapsed digital release — but only in RO (Romania)
+    db.upsert_observation(
+        ReleaseObservation(
+            entity_id=ent.id,
+            channel=ReleaseChannel.DIGITAL,
+            region="RO",
+            release_date=date(2025, 1, 1),
+            precision=DatePrecision.EXACT,
+            certainty=Certainty.CONFIRMED,
+            source_tier=SourceTier.AGGREGATOR,
+            provider="tmdb",
+            fetched_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+    )
+    # US profile: NOT available (no RO in profile) -> flagged in upcoming, not hidden
+    monkeypatch.setenv("RDT_REGIONS", "US,DE,GB")
+    us = Settings()
+    assert [r.title for r in views.available(db, today, us)] == []
+    blocked = [r for r in views.upcoming(db, today, us) if r.title == "RegionLocked"]
+    assert blocked and blocked[0].blockers == ("not available for your profile",)
+    # RO profile: available
+    monkeypatch.setenv("RDT_REGIONS", "RO")
+    assert [r.title for r in views.available(db, today, Settings())] == ["RegionLocked"]

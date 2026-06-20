@@ -14,6 +14,14 @@ from datetime import date, datetime
 from typing import Literal
 
 from release_tracker.config import Settings
+from release_tracker.contingency import (
+    ProfileMatcher,
+    Resolution,
+    ResolutionStatus,
+    combine,
+    estimate_resolution,
+    matcher_from_settings,
+)
 from release_tracker.db import Database
 from release_tracker.models import (
     BestEstimate,
@@ -121,14 +129,23 @@ class TrackRow:
     digital: DateCell | None
     pivot_when: date | None
     pivot_confirmed: bool
-    available_when: date | None
-    available_confirmed: bool
+    available_resolution: Resolution  # "available to me": max over my contingencies + blockers
+    blockers: tuple[str, ...]  # human labels for an unsatisfied profile / pending|never condition
     who: tuple[str, ...]
     where: tuple[str, ...]
     what: tuple[TagLine, ...]
     freshness: Freshness | None
     has_notes: bool
     state: ConsumptionState
+
+    @property
+    def available_when(self) -> date | None:
+        """The resolved availability date (None unless fully RESOLVED) — derived."""
+        return self.available_resolution.when
+
+    @property
+    def available_confirmed(self) -> bool:
+        return self.available_resolution.status is ResolutionStatus.RESOLVED
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,20 +190,18 @@ def _pick(
     estimates: Iterable[BestEstimate],
     channels: tuple[ReleaseChannel, ...] | None,
     *,
-    region: str | None = None,
+    matcher: ProfileMatcher | None = None,
 ) -> BestEstimate | None:
-    """Best dated estimate matching ``channels`` (any if None), preferring ``region``.
+    """Best dated estimate matching ``channels`` (any if None), optionally profile-gated.
 
-    Confirmed dates win over speculative ones: a wishlist/early *estimated* date must
-    not shadow the real *confirmed* release (e.g. a game with a speculative early-access
-    guess and a confirmed launch). Within the surviving pool, the most *precise* date
-    wins before the soonest — a coarse year-date's materialized day (Jan 1 / Dec 31) is
-    an artifact, so a known month/day must not be shadowed by a vague "2026". Only fall
-    back to speculative when nothing is confirmed.
+    With a ``matcher``, only estimates whose facets the user accepts survive (a hard gate —
+    this is how region/platform/OS/language constrain "available to me"). Confirmed dates
+    win over speculative; within the surviving pool the most *precise* date wins before the
+    soonest (a coarse year's Jan-1 materialization is an artifact, not a real early date).
     """
     cands = [e for e in estimates if e.release_date and (channels is None or e.channel in channels)]
-    if region is not None:
-        cands = [e for e in cands if e.region == region] or cands  # fall back to any region
+    if matcher is not None:
+        cands = [e for e in cands if matcher.matches({"region": e.region, **e.contingencies})]
     confirmed = [e for e in cands if e.certainty is Certainty.CONFIRMED]
     pool = confirmed or cands
     if not pool:
@@ -238,19 +253,42 @@ def _consumption(
     return min(dated, key=lambda e: e.release_date or date.max) if dated else None
 
 
+def _condition_resolutions(db: Database, entity_id: str) -> list[Resolution]:
+    """Resolutions of the external conditions this work is BLOCKED_BY (filled in Slice 2)."""
+    return []
+
+
 def _track_row(
     db: Database, entity: Entity, today: date, settings: Settings, has_notes: bool
 ) -> TrackRow:
     estimates = best_estimates(db.iter_observations(entity.id))
-    region = settings.regions[0] if settings.regions else "US"
+    matcher = matcher_from_settings(settings)
+    chan = settings.availability_channel
+    # display picks (unfiltered) drive the row + upcoming ordering — nothing is hidden
     if entity.kind is MediaKind.MOVIE:
-        theatrical = _pick(estimates, _THEATRICAL, region=region)
+        theatrical = _pick(estimates, _THEATRICAL)
         digital = _pick(estimates, (ReleaseChannel.DIGITAL,))
     else:
         theatrical = None
         digital = _pick(estimates, None)  # the single release date
-    pivot = _pivot(theatrical, digital, settings.availability_channel)
-    consume = _consumption(theatrical, digital, settings.availability_channel)
+    pivot = _pivot(theatrical, digital, chan)
+    # consumption picks are profile-gated: "is it released *for me* on my channel"
+    if entity.kind is MediaKind.MOVIE:
+        consume = _consumption(
+            _pick(estimates, _THEATRICAL, matcher=matcher),
+            _pick(estimates, (ReleaseChannel.DIGITAL,), matcher=matcher),
+            chan,
+        )
+    else:
+        consume = _consumption(None, _pick(estimates, None, matcher=matcher), chan)
+    facet = estimate_resolution(consume)
+    available_to_me = combine([facet, *_condition_resolutions(db, entity.id)])
+    # a profile blocker: a consumption date exists in general, but none match my profile
+    blockers: tuple[str, ...] = ()
+    if consume is None and _consumption(theatrical, digital, chan) is not None:
+        blockers = ("not available for your profile",)
+    if available_to_me.status is ResolutionStatus.NEVER and available_to_me.blocker:
+        blockers += (available_to_me.blocker,)
     credits = _credit_lines(db, entity.id)
     return TrackRow(
         entity_id=entity.id,
@@ -260,8 +298,8 @@ def _track_row(
         digital=_cell(digital),
         pivot_when=pivot.release_date if pivot else None,
         pivot_confirmed=pivot is not None and pivot.certainty is Certainty.CONFIRMED,
-        available_when=consume.release_date if consume else None,
-        available_confirmed=consume is not None and consume.certainty is Certainty.CONFIRMED,
+        available_resolution=available_to_me,
+        blockers=blockers,
         who=tuple(dict.fromkeys(c.name for c in credits))[:2],
         where=tuple(p.name for p in _platform_lines(db, entity.id)[:2]),
         what=tuple(_tag_lines(db, entity.id)[:4]),

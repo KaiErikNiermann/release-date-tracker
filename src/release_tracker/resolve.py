@@ -62,7 +62,7 @@ def rescore(observations: Sequence[ReleaseObservation]) -> list[ReleaseObservati
     Corroboration is counted across *distinct providers/sources* that assert the
     same (channel, region, release_date).
     """
-    groups: dict[tuple[str, str, str], set[str]] = defaultdict(set)
+    groups: dict[tuple[str, tuple[tuple[str, str], ...], str], set[str]] = defaultdict(set)
     for obs in observations:
         groups[_slot_key(obs)].add(obs.source_url or obs.provider)
 
@@ -74,9 +74,20 @@ def rescore(observations: Sequence[ReleaseObservation]) -> list[ReleaseObservati
     return scored
 
 
-def _slot_key(obs: ReleaseObservation) -> tuple[str, str, str]:
-    """Identity for corroboration: same channel + region + date == same claim."""
-    return (obs.channel.value, obs.region, obs.release_date.isoformat() if obs.release_date else "")
+def _facets(obs: ReleaseObservation) -> tuple[tuple[str, str], ...]:
+    """The full availability-facet set (region + extensible contingencies), hashable.
+
+    A PS5 row and a PC row are *distinct availabilities the user OR-s over*, so they must
+    not collapse — the facet set, not just region, identifies a slot.
+    """
+    facets = {"region": obs.region, **obs.contingencies}
+    return tuple(sorted(facets.items()))
+
+
+def _slot_key(obs: ReleaseObservation) -> tuple[str, tuple[tuple[str, str], ...], str]:
+    """Identity for corroboration: same channel + facets + date == same claim."""
+    when = obs.release_date.isoformat() if obs.release_date else ""
+    return (obs.channel.value, _facets(obs), when)
 
 
 def _sort_key(obs: ReleaseObservation) -> tuple[int, int, float, int, str, str]:
@@ -100,21 +111,24 @@ def _sort_key(obs: ReleaseObservation) -> tuple[int, int, float, int, str, str]:
 
 
 def best_estimates(observations: Iterable[ReleaseObservation]) -> list[BestEstimate]:
-    """Collapse to one best estimate per (entity, channel, region)."""
+    """Collapse to one best estimate per (entity, channel, facet-set)."""
     scored = rescore(list(observations))
-    by_slot: dict[tuple[str, str, str], list[ReleaseObservation]] = defaultdict(list)
+    by_slot: dict[tuple[str, str, tuple[tuple[str, str], ...]], list[ReleaseObservation]] = (
+        defaultdict(list)
+    )
     for obs in scored:
-        by_slot[(obs.entity_id, obs.channel.value, obs.region)].append(obs)
+        by_slot[(obs.entity_id, obs.channel.value, _facets(obs))].append(obs)
 
     results: list[BestEstimate] = []
-    for (entity_id, _channel, region), obss in by_slot.items():
+    for (entity_id, _channel, _facetkey), obss in by_slot.items():
         ranked = sorted(obss, key=_sort_key, reverse=True)
         winner = ranked[0]
         results.append(
             BestEstimate(
                 entity_id=entity_id,
                 channel=winner.channel,
-                region=region,
+                region=winner.region,
+                contingencies=winner.contingencies,
                 release_date=winner.release_date,
                 date_end=winner.date_end,
                 precision=winner.precision,

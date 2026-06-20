@@ -10,6 +10,11 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _csv_lower(raw: str) -> tuple[str, ...]:
+    """Parse a comma-separated accept-list to a lowercased tuple (facet values are lowercased)."""
+    return tuple(v.strip().lower() for v in raw.split(",") if v.strip())
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -52,6 +57,16 @@ class Settings(BaseSettings):
         default="digital", alias="RDT_AVAILABILITY_CHANNEL"
     )
 
+    # --- contingency profile: what I own / accept (gates "available to me") ---
+    # Each is an empty-by-default accept-set; empty => I don't constrain that dimension
+    # (wildcard), so availability is unchanged until I opt in. Region (above) is the one
+    # pre-populated dimension. Custom dims: "dim:v1|v2;dim2:v3".
+    platforms_raw: str = Field(default="", alias="RDT_PLATFORMS")  # "ps5,pc"
+    os_raw: str = Field(default="", alias="RDT_OS")  # "linux,windows"
+    languages_raw: str = Field(default="", alias="RDT_LANGUAGES")  # "en"
+    tech_raw: str = Field(default="", alias="RDT_TECH")  # "ray_tracing"
+    custom_contingencies_raw: str = Field(default="", alias="RDT_CUSTOM_CONTINGENCIES")
+
     # --- data freshness thresholds (days) ---
     fresh_days: int = Field(default=14, alias="RDT_FRESH_DAYS")  # green if refreshed within
     stale_days: int = Field(default=60, alias="RDT_STALE_DAYS")  # orange up to here, then red
@@ -69,6 +84,34 @@ class Settings(BaseSettings):
     @property
     def regions(self) -> tuple[str, ...]:
         return tuple(r.strip().upper() for r in self.regions_raw.split(",") if r.strip())
+
+    @property
+    def platforms(self) -> tuple[str, ...]:
+        return _csv_lower(self.platforms_raw)
+
+    @property
+    def os_targets(self) -> tuple[str, ...]:
+        return _csv_lower(self.os_raw)
+
+    @property
+    def languages(self) -> tuple[str, ...]:
+        return _csv_lower(self.languages_raw)
+
+    @property
+    def tech_available(self) -> tuple[str, ...]:
+        return _csv_lower(self.tech_raw)
+
+    @property
+    def custom_contingencies(self) -> dict[str, frozenset[str]]:
+        """Parse "dim:v1|v2;dim2:v3" into {dim: {values}} (lowercased)."""
+        out: dict[str, frozenset[str]] = {}
+        for clause in self.custom_contingencies_raw.split(";"):
+            dim, _, vals = clause.partition(":")
+            dim = dim.strip().lower()
+            values = frozenset(v.strip().lower() for v in vals.split("|") if v.strip())
+            if dim and values:
+                out[dim] = values
+        return out
 
 
 @lru_cache(maxsize=1)

@@ -73,7 +73,8 @@ CREATE TABLE IF NOT EXISTS observations (
     source_quote    TEXT,
     published_at    TEXT,
     confidence      REAL NOT NULL,
-    fetched_at      TEXT NOT NULL
+    fetched_at      TEXT NOT NULL,
+    contingencies   TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE INDEX IF NOT EXISTS idx_obs_entity ON observations(entity_id);
@@ -135,6 +136,17 @@ CREATE TABLE IF NOT EXISTS artist_links (
     PRIMARY KEY (node_id, platform)
 );
 CREATE INDEX IF NOT EXISTS idx_links_node ON artist_links(node_id);
+
+-- external blockers: one row per CONDITION node, its three-valued resolution.
+-- A work BLOCKED_BY a condition is unavailable until the condition resolves.
+CREATE TABLE IF NOT EXISTS conditions (
+    node_id        TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+    status         TEXT NOT NULL,            -- 'resolved' | 'pending' | 'never'
+    resolve_date   TEXT,                     -- ISO date iff status='resolved'
+    precision      TEXT,                     -- DatePrecision for an EDTF-authored date
+    note           TEXT,
+    updated_at     TEXT NOT NULL
+);
 """
 
 
@@ -167,6 +179,11 @@ class Database:
         node_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(nodes)")}
         if "followed" not in node_cols:
             self._conn.execute("ALTER TABLE nodes ADD COLUMN followed INTEGER NOT NULL DEFAULT 0")
+        obs_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(observations)")}
+        if "contingencies" not in obs_cols:
+            self._conn.execute(
+                "ALTER TABLE observations ADD COLUMN contingencies TEXT NOT NULL DEFAULT '{}'"
+            )
 
     def close(self) -> None:
         self._conn.close()
@@ -548,11 +565,11 @@ def _insert_observation(conn: sqlite3.Connection, obs: ReleaseObservation) -> No
         INSERT INTO observations (id, entity_id, channel, region, release_date,
             date_end, precision, price_minor, price_currency, certainty,
             source_tier, provider, source_name, source_url, source_quote,
-            published_at, confidence, fetched_at)
+            published_at, confidence, fetched_at, contingencies)
         VALUES (:id, :entity_id, :channel, :region, :release_date, :date_end,
             :precision, :price_minor, :price_currency, :certainty, :source_tier,
             :provider, :source_name, :source_url, :source_quote, :published_at,
-            :confidence, :fetched_at)
+            :confidence, :fetched_at, :contingencies)
         ON CONFLICT(id) DO UPDATE SET
             precision=excluded.precision,
             price_minor=excluded.price_minor,
@@ -581,6 +598,7 @@ def _insert_observation(conn: sqlite3.Connection, obs: ReleaseObservation) -> No
             "published_at": obs.published_at.isoformat() if obs.published_at else None,
             "confidence": obs.confidence,
             "fetched_at": (obs.fetched_at or datetime.now(UTC)).isoformat(),
+            "contingencies": json.dumps(obs.contingencies),
         },
     )
 
@@ -698,6 +716,7 @@ def _row_to_observation(row: sqlite3.Row) -> ReleaseObservation:
         entity_id=row["entity_id"],
         channel=ReleaseChannel(row["channel"]),
         region=row["region"],
+        contingencies=json.loads(row["contingencies"]) if row["contingencies"] else {},
         release_date=_parse_date(row["release_date"]),
         date_end=_parse_date(row["date_end"]),
         precision=DatePrecision(row["precision"]),

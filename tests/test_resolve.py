@@ -118,3 +118,27 @@ def test_tba_row_kept_when_no_date_exists_anywhere() -> None:
         [_channel_obs(ReleaseChannel.PRIMARY, None, DatePrecision.TBA, provider="igdb")]
     )
     assert len(ests) == 1 and ests[0].release_date is None
+
+
+def _platform_obs(platform: str, when: date) -> ReleaseObservation:
+    return ReleaseObservation(
+        entity_id="game-x",
+        channel=ReleaseChannel.PRIMARY,
+        region="WW",
+        contingencies={"platform": platform},
+        release_date=when,
+        precision=DatePrecision.EXACT,
+        certainty=Certainty.CONFIRMED,
+        source_tier=SourceTier.FIRST_PARTY_STORE,
+        fetched_at=datetime(2026, 6, 1, tzinfo=UTC),
+    )
+
+
+def test_facet_tagged_rows_stay_distinct_estimates() -> None:
+    # a PS5 date and a PC date on one entity are different availabilities the user OR-s
+    # over -> they must NOT collapse into one slot.
+    ests = best_estimates(
+        [_platform_obs("ps5", date(2026, 3, 1)), _platform_obs("pc", date(2026, 9, 1))]
+    )
+    by_platform = {e.contingencies.get("platform"): e.release_date for e in ests}
+    assert by_platform == {"ps5": date(2026, 3, 1), "pc": date(2026, 9, 1)}
