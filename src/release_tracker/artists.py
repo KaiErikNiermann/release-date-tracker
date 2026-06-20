@@ -8,7 +8,8 @@ the ``--json`` contract the `/rd-artist` skill consumes (mirrors ``lookup.RdRepo
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 
 import httpx
@@ -27,9 +28,13 @@ from release_tracker.models import (
     SocialPlatform,
     SourceTier,
 )
-from release_tracker.social import fetcher_for
+from release_tracker.social import Activity, fetcher_for
+from release_tracker.sources.tmdb import FilmCredit, TmdbSource
 
 log = get_logger("artists")
+
+# a PERSON node canonically keyed on TMDB (person:tmdb:7467) — the filmography pivot.
+_TMDB_PERSON_ID = re.compile(r"^person:tmdb:(\d+)$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +107,72 @@ def add_membership(db: Database, person_ref: str, group_ref: str) -> tuple[Node,
     return person, group
 
 
+# --- filmography: a film/TV creator's canonical pipeline ------------------
+def _tmdb_person_id(node: Node) -> str | None:
+    """The TMDB person id a node pivots on, if it's canonically keyed there."""
+    match = _TMDB_PERSON_ID.match(node.id)
+    return match.group(1) if match else None
+
+
+def _filmography_link(node: Node) -> ArtistLink | None:
+    """Auto-derive the FREE filmography pipeline from a person's canonical TMDB id.
+
+    No web search needed — unlike a feed, a film/TV creator's primary output is their
+    body of work, which we already know the canonical key for the moment we resolved them.
+    """
+    person_id = _tmdb_person_id(node)
+    if person_id is None or node.node_kind is not NodeKind.PERSON:
+        return None
+    return ArtistLink(
+        node_id=node.id,
+        platform=SocialPlatform.FILMOGRAPHY,
+        tier=LinkTier.FREE,
+        url=f"https://www.themoviedb.org/person/{person_id}",
+        handle=person_id,
+    )
+
+
+def ensure_filmography_link(db: Database, node: Node) -> None:
+    """Attach the derived filmography pipeline if the person has one and it's missing.
+
+    Idempotent — runs on both follow and refresh, so a film/TV creator followed before
+    this pipeline existed gets backfilled the next time their radar is touched.
+    """
+    link = _filmography_link(node)
+    if link is None:
+        return
+    if not any(existing.platform is link.platform for existing in db.iter_artist_links(node.id)):
+        db.upsert_artist_link(link)
+
+
+_SLATE_LIMIT = 8
+
+
+def partition_filmography(
+    credits: tuple[FilmCredit, ...], today: date, *, limit: int = _SLATE_LIMIT
+) -> tuple[FilmCredit | None, tuple[FilmCredit, ...]]:
+    """Split a filmography into (latest released, soonest-first upcoming slate).
+
+    Pure — undated credits drop out of both halves (they can't be placed on the calendar).
+    """
+    released = [c for c in credits if c.when and c.when <= today]
+    upcoming = sorted(
+        (c for c in credits if c.when and c.when > today), key=lambda c: c.when or today
+    )
+    latest = max(released, key=lambda c: c.when or today) if released else None
+    return latest, tuple(upcoming[:limit])
+
+
+async def _split_filmography(
+    client: httpx.AsyncClient, settings: Settings, person_id: str, today: date
+) -> tuple[FilmCredit | None, tuple[FilmCredit, ...]]:
+    """(latest released, upcoming slate) for a person's filmography — one TMDB call."""
+    if not settings.tmdb_api_key:
+        return None, ()
+    credits = await TmdbSource().person_credits(client, settings.tmdb_api_key, person_id)
+    return partition_filmography(credits, today)
+
+
 async def add_artist(
     client: httpx.AsyncClient,
     db: Database,
@@ -110,6 +181,8 @@ async def add_artist(
     kind: NodeKind = NodeKind.PERSON,
     links: list[LinkSpec],
     fetch: bool = True,
+    settings: Settings | None = None,
+    today: date | None = None,
 ) -> Node:
     """Follow an artist (reusing an existing graph node if one matches) + attach links."""
     node = find_artist(db, name) or Node.create(kind, name, owned=True, followed=True)
@@ -125,23 +198,26 @@ async def add_artist(
                 handle=spec.handle,
             )
         )
+    # a film/TV person's body of work is a free pipeline we can derive from their id
+    ensure_filmography_link(db, node)
     if fetch:
-        await refresh_artist(client, db, node)
+        await refresh_artist(client, db, node, settings=settings, today=today)
     return node
 
 
-async def refresh_artist(client: httpx.AsyncClient, db: Database, node: Node) -> int:
+async def refresh_artist(
+    client: httpx.AsyncClient,
+    db: Database,
+    node: Node,
+    *,
+    settings: Settings | None = None,
+    today: date | None = None,
+) -> int:
     """Re-fetch the latest content for each fetchable link. Returns how many updated."""
+    ensure_filmography_link(db, node)  # backfill creators followed before this pipeline existed
     updated = 0
     for link in db.iter_artist_links(node.id):
-        fetcher = fetcher_for(link.platform)
-        if fetcher is None:
-            continue
-        try:
-            activity = await fetcher.fetch_latest(client, link)
-        except Exception as exc:  # a flaky social endpoint must not abort the others
-            log.warning("artists.fetch_error", platform=link.platform.value, error=str(exc))
-            continue
+        activity = await _latest_for(client, node, link, settings, today)
         if activity is not None:
             db.update_link_activity(
                 node.id,
@@ -155,7 +231,55 @@ async def refresh_artist(client: httpx.AsyncClient, db: Database, node: Node) ->
     return updated
 
 
+async def _latest_for(
+    client: httpx.AsyncClient,
+    node: Node,
+    link: ArtistLink,
+    settings: Settings | None,
+    today: date | None,
+) -> Activity | None:
+    """The newest drop on one link — filmography's latest release, or a feed's latest post."""
+    try:
+        if link.platform is SocialPlatform.FILMOGRAPHY:
+            person_id = _tmdb_person_id(node)
+            if person_id is None or settings is None:
+                return None
+            latest, _ = await _split_filmography(client, settings, person_id, today or _utc_today())
+            if latest is None:
+                return None
+            return Activity(
+                title=f"{latest.role}: {latest.title}", url=latest.url, posted_at=latest.when
+            )
+        fetcher = fetcher_for(link.platform)
+        if fetcher is None:
+            return None
+        return await fetcher.fetch_latest(client, link)
+    except Exception as exc:  # a flaky external endpoint must not abort the other links
+        log.warning("artists.fetch_error", platform=link.platform.value, error=str(exc))
+        return None
+
+
+def _utc_today() -> date:
+    return datetime.now(UTC).date()
+
+
 # --- the /rd-artist JSON contract -----------------------------------------
+@dataclass(frozen=True, slots=True)
+class SlateItem:
+    """An upcoming credit on a creator's filmography — the discovery payoff.
+
+    ``tracked`` marks whether the work is already in the local tracker, so the skill can
+    diff "of their slate, here's what you don't follow yet" and offer a /rd-add hook.
+    """
+
+    title: str
+    kind: str  # "movie" | "tv"
+    role: str
+    when: date | None
+    url: str
+    tracked: bool
+
+
 @dataclass(frozen=True, slots=True)
 class ArtistReport:
     """Everything the /rd-artist skill needs to render one creator."""
@@ -167,6 +291,7 @@ class ArtistReport:
     kind: str | None = None
     links: tuple[ArtistLink, ...] = ()
     tracked_works: tuple[views.CreditedWork, ...] = ()
+    slate: tuple[SlateItem, ...] = ()  # upcoming filmography (film/TV creators)
     members: tuple[Node, ...] = ()  # for a group: its people
     groups: tuple[Node, ...] = ()  # for a person: their groups
     notes: tuple[str, ...] = ()
@@ -204,6 +329,17 @@ class ArtistReport:
                 {"title": w.entity.title, "kind": w.entity.kind.value, "role": w.role.value}
                 for w in self.tracked_works
             ],
+            "slate": [
+                {
+                    "title": s.title,
+                    "kind": s.kind,
+                    "role": s.role,
+                    "when": s.when.isoformat() if s.when else None,
+                    "url": s.url,
+                    "tracked": s.tracked,
+                }
+                for s in self.slate
+            ],
             "members": [{"name": n.name, "node_id": n.id} for n in self.members],
             "groups": [{"name": n.name, "node_id": n.id} for n in self.groups],
             "notes": list(self.notes),
@@ -229,3 +365,46 @@ def build_report(
         groups=tuple(views.groups_of(db, node)),
         _freshness=freshness,
     )
+
+
+async def build_report_live(
+    client: httpx.AsyncClient,
+    db: Database,
+    node: Node | None,
+    query: str,
+    settings: Settings,
+    today: date,
+) -> ArtistReport:
+    """``build_report`` enriched with the upcoming-filmography slate (one TMDB call).
+
+    The slate is the artist-first payoff for film/TV creators — their canonical pipeline
+    is a release calendar, not a feed — so it's computed live rather than stored.
+    """
+    report = build_report(db, node, query, settings, today)
+    person_id = _tmdb_person_id(node) if node is not None else None
+    if node is None or person_id is None:
+        return report
+    try:
+        _, upcoming = await _split_filmography(client, settings, person_id, today)
+    except Exception as exc:  # a transient TMDB hiccup must not sink the whole card
+        log.warning("artists.slate_error", node=node.id, error=str(exc))
+        return report
+    if not upcoming:
+        return report
+    tracked_tmdb = {
+        w.entity.external_ids.get("tmdb")
+        for w in report.tracked_works
+        if w.entity.external_ids.get("tmdb")
+    }
+    slate = tuple(
+        SlateItem(
+            title=c.title,
+            kind=c.media,
+            role=c.role,
+            when=c.when,
+            url=c.url,
+            tracked=c.tmdb_id in tracked_tmdb,
+        )
+        for c in upcoming
+    )
+    return replace(report, slate=slate)

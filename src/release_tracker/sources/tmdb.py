@@ -54,6 +54,24 @@ class MovieMeta:
     title: str | None
 
 
+@dataclass(slots=True, frozen=True)
+class FilmCredit:
+    """One credit on a person's filmography — the artist-radar's canonical pipeline.
+
+    A film/TV creator's primary output isn't a feed they post to; it's their body of
+    work arriving on a release calendar. ``person_credits`` mines that from TMDB so the
+    radar can surface a director/actor's latest release and upcoming slate the same way
+    it surfaces a YouTuber's latest video.
+    """
+
+    title: str
+    media: str  # "movie" | "tv"
+    role: str  # "Director" / "Writer" / "Creator" / "Actor"
+    when: date | None
+    tmdb_id: str
+    url: str
+
+
 # TMDB release_dates `type` integer -> our channel.
 _TYPE_TO_CHANNEL: dict[int, ReleaseChannel] = {
     1: ReleaseChannel.PREMIERE,
@@ -276,6 +294,34 @@ class TmdbSource:
             title=title,
         )
 
+    async def person_credits(
+        self, client: httpx.AsyncClient, key: str, person_id: str
+    ) -> tuple[FilmCredit, ...]:
+        """A person's creative filmography — director/writer/creator + top-billed cast.
+
+        Mines ``/person/{id}/combined_credits`` (one keyed GET), keeping only meaningful
+        creative roles and dropping talk-show / "Self" noise. One credit per work (the
+        most senior role wins when someone both directs and writes), newest first.
+        """
+        payload = cast(
+            "dict[str, Any]",
+            await get_json(
+                client, f"{BASE}/person/{person_id}/combined_credits", params={"api_key": key}
+            ),
+        )
+        best: dict[tuple[str, str], FilmCredit] = {}
+        for member in cast("list[dict[str, Any]]", payload.get("crew", [])):
+            role = _FILMOGRAPHY_JOBS.get(str(member.get("job", "")))
+            if role is not None:
+                consider_credit(best, member, role)
+        for member in cast("list[dict[str, Any]]", payload.get("cast", [])):
+            order = member.get("order")
+            character = str(member.get("character", "")).strip().lower()
+            if not isinstance(order, int) or order > _MAX_CAST or is_self(character):
+                continue
+            consider_credit(best, member, "Actor")
+        return tuple(sorted(best.values(), key=lambda fc: fc.when or date.min, reverse=True))
+
     async def _flatrate_providers(
         self,
         client: httpx.AsyncClient,
@@ -395,6 +441,47 @@ _CREW_ROLES: dict[str, CreditRole] = {
     "Original Music Composer": CreditRole.COMPOSER,
 }
 _MAX_CAST = 5
+
+# TMDB crew `job` -> the filmography role label we keep (everything else is dropped as
+# below-the-line noise). Creator catches a TV showrunner; Screenplay/Story fold to Writer.
+_FILMOGRAPHY_JOBS: dict[str, str] = {
+    "Director": "Director",
+    "Creator": "Creator",
+    "Writer": "Writer",
+    "Screenplay": "Writer",
+    "Story": "Writer",
+}
+# seniority for collapsing multiple credits on one work to a single line (director wins).
+_ROLE_RANK: dict[str, int] = {"Director": 3, "Creator": 3, "Writer": 2, "Actor": 1}
+_SELF_CHARACTERS = frozenset({"self", "himself", "herself", "themselves"})
+
+
+def is_self(character: str) -> bool:
+    """A talk-show / documentary 'as themselves' appearance, not a creative credit."""
+    return character in _SELF_CHARACTERS or character.startswith("self ")
+
+
+def consider_credit(
+    best: dict[tuple[str, str], FilmCredit], raw: dict[str, Any], role: str
+) -> None:
+    """Keep the most senior role per (media, work) — crew director over a cast bit-part."""
+    media = str(raw.get("media_type", ""))
+    work_id = str(raw.get("id", "") or "")
+    title = str(raw.get("title") or raw.get("name") or "").strip()
+    if media not in ("movie", "tv") or not work_id or not title:
+        return
+    key = (media, work_id)
+    prev = best.get(key)
+    if prev is not None and _ROLE_RANK[prev.role] >= _ROLE_RANK[role]:
+        return
+    best[key] = FilmCredit(
+        title=title,
+        media=media,
+        role=role,
+        when=_parse_tmdb_date(raw.get("release_date") or raw.get("first_air_date")),
+        tmdb_id=work_id,
+        url=f"https://www.themoviedb.org/{media}/{work_id}",
+    )
 
 
 def _crew_people(credits: dict[str, Any]) -> list[Credit]:

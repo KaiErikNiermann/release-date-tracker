@@ -31,7 +31,7 @@ from release_tracker.artists import (
     ArtistReport,
     add_artist,
     add_membership,
-    build_report,
+    build_report_live,
     find_artist,
     parse_link_spec,
     refresh_artist,
@@ -504,14 +504,21 @@ def artist_add(
         raise typer.BadParameter(str(exc)) from None
     db = _db()
 
-    async def go() -> Node:
+    async def go() -> ArtistReport:
         async with make_client() as client:
-            return await add_artist(
-                client, db, name, kind=node_kind, links=specs, fetch=not no_fetch
+            node = await add_artist(
+                client,
+                db,
+                name,
+                kind=node_kind,
+                links=specs,
+                fetch=not no_fetch,
+                settings=settings,
+                today=_today(),
             )
+            return await build_report_live(client, db, node, name, settings, _today())
 
-    node = asyncio.run(go())
-    report = build_report(db, node, name, settings, _today())
+    report = asyncio.run(go())
     db.close()
     if as_json:
         print(json.dumps(report.to_dict(), indent=2))
@@ -547,6 +554,7 @@ def artist_refresh(
 ) -> None:
     """Re-fetch the latest content for one artist or --all."""
     configure_logging()
+    settings = get_settings()
     db = _db()
     if all_artists:
         targets = db.followed_artists()
@@ -560,7 +568,7 @@ def artist_refresh(
     async def go() -> None:
         async with make_client() as client:
             for node in targets:
-                n = await refresh_artist(client, db, node)
+                n = await refresh_artist(client, db, node, settings=settings, today=_today())
                 console.print(f"[green]Refreshed[/] {node.name}: {n} link(s) updated.")
 
     asyncio.run(go())
@@ -577,7 +585,12 @@ def artist_show(
     settings = get_settings()
     db = _db()
     node = find_artist(db, name)
-    report = build_report(db, node, name, settings, _today())
+
+    async def go() -> ArtistReport:
+        async with make_client() as client:
+            return await build_report_live(client, db, node, name, settings, _today())
+
+    report = asyncio.run(go())
     db.close()
     if as_json:
         print(json.dumps(report.to_dict(), indent=2))
@@ -693,6 +706,12 @@ def _render_artist_report(report: ArtistReport) -> None:
                     f" [dim]· latest: {link.latest_title or 'post'} ({_ago(link.last_post_at)})[/]"
                 )
             console.print(f"  [cyan]{link.platform.value}[/] {link.url}{latest}")
+    if report.slate:
+        console.print("[bold]On the slate[/] [dim](upcoming)[/]")
+        for s in report.slate:
+            when = s.when.isoformat() if s.when else "TBA"
+            mark = "[green]✓ tracked[/]" if s.tracked else "[dim]+ /rd-add[/]"
+            console.print(f"  [dim]{when}[/] [cyan]{s.role}[/] {s.title} [dim]({s.kind})[/] {mark}")
     if report.members:
         console.print(f"[bold]Members[/] {', '.join(n.name for n in report.members)}")
     if report.groups:

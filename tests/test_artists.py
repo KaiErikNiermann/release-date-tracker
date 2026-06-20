@@ -6,7 +6,13 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 from release_tracker import views
-from release_tracker.artists import add_membership, build_report, parse_link_spec
+from release_tracker.artists import (
+    add_membership,
+    build_report,
+    ensure_filmography_link,
+    parse_link_spec,
+    partition_filmography,
+)
 from release_tracker.config import get_settings
 from release_tracker.db import Database
 from release_tracker.models import (
@@ -22,6 +28,7 @@ from release_tracker.models import (
     SocialPlatform,
     SourceTier,
 )
+from release_tracker.sources.tmdb import FilmCredit
 
 
 def _artist(db: Database, name: str, *, followed: bool = True) -> Node:
@@ -166,3 +173,52 @@ def test_membership_links_person_and_group(tmp_path: Path) -> None:
     assert [m["name"] for m in group_report.to_dict()["members"]] == ["Thomas Grip"]  # type: ignore[union-attr]
     person_report = build_report(db, person, "Thomas Grip", s, today)
     assert [g["name"] for g in person_report.to_dict()["groups"]] == ["Frictional Games"]  # type: ignore[union-attr]
+
+
+# --- filmography pipeline (film/TV creators) ------------------------------
+def _credit(title: str, when: date | None, role: str = "Director") -> FilmCredit:
+    return FilmCredit(
+        title=title, media="movie", role=role, when=when, tmdb_id=title, url=f"u/{title}"
+    )
+
+
+def test_partition_filmography_splits_latest_and_slate() -> None:
+    today = date(2026, 6, 19)
+    credits = (
+        _credit("Old", date(2020, 1, 1)),
+        _credit("Recent", date(2025, 11, 1)),  # latest released
+        _credit("Soon", date(2026, 11, 24)),
+        _credit("Later", date(2027, 9, 1)),
+        _credit("Undated", None),  # dropped from both halves
+    )
+    latest, slate = partition_filmography(credits, today)
+    assert latest is not None and latest.title == "Recent"
+    assert [c.title for c in slate] == ["Soon", "Later"]  # upcoming, soonest first
+
+
+def test_partition_filmography_honours_slate_limit() -> None:
+    today = date(2026, 6, 19)
+    credits = tuple(_credit(f"F{i}", date(2027, 1, i + 1)) for i in range(10))
+    _, slate = partition_filmography(credits, today, limit=3)
+    assert [c.title for c in slate] == ["F0", "F1", "F2"]
+
+
+def test_ensure_filmography_link_derives_from_tmdb_person_id(tmp_path: Path) -> None:
+    db = Database(tmp_path / "a.db")
+    node = Node.create(NodeKind.PERSON, "A Director", source="tmdb", source_id="7467", owned=True)
+    db.upsert_node(node)
+    ensure_filmography_link(db, node)
+    (link,) = db.iter_artist_links(node.id)
+    assert link.platform is SocialPlatform.FILMOGRAPHY
+    assert link.tier is LinkTier.FREE
+    assert link.handle == "7467"
+    # idempotent — a second call doesn't fork a duplicate
+    ensure_filmography_link(db, node)
+    assert len(db.iter_artist_links(node.id)) == 1
+
+
+def test_ensure_filmography_link_skips_non_tmdb_nodes(tmp_path: Path) -> None:
+    db = Database(tmp_path / "a.db")
+    node = _artist(db, "A YouTuber")  # name-slug id, no canonical TMDB key
+    ensure_filmography_link(db, node)
+    assert db.iter_artist_links(node.id) == []

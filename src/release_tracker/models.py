@@ -151,6 +151,8 @@ class SocialPlatform(enum.StrEnum):
     FANBOX = "fanbox"
     BOOSTY = "boosty"
     ITCH = "itch"
+    # body of work (not a feed they post to — their canonical filmography/discography)
+    FILMOGRAPHY = "filmography"
     # catch-all
     WEBSITE = "website"
     OTHER = "other"
