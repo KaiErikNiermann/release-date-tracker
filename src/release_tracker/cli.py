@@ -226,8 +226,13 @@ def rd(
 
 
 async def _track_from_report(settings: Settings, name: str, report: RdReport) -> bool:
-    """Capture a looked-up title into the tracker using the already-resolved ids."""
-    if not (report.found and report.kind and matching.is_resolvable(report.kind)):
+    """Capture a looked-up title into the tracker using the already-resolved ids.
+
+    Captures any title that resolved to a canonical id — *including date-less (TBA) ones*.
+    A confident match with no date yet is still worth tracking (the skill then proposes a
+    speculative window so nothing sits date-less); only a true miss / tech is skipped.
+    """
+    if not (report.kind and matching.is_resolvable(report.kind) and report.canonical):
         return False
     db = _db()
     entity = Entity.create(
