@@ -470,6 +470,8 @@ class ArtistRow:
     free: tuple[SocialPlatform, ...]
     paid: tuple[SocialPlatform, ...]
     n_works: int
+    profile_url: str | None = None  # the direct profile to open (skips the recommender feed)
+    latest_url: str | None = None  # the newest drop itself (the recently-active source)
 
 
 def artists(
@@ -479,8 +481,13 @@ def artists(
     rows: list[ArtistRow] = []
     for node in db.followed_artists():
         links = db.iter_artist_links(node.id)
-        dated = [(link.platform, link.last_post_at) for link in links if link.last_post_at]
-        last_post = max(dated, key=lambda p: p[1]) if dated else None
+        dated = [(link, link.last_post_at) for link in links if link.last_post_at is not None]
+        recent = max(dated, key=lambda p: p[1]) if dated else None
+        primary = recent[0] if recent else None
+        last_post = (primary.platform, recent[1]) if primary and recent else None
+        # the profile to open: prefer the recently-active source, else a free pipeline, else any
+        profile = primary or next((lk for lk in links if lk.tier is LinkTier.FREE), None)
+        profile = profile or (links[0] if links else None)
         fetched = [link.fetched_at for link in links if link.fetched_at]
         rows.append(
             ArtistRow(
@@ -492,6 +499,8 @@ def artists(
                 free=tuple(link.platform for link in links if link.tier is LinkTier.FREE),
                 paid=tuple(link.platform for link in links if link.tier is LinkTier.PAID),
                 n_works=len(db.edges_from(node.id, RelationKind.CREDITED_ON)),
+                profile_url=profile.url if profile else None,
+                latest_url=primary.latest_url if primary else None,
             )
         )
     if sort == "name":

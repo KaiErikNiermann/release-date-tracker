@@ -643,6 +643,11 @@ def artist_members(ref: Annotated[str, typer.Argument(help="a group or a person"
 
 
 # --- artist renderers -----------------------------------------------------
+def _linked(text: str, url: str | None) -> str:
+    """Wrap cell text in an OSC-8 terminal hyperlink (degrades to plain text if unsupported)."""
+    return f"[link={url}]{text}[/link]" if url else text
+
+
 def _ago(when: date | None) -> str:
     if when is None:
         return ""
@@ -670,21 +675,24 @@ def _render_artists(rows: list[views.ArtistRow]) -> None:
     for r in rows:
         if r.last_post is not None:
             platform, when = r.last_post
-            last = f"{platform.value} [dim]{_ago(when)}[/]"
+            last = _linked(f"{platform.value} [dim]{_ago(when)}[/]", r.latest_url)
         else:
             last = "[dim]—[/]"
         table.add_row(
             _fresh_dot(r.freshness),
-            r.name,
+            _linked(r.name, r.profile_url),  # click the name -> straight to their profile
             r.kind.value,
-            last,
+            last,  # click the last post -> the drop itself, no recommender feed
             _platforms(r.free),
             _platforms(r.paid),
             str(r.n_works) if r.n_works else "[dim]—[/]",
         )
     console.print(table)
     if rows:
-        console.print("[dim]⟳ how recently we checked   `rdt artist refresh --all` to update[/]")
+        console.print(
+            "[dim]⟳ how recently we checked · click a name/post to open it · "
+            "`rdt artist refresh --all` to update[/]"
+        )
     else:
         console.print("[dim]No followed artists. `/rd-artist <name>` or `rdt artist add`.[/]")
 
@@ -702,16 +710,17 @@ def _render_artist_report(report: ArtistReport) -> None:
         for link in by_tier[tier]:
             latest = ""
             if link.latest_url:
-                latest = (
-                    f" [dim]· latest: {link.latest_title or 'post'} ({_ago(link.last_post_at)})[/]"
-                )
-            console.print(f"  [cyan]{link.platform.value}[/] {link.url}{latest}")
+                drop = _linked(link.latest_title or "post", link.latest_url)
+                latest = f" [dim]· latest:[/] {drop} [dim]({_ago(link.last_post_at)})[/]"
+            handle = _linked(link.platform.value, link.url)  # click the platform -> the profile
+            console.print(f"  [cyan]{handle}[/] [dim]{link.url}[/]{latest}")
     if report.slate:
         console.print("[bold]On the slate[/] [dim](upcoming)[/]")
         for s in report.slate:
             when = s.when.isoformat() if s.when else "TBA"
             mark = "[green]✓ tracked[/]" if s.tracked else "[dim]+ /rd-add[/]"
-            console.print(f"  [dim]{when}[/] [cyan]{s.role}[/] {s.title} [dim]({s.kind})[/] {mark}")
+            title = _linked(s.title, s.url)  # click the title -> the work's page
+            console.print(f"  [dim]{when}[/] [cyan]{s.role}[/] {title} [dim]({s.kind})[/] {mark}")
     if report.members:
         console.print(f"[bold]Members[/] {', '.join(n.name for n in report.members)}")
     if report.groups:
