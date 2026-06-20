@@ -185,6 +185,22 @@ def test_tag_genre_and_theme_then_untag(edit_db: Path) -> None:
     assert remaining == {"Sci-Fi"}
 
 
+def test_platform_adds_where_edge_with_predicted_tier(edit_db: Path) -> None:
+    db0 = Database(edit_db)
+    ent = next(db0.iter_entities())
+    db0.close()
+    runner.invoke(cli.app, ["edit", "platform", ent.id, "Netflix"])  # hand-stated -> confirmed
+    runner.invoke(cli.app, ["edit", "platform", ent.id, "Vimeo", "--predicted"])  # likely -> model
+    db = Database(edit_db)
+    edges = db.edges_from(ent.id, RelationKind.AVAILABLE_ON)
+    nodes = db.get_nodes(e.dst_id for e in edges)
+    by_name = {nodes[e.dst_id].name: e for e in edges}
+    db.close()
+    assert by_name["Netflix"].source_tier is SourceTier.OFFICIAL and by_name["Netflix"].owned
+    assert by_name["Vimeo"].source_tier is SourceTier.MODEL  # predicted renders as "~Vimeo"
+    assert not by_name["Vimeo"].owned
+
+
 def test_part_links_series_then_updates_in_place(edit_db: Path) -> None:
     db0 = Database(edit_db)
     ent = next(db0.iter_entities())

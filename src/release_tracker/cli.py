@@ -1158,6 +1158,39 @@ def edit_tag(
     console.print(f"[green]Tagged[/] {entity.title} [dim]({kind.value})[/] [bold]{descriptor}[/]")
 
 
+@edit_app.command("platform")
+def edit_platform(
+    ref: Annotated[str, typer.Argument(help="the work (id or title)")],
+    name: Annotated[str, typer.Argument(help="a streaming/where platform, e.g. Vimeo")],
+    predicted: Annotated[
+        bool, typer.Option("--predicted", help="a likely/expected home, not a confirmed one")
+    ] = False,
+) -> None:
+    """Attach a where-edge: record a platform a work is (or will likely be) available on."""
+    configure_logging()
+    db = _db()
+    entity = _edit_entity(db, ref)
+    if entity is None:
+        raise typer.Exit(1)
+    node = Node.create(NodeKind.PLATFORM, name, owned=not predicted)
+    db.upsert_node(node)
+    db.upsert_edge(
+        Edge(
+            src_id=entity.id,
+            dst_id=node.id,
+            relation=RelationKind.AVAILABLE_ON,
+            # predicted -> model-tier (renders as "~name"); hand-stated -> user-authoritative
+            source_provider="model" if predicted else "user",
+            source_tier=SourceTier.MODEL if predicted else SourceTier.OFFICIAL,
+            confidence=0.4 if predicted else 1.0,
+            owned=not predicted,
+        )
+    )
+    db.close()
+    tag = " [dim](likely)[/]" if predicted else ""
+    console.print(f"[green]Where[/] {entity.title} → [bold]{name}[/]{tag}")
+
+
 @edit_app.command("untag")
 def edit_untag(
     ref: Annotated[str, typer.Argument(help="the work (id or title)")],
