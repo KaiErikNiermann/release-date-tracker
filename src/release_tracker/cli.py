@@ -66,6 +66,7 @@ from release_tracker.pipeline import pull_all, pull_entity
 from release_tracker.resolve import best_estimates
 from release_tracker.seed import LocalSeed, NotionSeed, SeedProvider
 from release_tracker.sources.base import Candidate, make_client
+from release_tracker.sources.ddg import WebInfo, instant_answer
 
 app = typer.Typer(add_completion=False, help="Free-first release date tracker.")
 seed_app = typer.Typer(help="Manage the entity watchlist (seed).")
@@ -257,7 +258,7 @@ def _render_report(r: RdReport) -> None:
         return
     if not r.found and not r.claims:
         console.print(f"[yellow]No confident match[/] for '{r.query}'. {' '.join(r.notes)}")
-        _render_web_info(r)
+        _render_web_info(r.web_info)
         raise typer.Exit(2)
     kind_label = r.kind.value if r.kind else "?"
     console.print(f"[bold]{r.matched_title}[/] [dim]({kind_label})[/]")
@@ -287,21 +288,20 @@ def _render_report(r: RdReport) -> None:
         console.print(f"[dim]• {note}[/]")
     if r.url:
         console.print(f"[dim]{r.url}[/]")
-    _render_web_info(r)
+    _render_web_info(r.web_info)
 
 
-def _render_web_info(r: RdReport) -> None:
+def _render_web_info(web: WebInfo | None) -> None:
     """Show the keyless web-context fallback (only present when the sources came up empty)."""
-    if r.web_info is None:
+    if web is None:
         return
-    w = r.web_info
-    console.print(f"[bold]Web context[/] [dim]({w.source})[/]")
-    if w.abstract:
-        console.print(f"  {w.abstract}")
-    for text, url in w.related:
+    console.print(f"[bold]Web context[/] [dim]({web.source})[/]")
+    if web.abstract:
+        console.print(f"  {web.abstract}")
+    for text, url in web.related:
         console.print(f"  [dim]·[/] {_linked(text, url)}")
-    if w.url:
-        console.print(f"  [dim]{w.url}[/]")
+    if web.url:
+        console.print(f"  [dim]{web.url}[/]")
 
 
 def _render(rows: list[tuple[str, MediaKind, object]]) -> None:
@@ -1612,7 +1612,7 @@ def resolve_search(
     settings = get_settings()
     media = MediaKind(kind)
 
-    async def go() -> list[Candidate]:
+    async def go() -> tuple[list[Candidate], WebInfo | None]:
         from release_tracker.sources import sources_for
 
         async with make_client() as client:
@@ -1622,10 +1622,14 @@ def resolve_search(
                 for c in found:
                     c.score = matching.score_candidate(query, None, c, media)
                 out.extend(found)
-        out.sort(key=lambda c: c.score, reverse=True)
-        return out
+            out.sort(key=lambda c: c.score, reverse=True)
+            # nothing matched the structured sources — same gap a manual search would fill
+            web = await instant_answer(client, query) if not out else None
+        return out, web
 
-    console.print(_candidate_table(f"Candidates for '{query}' ({kind})", asyncio.run(go())))
+    cands, web = asyncio.run(go())
+    console.print(_candidate_table(f"Candidates for '{query}' ({kind})", cands))
+    _render_web_info(web)
 
 
 @resolve_app.command("show")
@@ -1643,15 +1647,18 @@ def resolve_show(
         raise typer.Exit(1)
     hint = matching.year_hint(db.observation_dates(entity.id), _today())
 
-    async def go() -> list[Candidate]:
+    async def go() -> tuple[list[Candidate], WebInfo | None]:
         async with make_client() as client:
-            return await matching.candidates_for(
+            cands = await matching.candidates_for(
                 client, entity, settings, hint_year=hint, limit=limit
             )
+            web = await instant_answer(client, entity.title) if not cands else None
+            return cands, web
 
-    cands = asyncio.run(go())
+    cands, web = asyncio.run(go())
     db.close()
     console.print(_candidate_table(f"{entity.title} (hint year: {hint or '—'})", cands))
+    _render_web_info(web)
     console.print(
         f'[dim]Pin with:[/] rdt resolve pin "{entity.title}" '
         f"{matching.required_id_key(entity.kind)}=<id>"
