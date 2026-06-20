@@ -173,6 +173,32 @@ async def _split_filmography(
     return partition_filmography(credits, today)
 
 
+async def _resolve_artist_node(
+    client: httpx.AsyncClient, db: Database, name: str, kind: NodeKind, settings: Settings | None
+) -> Node:
+    """Find an existing graph node, else mint one — resolving a person onto their TMDB id.
+
+    Keying a new creator on their canonical ``person:tmdb:<id>`` (rather than a name slug)
+    is what lets the filmography pipeline auto-attach for someone you don't already track.
+    Falls back to a name-slug node if there's no key, no match, or TMDB is unavailable.
+    """
+    existing = find_artist(db, name)
+    if existing is not None:
+        return existing
+    if kind is NodeKind.PERSON and settings is not None and settings.tmdb_api_key:
+        try:
+            person_id = await TmdbSource().search_person(client, settings.tmdb_api_key, name)
+        except Exception as exc:  # a TMDB hiccup must not block following the creator
+            log.warning("artists.person_resolve_error", name=name, error=str(exc))
+            person_id = None
+        if person_id is not None:
+            node = Node.create(
+                NodeKind.PERSON, name, source="tmdb", source_id=person_id, owned=True, followed=True
+            )
+            return db.get_node(node.id) or node  # collapse onto an existing tmdb node if present
+    return Node.create(kind, name, owned=True, followed=True)
+
+
 async def add_artist(
     client: httpx.AsyncClient,
     db: Database,
@@ -185,7 +211,7 @@ async def add_artist(
     today: date | None = None,
 ) -> Node:
     """Follow an artist (reusing an existing graph node if one matches) + attach links."""
-    node = find_artist(db, name) or Node.create(kind, name, owned=True, followed=True)
+    node = await _resolve_artist_node(client, db, name, kind, settings)
     db.upsert_node(node.model_copy(update={"owned": True, "followed": True}))
     node = db.get_node(node.id) or node
     for spec in links:

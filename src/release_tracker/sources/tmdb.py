@@ -294,6 +294,18 @@ class TmdbSource:
             title=title,
         )
 
+    async def search_person(self, client: httpx.AsyncClient, key: str, name: str) -> str | None:
+        """Resolve a creator name to a TMDB person id (so the filmography can be mined)."""
+        payload = cast(
+            "dict[str, Any]",
+            await get_json(
+                client,
+                f"{BASE}/search/person",
+                params={"api_key": key, "query": name, "include_adult": "false"},
+            ),
+        )
+        return pick_person_id(cast("list[dict[str, Any]]", payload.get("results", [])))
+
     async def person_credits(
         self, client: httpx.AsyncClient, key: str, person_id: str
     ) -> tuple[FilmCredit, ...]:
@@ -454,6 +466,28 @@ _FILMOGRAPHY_JOBS: dict[str, str] = {
 # seniority for collapsing multiple credits on one work to a single line (director wins).
 _ROLE_RANK: dict[str, int] = {"Director": 3, "Creator": 3, "Writer": 2, "Actor": 1}
 _SELF_CHARACTERS = frozenset({"self", "himself", "herself", "themselves"})
+
+
+# departments that mark a TMDB person as a creator we'd radar (vs a stray crew/extra match)
+_CREATIVE_DEPTS = frozenset({"Directing", "Writing", "Production", "Creator", "Acting"})
+
+
+def pick_person_id(results: list[dict[str, Any]]) -> str | None:
+    """Best person match from a TMDB person search: most popular, creators preferred.
+
+    TMDB returns rough relevance order; we re-rank so a creative-department match outranks
+    an incidental one and, within that, the most popular (the person you most likely meant).
+    """
+    candidates = [r for r in results if r.get("id") is not None]
+    if not candidates:
+        return None
+
+    def _score(r: dict[str, Any]) -> tuple[int, float]:
+        creative = 1 if str(r.get("known_for_department", "")) in _CREATIVE_DEPTS else 0
+        pop = r.get("popularity")
+        return (creative, float(pop) if isinstance(pop, (int, float)) else 0.0)
+
+    return str(max(candidates, key=_score)["id"])
 
 
 def is_self(character: str) -> bool:

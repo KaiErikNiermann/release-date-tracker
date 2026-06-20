@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
-from release_tracker.sources.tmdb import FilmCredit, consider_credit, is_self
+from release_tracker.sources.tmdb import FilmCredit, consider_credit, is_self, pick_person_id
 
 
 def _crew(job: str, **kw: Any) -> dict[str, Any]:
@@ -52,6 +52,23 @@ def test_tv_credit_uses_name_and_first_air_date() -> None:
     consider_credit(best, raw, "Creator")
     (credit,) = best.values()
     assert (credit.title, credit.media, credit.when) == ("A Series", "tv", date(2027, 4, 2))
+
+
+def test_pick_person_id_prefers_creators_then_popularity() -> None:
+    # a creative-department match outranks a more-popular incidental one...
+    results = [
+        {"id": 1, "known_for_department": "Sound", "popularity": 90.0},
+        {"id": 2, "known_for_department": "Writing", "popularity": 20.0},
+    ]
+    assert pick_person_id(results) == "2"
+    # ...and within creators, the most popular wins
+    creators = [
+        {"id": 3, "known_for_department": "Directing", "popularity": 5.0},
+        {"id": 4, "known_for_department": "Directing", "popularity": 50.0},
+    ]
+    assert pick_person_id(creators) == "4"
+    assert pick_person_id([]) is None
+    assert pick_person_id([{"known_for_department": "Writing"}]) is None  # no id -> skipped
 
 
 def test_undated_and_typeless_entries_are_handled() -> None:
