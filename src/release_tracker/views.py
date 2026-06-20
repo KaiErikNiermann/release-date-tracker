@@ -106,9 +106,11 @@ class TrackRow:
 
     ``theatrical`` is movie-only (region-scoped); ``digital`` is the "when can I
     actually watch it" date (digital for movies, the single release for tv/games).
-    ``pivot_when`` is the date that governs availability per the configured channel;
-    ``pivot_confirmed`` is whether that date is a confirmed release (vs a speculative
-    estimate) — only a confirmed, elapsed pivot makes a work actually "available".
+    ``pivot_when`` is the display/upcoming date (it may fall back across channels so a
+    theatrical-only film still surfaces). ``available_when`` is stricter: the date on
+    the user's *consumption* channel with no film fallback — a theatrical release does
+    not make a digitally-consumed film available. Only a confirmed, elapsed
+    ``available_when`` makes a work actually "available".
     """
 
     entity_id: str
@@ -118,6 +120,8 @@ class TrackRow:
     digital: DateCell | None
     pivot_when: date | None
     pivot_confirmed: bool
+    available_when: date | None
+    available_confirmed: bool
     who: tuple[str, ...]
     where: tuple[str, ...]
     what: tuple[TagLine, ...]
@@ -200,11 +204,33 @@ def _cell(est: BestEstimate | None) -> DateCell | None:
 def _pivot(
     theatrical: BestEstimate | None, digital: BestEstimate | None, channel: str
 ) -> BestEstimate | None:
-    """The estimate that governs availability, per the configured consumption channel."""
+    """The display/upcoming date per the configured channel.
+
+    Falls back across channels so a film with only a theatrical date still surfaces in
+    the row and in ``upcoming`` — availability is gated separately by :func:`_consumption`.
+    """
     if channel == "theatrical":
         return theatrical or digital
     if channel == "digital":
         return digital or theatrical
+    dated = [e for e in (theatrical, digital) if e and e.release_date]
+    return min(dated, key=lambda e: e.release_date or date.max) if dated else None
+
+
+def _consumption(
+    theatrical: BestEstimate | None, digital: BestEstimate | None, channel: str
+) -> BestEstimate | None:
+    """The estimate on the user's *consumption* channel — what makes a work "available".
+
+    Unlike :func:`_pivot` this does not fall a film back to theatrical: if you consume
+    digitally, a theatrical-only release is not yet available to you. For tv/games the
+    single release is carried as ``digital`` (``theatrical`` is ``None``), so it governs
+    under either preference; the ``theatrical`` branch keeps that fallback for them.
+    """
+    if channel == "digital":
+        return digital
+    if channel == "theatrical":
+        return theatrical or digital
     dated = [e for e in (theatrical, digital) if e and e.release_date]
     return min(dated, key=lambda e: e.release_date or date.max) if dated else None
 
@@ -221,6 +247,7 @@ def _track_row(
         theatrical = None
         digital = _pick(estimates, None)  # the single release date
     pivot = _pivot(theatrical, digital, settings.availability_channel)
+    consume = _consumption(theatrical, digital, settings.availability_channel)
     credits = _credit_lines(db, entity.id)
     return TrackRow(
         entity_id=entity.id,
@@ -230,6 +257,8 @@ def _track_row(
         digital=_cell(digital),
         pivot_when=pivot.release_date if pivot else None,
         pivot_confirmed=pivot is not None and pivot.certainty is Certainty.CONFIRMED,
+        available_when=consume.release_date if consume else None,
+        available_confirmed=consume is not None and consume.certainty is Certainty.CONFIRMED,
         who=tuple(dict.fromkeys(c.name for c in credits))[:2],
         where=tuple(p.name for p in _platform_lines(db, entity.id)[:2]),
         what=tuple(_tag_lines(db, entity.id)[:4]),
@@ -336,20 +365,21 @@ def available(
 ) -> list[TrackRow]:
     """Works that are out and unfinished (want/watching), newest first.
 
-    "Out" requires a *confirmed* consumption date that has elapsed — a speculative
-    estimate that happens to be in the past does not make a work available (we don't
-    actually know it released).
+    "Out" requires a *confirmed* date on the user's consumption channel to have elapsed.
+    A speculative past date does not count (we don't know it released), and neither does
+    a theatrical release under a digital preference — only ``available_when`` (the strict
+    consumption date, no film fallback) governs.
     """
     watch_states = (ConsumptionState.WANT, ConsumptionState.WATCHING)
     rows = [
         r
         for r in _track_rows(db, today, settings, kind=kind)
-        if r.pivot_when is not None
-        and r.pivot_when < today
-        and r.pivot_confirmed
+        if r.available_when is not None
+        and r.available_when < today
+        and r.available_confirmed
         and r.state in watch_states
     ]
-    rows.sort(key=lambda r: r.pivot_when or date.min, reverse=True)
+    rows.sort(key=lambda r: r.available_when or date.min, reverse=True)
     return rows
 
 

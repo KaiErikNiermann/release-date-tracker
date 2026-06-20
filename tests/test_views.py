@@ -179,6 +179,23 @@ def test_confirmed_date_preferred_over_earlier_speculative(tmp_path: Path) -> No
     assert [(r.title, r.pivot_when) for r in up] == [("Ontos", date(2026, 12, 31))]
 
 
+def test_theatrical_release_is_not_digitally_available(tmp_path: Path) -> None:
+    # digital preference: a film that's out in theaters but has no digital date must
+    # NOT be "available" (you consume digitally, it isn't streamable/buyable yet).
+    db = Database(tmp_path / "v.db")
+    today = date(2026, 6, 20)
+    _seed_work(db, "Theatrical Only", date(2026, 5, 1), state=ConsumptionState.WANT)  # no digital
+    _seed_work(db, "Coming to Cinemas", date(2026, 12, 1), state=ConsumptionState.WANT)  # future
+    _seed_work(
+        db, "Now Digital", date(2026, 5, 1), digital=date(2026, 6, 5), state=ConsumptionState.WANT
+    )
+    # only the one with an elapsed, confirmed *digital* date is available.
+    assert [r.title for r in views.available(db, today, _settings())] == ["Now Digital"]
+    # the future theatrical film still surfaces in upcoming (display falls back across
+    # channels) — strict availability did not make it vanish.
+    assert "Coming to Cinemas" in {r.title for r in views.upcoming(db, today, _settings())}
+
+
 def test_coarse_year_does_not_shadow_a_precise_month(tmp_path: Path) -> None:
     # the real ONTOS shape: a curated month (Oct) plus vague aggregator/store "2026"
     # years. The precise month must govern the pivot, not a year's Jan-1/Dec-31 artifact.
