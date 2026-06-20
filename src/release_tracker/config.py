@@ -56,6 +56,16 @@ class Settings(BaseSettings):
     fresh_days: int = Field(default=14, alias="RDT_FRESH_DAYS")  # green if refreshed within
     stale_days: int = Field(default=60, alias="RDT_STALE_DAYS")  # orange up to here, then red
 
+    # --- display colors (rich styles; override for color-vision needs) ---
+    # Default to a high-contrast, color-blind-safe ramp (cyan / orange / red) rather than
+    # green / yellow, which red-green color blindness can't separate. Any rich color works
+    # (e.g. RDT_CONFIRMED_COLOR="blue", "bright_cyan", "#0072B2").
+    confirmed_color: str = Field(default="cyan", alias="RDT_CONFIRMED_COLOR")
+    speculative_color: str = Field(default="orange1", alias="RDT_SPECULATIVE_COLOR")
+    fresh_color: str = Field(default="cyan", alias="RDT_FRESH_COLOR")
+    aging_color: str = Field(default="orange1", alias="RDT_AGING_COLOR")
+    stale_color: str = Field(default="red", alias="RDT_STALE_COLOR")
+
     @property
     def regions(self) -> tuple[str, ...]:
         return tuple(r.strip().upper() for r in self.regions_raw.split(",") if r.strip())

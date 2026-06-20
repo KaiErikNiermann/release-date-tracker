@@ -266,7 +266,8 @@ def _render_report(r: RdReport) -> None:
     for col in ("What", "Date", "± days", "Stance", "Conf.", "Basis"):
         table.add_column(col)
     for c in r.claims:
-        stance = "[green]confirmed[/]" if c.stance == "confirmed" else "[yellow]speculative[/]"
+        label = "confirmed" if c.stance == "confirmed" else "speculative"
+        stance = f"[{_stance_color(c.stance == 'confirmed')}]{label}[/]"
         table.add_row(
             c.label,
             c.when.isoformat() if c.when else "—",
@@ -322,7 +323,8 @@ def _render(rows: list[tuple[str, MediaKind, object]]) -> None:
             est.channel.value,
             est.region,
             to_edtf(est.release_date, est.precision, est.certainty),
-            est.certainty.value,
+            f"[{_stance_color(est.certainty in (Certainty.CONFIRMED, Certainty.DELAYED))}]"
+            f"{est.certainty.value}[/]",
             str(est.price) if est.price else "—",
             f"{est.confidence:.2f}",
         )
@@ -1435,19 +1437,36 @@ def _fmt_when(when: date | None, precision: DatePrecision) -> str:
             return when.isoformat()
 
 
-_FRESH_COLOR: dict[str, str] = {"fresh": "green", "aging": "yellow", "stale": "red"}
+
+
+def _stance_color(confirmed: bool) -> str:
+    """Configurable confirmed/speculative color (color-blind-safe cyan/orange by default)."""
+    s = get_settings()
+    return s.confirmed_color if confirmed else s.speculative_color
+
+
+def _fresh_color(freshness: views.Freshness) -> str:
+    """Configurable freshness-dot color for the fresh/aging/stale ramp."""
+    s = get_settings()
+    return {"fresh": s.fresh_color, "aging": s.aging_color, "stale": s.stale_color}[freshness]
+
+
+def _legend_dots() -> str:
+    """The fresh/aging/stale legend swatch, using the configured colors."""
+    s = get_settings()
+    return f"[{s.fresh_color}]●[/]fresh [{s.aging_color}]●[/]aging [{s.stale_color}]●[/]stale"
 
 
 def _fmt_cell(cell: views.DateCell | None) -> str:
-    """A date colored by stance: green = confirmed, yellow = speculative."""
+    """A date colored by stance (confirmed vs speculative); colors are configurable."""
     if cell is None or cell.when is None:
         return "[dim]—[/]"
     text = _fmt_when(cell.when, cell.precision)
-    return f"[green]{text}[/]" if cell.confirmed else f"[yellow]{text}[/]"
+    return f"[{_stance_color(cell.confirmed)}]{text}[/]"
 
 
 def _fresh_dot(freshness: views.Freshness | None) -> str:
-    return f"[{_FRESH_COLOR[freshness]}]●[/]" if freshness else "[dim]·[/]"
+    return f"[{_fresh_color(freshness)}]●[/]" if freshness else "[dim]·[/]"
 
 
 def _title_cell(row: views.TrackRow) -> str:
@@ -1500,9 +1519,10 @@ def _render_upcoming(rows: list[views.TrackRow], days: int | None) -> None:
     console.print(table)
     if rows:
         console.print(
-            "[dim]dates: [green]confirmed[/] / [yellow]speculative[/]   "
+            f"[dim]dates: [{_stance_color(True)}]confirmed[/] / "
+            f"[{_stance_color(False)}]speculative[/]   "
             "[dim]no date yet[/] = announced but not datable   "
-            "⟳ [green]●[/]fresh [yellow]●[/]aging [red]●[/]stale   [yellow]*[/]=notes[/]"
+            f"⟳ {_legend_dots()}   [yellow]*[/]=notes[/]"
         )
     else:
         console.print("[dim]No upcoming releases. `rdt add` then `rdt enrich`.[/]")
