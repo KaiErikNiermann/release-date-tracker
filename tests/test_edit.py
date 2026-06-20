@@ -296,3 +296,51 @@ def test_edit_date_rejects_a_bad_edtf_literal(edit_db: Path) -> None:
     db = Database(edit_db)
     assert _manual_obs(db, ent.id) == []  # nothing written
     db.close()
+
+
+def test_edit_contingency_tags_a_facet_observation(edit_db: Path) -> None:
+    db0 = Database(edit_db)
+    ent = next(db0.iter_entities())
+    db0.close()
+    res = runner.invoke(
+        cli.app, ["edit", "contingency", ent.id, "platform", "ps5", "--date", "2026-03"]
+    )
+    assert res.exit_code == 0
+    db = Database(edit_db)
+    obs = [o for o in db.iter_observations(ent.id) if o.provider == "manual"]
+    db.close()
+    assert len(obs) == 1
+    assert obs[0].contingencies == {"platform": "ps5"}
+    assert obs[0].release_date == date(2026, 3, 1)
+
+
+def test_edit_condition_blocked_by_and_unblock(edit_db: Path) -> None:
+    db0 = Database(edit_db)
+    ent = next(db0.iter_entities())
+    db0.close()
+    # author a pending blocker + link the work to it
+    runner.invoke(cli.app, ["edit", "condition", "EAC Linux", "pending"])
+    runner.invoke(cli.app, ["edit", "blocked-by", ent.id, "EAC Linux"])
+    db = Database(edit_db)
+    cond_id = Node.make_id(NodeKind.CONDITION, "EAC Linux")
+    edges = db.edges_from(ent.id, RelationKind.BLOCKED_BY)
+    cond = db.get_conditions([cond_id])
+    db.close()
+    assert [e.dst_id for e in edges] == [cond_id]
+    assert cond[cond_id].status == "pending"
+
+    # resolve it, then unblock the work
+    runner.invoke(cli.app, ["edit", "condition", "EAC Linux", "resolved", "2026-03-01"])
+    res = runner.invoke(cli.app, ["edit", "unblock", ent.id, "EAC Linux"])
+    assert res.exit_code == 0
+    db = Database(edit_db)
+    resolved = db.get_conditions([cond_id])[cond_id]
+    remaining = db.edges_from(ent.id, RelationKind.BLOCKED_BY)
+    db.close()
+    assert resolved.status == "resolved" and resolved.resolve_date == date(2026, 3, 1)
+    assert remaining == []  # the BLOCKED_BY link is gone (condition node kept)
+
+
+def test_edit_condition_resolved_requires_a_date(edit_db: Path) -> None:
+    assert runner.invoke(cli.app, ["edit", "condition", "X", "resolved"]).exit_code != 0
+    assert runner.invoke(cli.app, ["edit", "condition", "X", "nonsense"]).exit_code != 0

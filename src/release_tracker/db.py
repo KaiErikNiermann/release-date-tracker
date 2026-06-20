@@ -21,6 +21,7 @@ from pathlib import Path
 from release_tracker.models import (
     ArtistLink,
     Certainty,
+    Condition,
     ConsumptionState,
     CreditRole,
     DatePrecision,
@@ -523,6 +524,39 @@ class Database:
             )
             return cur.rowcount > 0
 
+    # -- conditions (external blockers backing CONDITION nodes) ------------
+    def upsert_condition(self, cond: Condition) -> None:
+        with self._tx() as conn:
+            conn.execute(
+                """
+                INSERT INTO conditions (node_id, status, resolve_date, precision, note, updated_at)
+                VALUES (:node_id, :status, :resolve_date, :precision, :note, :updated_at)
+                ON CONFLICT(node_id) DO UPDATE SET
+                    status=excluded.status,
+                    resolve_date=excluded.resolve_date,
+                    precision=excluded.precision,
+                    note=COALESCE(excluded.note, conditions.note),
+                    updated_at=excluded.updated_at
+                """,
+                {
+                    "node_id": cond.node_id,
+                    "status": cond.status,
+                    "resolve_date": cond.resolve_date.isoformat() if cond.resolve_date else None,
+                    "precision": cond.precision.value,
+                    "note": cond.note,
+                    "updated_at": datetime.now(UTC).isoformat(),
+                },
+            )
+
+    def get_conditions(self, node_ids: Iterable[str]) -> dict[str, Condition]:
+        ids = list(node_ids)
+        if not ids:
+            return {}
+        placeholders = ",".join("?" * len(ids))
+        query = f"SELECT * FROM conditions WHERE node_id IN ({placeholders})"  # noqa: S608
+        rows = self._conn.execute(query, ids)
+        return {r["node_id"]: _row_to_condition(r) for r in rows}
+
     # -- graph: edges ------------------------------------------------------
     def upsert_edge(self, edge: Edge) -> None:
         with self._tx() as conn:
@@ -730,6 +764,16 @@ def _row_to_observation(row: sqlite3.Row) -> ReleaseObservation:
         published_at=_parse_date(row["published_at"]),
         confidence=row["confidence"],
         fetched_at=datetime.fromisoformat(row["fetched_at"]),
+    )
+
+
+def _row_to_condition(row: sqlite3.Row) -> Condition:
+    return Condition(
+        node_id=row["node_id"],
+        status=row["status"],
+        resolve_date=_parse_date(row["resolve_date"]),
+        precision=DatePrecision(row["precision"]) if row["precision"] else DatePrecision.TBA,
+        note=row["note"],
     )
 
 

@@ -12,6 +12,7 @@ from release_tracker.config import Settings, get_settings
 from release_tracker.db import Database
 from release_tracker.models import (
     Certainty,
+    Condition,
     ConsumptionState,
     CreditRole,
     DatePrecision,
@@ -482,3 +483,74 @@ def test_region_gating_blocks_a_non_profile_only_release(
     # RO profile: available
     monkeypatch.setenv("RDT_REGIONS", "RO")
     assert [r.title for r in views.available(db, today, Settings())] == ["RegionLocked"]
+
+
+def _released_game(db: Database, title: str) -> Entity:
+    ent = Entity.create(title, MediaKind.GAME, consumption_state=ConsumptionState.WANT)
+    db.upsert_entity(ent)
+    db.upsert_node(Node(id=ent.id, node_kind=NodeKind.WORK, name=title, owned=True))
+    db.upsert_observation(
+        ReleaseObservation(
+            entity_id=ent.id,
+            channel=ReleaseChannel.PRIMARY,
+            region="WW",
+            release_date=date(2025, 1, 1),
+            precision=DatePrecision.EXACT,
+            certainty=Certainty.CONFIRMED,
+            source_tier=SourceTier.FIRST_PARTY_STORE,
+            provider="igdb",
+        )
+    )
+    return ent
+
+
+def test_shared_condition_blocks_then_unblocks_every_dependent(tmp_path: Path) -> None:
+    db = Database(tmp_path / "v.db")
+    today = date(2026, 6, 1)
+    cond = Node.create(NodeKind.CONDITION, "EAC Linux", owned=True)
+    db.upsert_node(cond)
+    for title in ("GameA", "GameB"):
+        ent = _released_game(db, title)
+        db.upsert_edge(
+            Edge(
+                src_id=ent.id,
+                dst_id=cond.id,
+                relation=RelationKind.BLOCKED_BY,
+                source_provider="user",
+                source_tier=SourceTier.OFFICIAL,
+                owned=True,
+            )
+        )
+    s = _settings()
+    # pending shared condition -> both released games are NOT available, flagged in upcoming
+    assert views.available(db, today, s) == []
+    up = {r.title: r.blockers for r in views.upcoming(db, today, s)}
+    assert up == {"GameA": ("EAC Linux",), "GameB": ("EAC Linux",)}
+    # resolve the ONE shared condition -> BOTH unblock (the graph payoff)
+    db.upsert_condition(
+        Condition(node_id=cond.id, status="resolved", resolve_date=date(2026, 3, 1))
+    )
+    assert sorted(r.title for r in views.available(db, today, s)) == ["GameA", "GameB"]
+
+
+def test_never_condition_keeps_a_work_permanently_unavailable(tmp_path: Path) -> None:
+    db = Database(tmp_path / "v.db")
+    today = date(2026, 6, 1)
+    ent = _released_game(db, "VanguardLocked")
+    cond = Node.create(NodeKind.CONDITION, "Vanguard Linux", owned=True)
+    db.upsert_node(cond)
+    db.upsert_condition(Condition(node_id=cond.id, status="never"))
+    db.upsert_edge(
+        Edge(
+            src_id=ent.id,
+            dst_id=cond.id,
+            relation=RelationKind.BLOCKED_BY,
+            source_provider="user",
+            source_tier=SourceTier.OFFICIAL,
+            owned=True,
+        )
+    )
+    s = _settings()
+    assert views.available(db, today, s) == []  # never -> never available
+    (row,) = views.upcoming(db, today, s)
+    assert row.blockers == ("Vanguard Linux",)

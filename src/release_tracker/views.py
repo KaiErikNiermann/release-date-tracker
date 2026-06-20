@@ -161,6 +161,16 @@ class WorkCard:
     season: int | None = None  # this work's season/part number within its series
     derived_from: tuple[RelatedWork, ...] = ()  # what it descends from
     derivatives: tuple[RelatedWork, ...] = ()  # what descends from it
+    blockers: tuple[ConditionLine, ...] = ()  # external conditions this work is BLOCKED_BY
+
+
+@dataclass(frozen=True, slots=True)
+class ConditionLine:
+    """An external blocker on a work's card: its name + resolution status/date."""
+
+    name: str
+    status: str  # 'resolved' | 'pending' | 'never'
+    when: date | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,8 +264,34 @@ def _consumption(
 
 
 def _condition_resolutions(db: Database, entity_id: str) -> list[Resolution]:
-    """Resolutions of the external conditions this work is BLOCKED_BY (filled in Slice 2)."""
-    return []
+    """Resolutions of the external conditions this work is BLOCKED_BY.
+
+    An unauthored condition (edge exists, no row yet) reads as PENDING. A shared condition
+    node gates every work linked to it — resolve it once and all dependents unblock.
+    """
+    edges = db.edges_from(entity_id, RelationKind.BLOCKED_BY)
+    if not edges:
+        return []
+    conds = db.get_conditions(e.dst_id for e in edges)
+    nodes = db.get_nodes(e.dst_id for e in edges)
+    out: list[Resolution] = []
+    for edge in edges:
+        node = nodes.get(edge.dst_id)
+        if node is None:
+            continue
+        cond = conds.get(edge.dst_id)
+        if cond is None:
+            out.append(Resolution(ResolutionStatus.PENDING, blocker=node.name))
+            continue
+        status = ResolutionStatus(cond.status)
+        out.append(
+            Resolution(
+                status,
+                when=cond.resolve_date if status is ResolutionStatus.RESOLVED else None,
+                blocker=node.name if status is not ResolutionStatus.RESOLVED else None,
+            )
+        )
+    return out
 
 
 def _track_row(
@@ -282,13 +318,16 @@ def _track_row(
     else:
         consume = _consumption(None, _pick(estimates, None, matcher=matcher), chan)
     facet = estimate_resolution(consume)
-    available_to_me = combine([facet, *_condition_resolutions(db, entity.id)])
-    # a profile blocker: a consumption date exists in general, but none match my profile
+    conditions = _condition_resolutions(db, entity.id)
+    available_to_me = combine([facet, *conditions])
+    # blockers shown as badges: a profile mismatch (a consumption date exists in general but
+    # none match my profile) + any explicit blocking condition that hasn't resolved yet.
     blockers: tuple[str, ...] = ()
     if consume is None and _consumption(theatrical, digital, chan) is not None:
-        blockers = ("not available for your profile",)
-    if available_to_me.status is ResolutionStatus.NEVER and available_to_me.blocker:
-        blockers += (available_to_me.blocker,)
+        blockers += ("not available for your profile",)
+    blockers += tuple(
+        c.blocker for c in conditions if c.status is not ResolutionStatus.RESOLVED and c.blocker
+    )
     credits = _credit_lines(db, entity.id)
     return TrackRow(
         entity_id=entity.id,
@@ -485,7 +524,31 @@ def work_card(db: Database, entity: Entity) -> WorkCard:
         season=season,
         derived_from=tuple(derived_from(db, entity.id)),
         derivatives=tuple(derivatives_of(db, entity.id)),
+        blockers=_blocker_lines(db, entity.id),
     )
+
+
+def _blocker_lines(db: Database, entity_id: str) -> tuple[ConditionLine, ...]:
+    """The external conditions a work is BLOCKED_BY, with each condition's resolution."""
+    edges = db.edges_from(entity_id, RelationKind.BLOCKED_BY)
+    if not edges:
+        return ()
+    conds = db.get_conditions(e.dst_id for e in edges)
+    nodes = db.get_nodes(e.dst_id for e in edges)
+    lines: list[ConditionLine] = []
+    for edge in edges:
+        node = nodes.get(edge.dst_id)
+        if node is None:
+            continue
+        cond = conds.get(edge.dst_id)
+        lines.append(
+            ConditionLine(
+                node.name,
+                cond.status if cond else ResolutionStatus.PENDING.value,
+                cond.resolve_date if cond else None,
+            )
+        )
+    return tuple(lines)
 
 
 def seasons_of_series(db: Database, series_node: Node) -> list[SeasonEntry]:

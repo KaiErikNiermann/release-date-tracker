@@ -291,6 +291,21 @@ class BestEstimate(BaseModel):
     fetched_at: datetime | None = None  # when the winning observation was last refreshed
 
 
+class Condition(BaseModel):
+    """An external blocker's resolution (the row backing a CONDITION node).
+
+    ``status`` is "resolved" | "pending" | "never" (the three-valued ResolutionStatus). A
+    work BLOCKED_BY this condition is unavailable until it resolves; a ``never`` makes the
+    work permanently unavailable to anyone depending on it.
+    """
+
+    node_id: str
+    status: str
+    resolve_date: date | None = None
+    precision: DatePrecision = DatePrecision.TBA
+    note: str | None = None
+
+
 # --- the media graph (who / where / what) ---------------------------------
 # A typed, provenance-tracked graph layered on top of entities/observations.
 # Works keep their detail in `entities`; every other participant is a Node. Every

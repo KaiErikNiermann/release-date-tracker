@@ -37,6 +37,7 @@ from release_tracker.artists import (
     refresh_artist,
 )
 from release_tracker.config import Settings, get_settings
+from release_tracker.contingency import ResolutionStatus
 from release_tracker.dates_edtf import parse_edtf, to_edtf
 from release_tracker.db import Database
 from release_tracker.enrich import EnrichSummary, enrich_work
@@ -46,6 +47,7 @@ from release_tracker.models import (
     ArtistLink,
     BestEstimate,
     Certainty,
+    Condition,
     ConsumptionState,
     CreditRole,
     DatePrecision,
@@ -1349,6 +1351,156 @@ def edit_date(
     )
 
 
+@edit_app.command("contingency")
+def edit_contingency(
+    ref: Annotated[str, typer.Argument(help="the work (id or title)")],
+    dim: Annotated[
+        str, typer.Argument(help="dimension: region|platform|os|language|tech|<custom>")
+    ],
+    value: Annotated[str, typer.Argument(help="the value, e.g. ps5 / linux / en / DE")],
+    channel: Annotated[str, typer.Option("--channel", help="release channel")] = "primary",
+    date_edtf: Annotated[
+        str | None, typer.Option("--date", help="EDTF date for this facet; omit for undated (TBA)")
+    ] = None,
+) -> None:
+    """Tag an availability facet on a work (platform/OS/language/region/custom), optionally dated.
+
+    A dated facet ("PS5 version out 2026-03") gates availability for that profile; an undated
+    one ("PS5 SKU exists, date TBD") surfaces as pending. Region is the native column; every
+    other dimension is an extensible contingency tag.
+    """
+    configure_logging()
+    db = _db()
+    entity = _edit_entity(db, ref)
+    if entity is None:
+        raise typer.Exit(1)
+    try:
+        chan = ReleaseChannel(channel.lower())
+    except ValueError:
+        db.close()
+        raise typer.BadParameter(f"unknown channel {channel!r}") from None
+    parsed = None
+    if date_edtf:
+        try:
+            parsed = parse_edtf(date_edtf)
+        except ValueError as exc:
+            db.close()
+            raise typer.BadParameter(str(exc)) from None
+    confirmed = parsed is not None and parsed.certainty is Certainty.CONFIRMED
+    dim_l = dim.strip().lower()
+    region = value.strip().upper() if dim_l == "region" else "WW"
+    conts = {} if dim_l == "region" else {dim_l: value.strip().lower()}
+    db.upsert_observation(
+        ReleaseObservation(
+            entity_id=entity.id,
+            channel=chan,
+            region=region,
+            contingencies=conts,
+            release_date=parsed.when if parsed else None,
+            date_end=parsed.end if parsed else None,
+            precision=parsed.precision if parsed else DatePrecision.TBA,
+            certainty=parsed.certainty if parsed else Certainty.ESTIMATED,
+            source_tier=SourceTier.OFFICIAL if confirmed else SourceTier.RUMOR,
+            provider="manual",
+            source_name="Manual (contingency)",
+            confidence=1.0 if confirmed else 0.5,
+            fetched_at=datetime.now(UTC),
+        )
+    )
+    db.close()
+    when = f" → {to_edtf(parsed.when, parsed.precision, parsed.certainty)}" if parsed else " (TBA)"
+    console.print(f"[green]Facet[/] {entity.title}: [bold]{dim_l}={value}[/]{when}")
+
+
+@edit_app.command("condition")
+def edit_condition(
+    name: Annotated[str, typer.Argument(help="the external blocker, e.g. 'EAC Linux support'")],
+    status: Annotated[str, typer.Argument(help="resolved | pending | never")],
+    edtf: Annotated[str | None, typer.Argument(help="EDTF date (required for 'resolved')")] = None,
+    note: Annotated[str | None, typer.Option("--note")] = None,
+) -> None:
+    """Author/update an external blocker condition (shared across every work it gates)."""
+    configure_logging()
+    try:
+        st = ResolutionStatus(status.lower())
+    except ValueError:
+        raise typer.BadParameter("status must be resolved|pending|never") from None
+    resolve_date: date | None = None
+    precision = DatePrecision.TBA
+    if st is ResolutionStatus.RESOLVED:
+        if not edtf:
+            raise typer.BadParameter("a 'resolved' condition needs a date (EDTF)")
+        try:
+            parsed = parse_edtf(edtf)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from None
+        resolve_date, precision = parsed.when, parsed.precision
+    db = _db()
+    node = Node.create(NodeKind.CONDITION, name, owned=True)
+    db.upsert_node(node)
+    db.upsert_condition(
+        Condition(
+            node_id=node.id,
+            status=st.value,
+            resolve_date=resolve_date,
+            precision=precision,
+            note=note,
+        )
+    )
+    db.close()
+    when = f" ({resolve_date.isoformat()})" if resolve_date else ""
+    console.print(f"[green]Condition[/] [bold]{name}[/] → {st.value}{when}")
+
+
+@edit_app.command("blocked-by")
+def edit_blocked_by(
+    ref: Annotated[str, typer.Argument(help="the work (id or title)")],
+    condition: Annotated[str, typer.Argument(help="the blocker condition name")],
+) -> None:
+    """Record that a work's availability is BLOCKED_BY an external condition (find-or-create it)."""
+    configure_logging()
+    db = _db()
+    entity = _edit_entity(db, ref)
+    if entity is None:
+        raise typer.Exit(1)
+    node = Node.create(NodeKind.CONDITION, condition, owned=True)
+    db.upsert_node(node)
+    db.upsert_edge(
+        Edge(
+            src_id=entity.id,
+            dst_id=node.id,
+            relation=RelationKind.BLOCKED_BY,
+            source_provider="user",
+            source_tier=SourceTier.OFFICIAL,
+            confidence=1.0,
+            owned=True,
+        )
+    )
+    db.close()
+    console.print(f"[green]Blocked[/] {entity.title} [dim]← needs[/] [bold]{condition}[/]")
+
+
+@edit_app.command("unblock")
+def edit_unblock(
+    ref: Annotated[str, typer.Argument(help="the work (id or title)")],
+    condition: Annotated[str, typer.Argument(help="the blocker to drop")],
+) -> None:
+    """Drop a BLOCKED_BY link (the condition node itself is left intact for other works)."""
+    configure_logging()
+    db = _db()
+    entity = _edit_entity(db, ref)
+    if entity is None:
+        raise typer.Exit(1)
+    node_id = Node.make_id(NodeKind.CONDITION, condition)
+    removed = sum(
+        db.delete_edge(e.id)
+        for e in db.edges_from(entity.id, RelationKind.BLOCKED_BY)
+        if e.dst_id == node_id
+    )
+    db.close()
+    console.print(f"[green]Unblocked[/] {entity.title}: dropped {removed} link(s) to {condition}")
+
+
 @app.command()
 def stale(
     days: Annotated[
@@ -1491,7 +1643,10 @@ def _fresh_dot(freshness: views.Freshness | None) -> str:
 
 
 def _title_cell(row: views.TrackRow) -> str:
-    return f"{row.title} [yellow]*[/]" if row.has_notes else row.title
+    title = f"{row.title} [yellow]*[/]" if row.has_notes else row.title
+    if row.blockers:  # an unsatisfied profile / unresolved blocker — flagged, never hidden
+        title += f" [red]⛔[/] [dim]{row.blockers[0]}[/]"
+    return title
 
 
 def _wcw(table: Table) -> None:
@@ -1636,6 +1791,18 @@ def _render_card(card: views.WorkCard) -> None:
     if card.derivatives:
         grouped = ", ".join(f"{r.node.name} [dim]({r.relation.value})[/]" for r in card.derivatives)
         console.print(f"[bold]Derivatives[/] {grouped}")
+    if card.blockers:
+        console.print("[bold]Blocked by[/]")
+        for b in card.blockers:
+            if b.status == "resolved":
+                state = (
+                    f"[{_stance_color(True)}]✓ {b.when.isoformat() if b.when else 'resolved'}[/]"
+                )
+            elif b.status == "never":
+                state = "[red]✗ never[/]"
+            else:
+                state = f"[{_stance_color(False)}]⏳ pending[/]"
+            console.print(f"  {state} {b.name}")
 
 
 # ---------------------------------------------------------------------------
