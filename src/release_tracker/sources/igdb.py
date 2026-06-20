@@ -16,6 +16,7 @@ from typing import Any, cast
 
 import httpx
 
+from release_tracker.cache import TrendCache
 from release_tracker.config import Settings
 from release_tracker.logging import get_logger
 from release_tracker.models import (
@@ -38,6 +39,7 @@ from release_tracker.sources.base import (
     post_json,
     post_text,
 )
+from release_tracker.trends import StudioTrend, compute_trend, narrow_coarse
 
 log = get_logger("igdb")
 
@@ -57,6 +59,10 @@ _CATEGORY_TO_PRECISION: dict[int, DatePrecision] = {
     6: DatePrecision.QUARTER,  # YYYYQ4
     7: DatePrecision.TBA,  # TBD
 }
+
+# precisions coarse enough to benefit from a studio-timing bias (a known month/day
+# is already as good as the trend prior, so it is left untouched).
+_COARSE: tuple[DatePrecision, ...] = (DatePrecision.YEAR, DatePrecision.QUARTER)
 
 # IGDB region enum -> a region code we use elsewhere.
 _REGION: dict[int, str] = {
@@ -140,8 +146,59 @@ class IgdbSource:
             for row in rows
             if (obs := row_to_observation(row, entity, game_id, now)) is not None
         ]
+        if (
+            refined := await self._trend_refinement(
+                client, settings, str(game_id), observations, now
+            )
+        ) is not None:
+            observations.append(refined)
         log.info("igdb.game", entity=entity.title, igdb_id=game_id, observations=len(observations))
         return SourceResult(observations=observations, external_ids={"igdb": str(game_id)})
+
+    async def _trend_refinement(
+        self,
+        client: httpx.AsyncClient,
+        settings: Settings,
+        game_id: str,
+        observations: list[ReleaseObservation],
+        now: datetime,
+    ) -> ReleaseObservation | None:
+        """A studio-trend-narrowed estimate for a coarse primary date, persisted so the
+        tracker pivots on the same refined date the live ``/rd`` lookup shows.
+
+        ``None`` when the primary date is already precise or the publisher has no clear
+        pattern. Carries ``provider=igdb`` so a re-pull's provider-scoped cleanup rotates
+        it, but ``MODEL``/``PREDICTED`` so the resolver treats it as the soft estimate it is.
+        """
+        coarse = [
+            o
+            for o in observations
+            if o.channel is ReleaseChannel.PRIMARY and o.release_date and o.precision in _COARSE
+        ]
+        if not coarse:
+            return None
+        basis = min(coarse, key=lambda o: o.release_date or date.max)
+        assert basis.release_date is not None
+        trend = await self.studio_trend(client, settings, game_id)
+        if trend is None:
+            return None
+        est = narrow_coarse(basis.release_date, basis.precision, trend)
+        if est is None:
+            return None
+        return ReleaseObservation(
+            entity_id=basis.entity_id,
+            channel=ReleaseChannel.PRIMARY,
+            region="WW",
+            release_date=est.when,
+            precision=DatePrecision.EXACT,
+            certainty=Certainty.PREDICTED,
+            source_tier=SourceTier.MODEL,
+            provider=self.name,
+            source_name=f"Studio trend ({trend.studio_name})",
+            source_quote=est.basis,
+            confidence=est.confidence,
+            fetched_at=now,
+        )
 
     # -- studio-trend mining ----------------------------------------------
     async def _headers(
@@ -215,6 +272,29 @@ class IgdbSource:
                 continue
             months.append(d.month)
         return tuple(months)
+
+    async def studio_trend(
+        self, client: httpx.AsyncClient, settings: Settings, game_id: str
+    ) -> StudioTrend | None:
+        """The publisher's release-timing trend for a game, mined on demand and cached.
+
+        Shared by the live ``/rd`` lookup and the persistence pull so both narrow a
+        coarse game date toward the same studio pattern.
+        """
+        pub = await self.game_publisher(client, settings, game_id)
+        if pub is None:
+            return None
+        company_id, name = pub
+        studio_key = f"igdb:{company_id}"
+        with TrendCache(settings.trend_cache_path) as cache:
+            if (cached := cache.get(studio_key, MediaKind.GAME)) is not None:
+                return cached
+            months = await self.company_release_months(
+                client, settings, company_id, exclude=game_id
+            )
+            trend = compute_trend(studio_key, name, MediaKind.GAME, months)
+            cache.put(trend)
+            return trend
 
     async def game_graph(
         self, client: httpx.AsyncClient, settings: Settings, game_id: str

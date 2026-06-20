@@ -24,7 +24,6 @@ from typing import Literal
 
 import httpx
 
-from release_tracker.cache import TrendCache
 from release_tracker.config import Settings
 from release_tracker.deltas import (
     Estimate,
@@ -48,7 +47,7 @@ from release_tracker.sources.base import Candidate, SourceResult, make_client
 from release_tracker.sources.igdb import IgdbSource
 from release_tracker.sources.tmdb import TmdbSource
 from release_tracker.tech import classify_tech, looks_like_tech, tech_info
-from release_tracker.trends import StudioTrend, compute_trend, narrow_coarse
+from release_tracker.trends import StudioTrend, narrow_coarse
 
 log = get_logger("lookup")
 
@@ -499,19 +498,7 @@ async def _game_trend(
     """Publisher release-timing trend for an IGDB game, mined on demand and cached."""
     if not igdb_id:
         return None
-    src = IgdbSource()
-    pub = await src.game_publisher(client, settings, igdb_id)
-    if pub is None:
-        return None
-    company_id, name = pub
-    studio_key = f"igdb:{company_id}"
-    with TrendCache(settings.trend_cache_path) as cache:
-        if (cached := cache.get(studio_key, MediaKind.GAME)) is not None:
-            return cached
-        months = await src.company_release_months(client, settings, company_id, exclude=igdb_id)
-        trend = compute_trend(studio_key, name, MediaKind.GAME, months)
-        cache.put(trend)
-        return trend
+    return await IgdbSource().studio_trend(client, settings, igdb_id)
 
 
 def _obs_date(o: ReleaseObservation) -> date:
