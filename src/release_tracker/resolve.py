@@ -125,5 +125,12 @@ def best_estimates(observations: Iterable[ReleaseObservation]) -> list[BestEstim
                 fetched_at=winner.fetched_at,
             )
         )
+    # Suppress a redundant dateless (TBA) estimate when the same entity has a finer-dated
+    # one on any channel (e.g. IGDB "TBD" alongside a Steam quarter). The source's TBA stays
+    # in storage — we just don't surface a no-date row once a real date exists somewhere.
+    dated_entities = {e.entity_id for e in results if e.release_date is not None}
+    results = [
+        e for e in results if e.release_date is not None or e.entity_id not in dated_entities
+    ]
     results.sort(key=lambda e: (e.release_date or date.max, -e.confidence))
     return results

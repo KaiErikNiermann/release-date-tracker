@@ -78,3 +78,43 @@ def test_fresher_fetch_breaks_ties_among_equal_standing() -> None:
     )
     (est,) = best_estimates([old, new])
     assert est.release_date == date(2026, 10, 6)
+
+
+def _channel_obs(
+    channel: ReleaseChannel, when: date | None, precision: DatePrecision, *, provider: str
+) -> ReleaseObservation:
+    return ReleaseObservation(
+        entity_id="game-x",
+        channel=channel,
+        region="WW",
+        release_date=when,
+        precision=precision,
+        certainty=Certainty.ESTIMATED,
+        source_tier=SourceTier.FIRST_PARTY_STORE,
+        provider=provider,
+        source_url=f"https://example.com/{provider}",
+        fetched_at=datetime(2026, 6, 1, tzinfo=UTC),
+    )
+
+
+def test_dateless_tba_row_suppressed_when_a_dated_estimate_exists() -> None:
+    # IGDB "TBD" (no date) alongside a Steam quarter -> only the dated row surfaces
+    ests = best_estimates(
+        [
+            _channel_obs(ReleaseChannel.PRIMARY, None, DatePrecision.TBA, provider="igdb"),
+            _channel_obs(
+                ReleaseChannel.STEAM, date(2026, 7, 1), DatePrecision.QUARTER, provider="steam"
+            ),
+        ]
+    )
+    assert [(e.channel, e.release_date) for e in ests] == [
+        (ReleaseChannel.STEAM, date(2026, 7, 1))
+    ]
+
+
+def test_tba_row_kept_when_no_date_exists_anywhere() -> None:
+    # nothing dated -> the TBA is the only signal, so it must stay (don't blank the entity)
+    ests = best_estimates(
+        [_channel_obs(ReleaseChannel.PRIMARY, None, DatePrecision.TBA, provider="igdb")]
+    )
+    assert len(ests) == 1 and ests[0].release_date is None
