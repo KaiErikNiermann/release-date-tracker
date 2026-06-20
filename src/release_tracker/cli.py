@@ -257,6 +257,7 @@ def _render_report(r: RdReport) -> None:
         return
     if not r.found and not r.claims:
         console.print(f"[yellow]No confident match[/] for '{r.query}'. {' '.join(r.notes)}")
+        _render_web_info(r)
         raise typer.Exit(2)
     kind_label = r.kind.value if r.kind else "?"
     console.print(f"[bold]{r.matched_title}[/] [dim]({kind_label})[/]")
@@ -286,6 +287,21 @@ def _render_report(r: RdReport) -> None:
         console.print(f"[dim]• {note}[/]")
     if r.url:
         console.print(f"[dim]{r.url}[/]")
+    _render_web_info(r)
+
+
+def _render_web_info(r: RdReport) -> None:
+    """Show the keyless web-context fallback (only present when the sources came up empty)."""
+    if r.web_info is None:
+        return
+    w = r.web_info
+    console.print(f"[bold]Web context[/] [dim]({w.source})[/]")
+    if w.abstract:
+        console.print(f"  {w.abstract}")
+    for text, url in w.related:
+        console.print(f"  [dim]·[/] {_linked(text, url)}")
+    if w.url:
+        console.print(f"  [dim]{w.url}[/]")
 
 
 def _render(rows: list[tuple[str, MediaKind, object]]) -> None:

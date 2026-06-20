@@ -44,6 +44,7 @@ from release_tracker.models import (
 from release_tracker.platforms import learn_predicted_platform
 from release_tracker.sources import sources_for
 from release_tracker.sources.base import Candidate, SourceResult, make_client
+from release_tracker.sources.ddg import WebInfo, instant_answer
 from release_tracker.sources.igdb import IgdbSource
 from release_tracker.sources.tmdb import TmdbSource
 from release_tracker.tech import classify_tech, looks_like_tech, tech_info
@@ -117,9 +118,12 @@ class RdReport:
     category: str | None = None
     region: str | None = None
     preferred_sources: tuple[str, ...] = ()
+    # keyless web-context, attached ONLY when the structured sources came up empty (no
+    # match / no dates) — the gap where a manual web search would otherwise be needed.
+    web_info: WebInfo | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        out: dict[str, object] = {
             "query": self.query,
             "found": self.found,
             "kind": self.kind.value if self.kind else None,
@@ -135,6 +139,9 @@ class RdReport:
             "region": self.region,
             "preferred_sources": list(self.preferred_sources),
         }
+        if self.web_info is not None:  # lean: omit the key entirely on the happy path
+            out["web_info"] = self.web_info.to_dict()
+        return out
 
 
 async def lookup(
@@ -167,7 +174,8 @@ async def lookup(
             return RdReport(
                 query=query,
                 found=False,
-                notes=("No confident match in TMDB/IGDB/Steam — fall back to web search.",),
+                notes=("No confident match in TMDB/IGDB/Steam — web_info attached as fallback.",),
+                web_info=await instant_answer(client, query),
             )
 
         kind, cand = picked
@@ -215,6 +223,8 @@ async def lookup(
             predicted_platform=predicted,
             price=price,
             notes=tuple(notes),
+            # matched the title but no dates surfaced — same gap a manual search would fill
+            web_info=None if claims else await instant_answer(client, query),
         )
 
 
