@@ -268,11 +268,12 @@ class BestEstimate(BaseModel):
     channel: ReleaseChannel
     region: str
     release_date: date | None
-    precision: DatePrecision
-    certainty: Certainty
-    price: Money | None
-    confidence: float
-    supporting_observation_ids: tuple[str, ...]
+    date_end: date | None = None  # upper bound for a window/range; NULL for a single date
+    precision: DatePrecision = DatePrecision.TBA
+    certainty: Certainty = Certainty.ESTIMATED
+    price: Money | None = None
+    confidence: float = 0.5
+    supporting_observation_ids: tuple[str, ...] = ()
     fetched_at: datetime | None = None  # when the winning observation was last refreshed
 
 

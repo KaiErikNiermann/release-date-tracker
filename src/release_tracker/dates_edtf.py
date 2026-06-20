@@ -14,8 +14,9 @@ three qualifiers, so display collapses it and parsing widens it back conservativ
 * certainty  → CONFIRMED/DELAYED *(none)* · ESTIMATED/PREDICTED ``~`` (approximate) ·
   RUMORED/LEAKED ``?`` (uncertain). ``%`` (both) parses back to ESTIMATED.
 
-Scope is deliberately the single-date subset that maps to one observation: intervals,
-sets (``[2026, 2027]``) and seasons would need a richer internal model and are out of scope.
+Also supports an EDTF *interval* (``2027/2029`` — a release window) via the observation's
+``date_end``: the lower bound drives scheduling, the upper preserves the ambiguity. Sets
+(``[2026, 2027]`` = "one of") and seasons remain out of scope (a richer model than one window).
 """
 
 from __future__ import annotations
@@ -47,11 +48,18 @@ _UNKNOWN = "XXXX"
 
 @dataclass(frozen=True, slots=True)
 class EdtfDate:
-    """A parsed EDTF literal, decoded into the internal date model."""
+    """A parsed EDTF literal, decoded into the internal date model.
+
+    For an EDTF *interval* (``2027/2029`` — a release window), ``end`` / ``end_precision``
+    carry the upper bound; for a single date they're ``None``. ``when`` is always the lower
+    bound, so it drives scheduling (a window still sorts into upcoming by its start).
+    """
 
     when: date | None
     precision: DatePrecision
     certainty: Certainty
+    end: date | None = None
+    end_precision: DatePrecision | None = None
 
 
 def _quarter_of(month: int) -> int:
@@ -64,12 +72,8 @@ def _quarter_start_month(code: int) -> int:
     return (code - 33) * 3 + 1
 
 
-def to_edtf(
-    when: date | None,
-    precision: DatePrecision,
-    certainty: Certainty = Certainty.CONFIRMED,
-) -> str:
-    """Render the internal (date, precision, certainty) triple as an EDTF literal."""
+def _single_edtf(when: date | None, precision: DatePrecision, certainty: Certainty) -> str:
+    """One EDTF date component (no interval)."""
     if when is None or precision is DatePrecision.TBA:
         return _UNKNOWN
     core = {
@@ -81,6 +85,25 @@ def to_edtf(
     return core + _QUALIFIER[certainty]
 
 
+def to_edtf(
+    when: date | None,
+    precision: DatePrecision,
+    certainty: Certainty = Certainty.CONFIRMED,
+    *,
+    end: date | None = None,
+    end_precision: DatePrecision | None = None,
+) -> str:
+    """Render the internal date as an EDTF literal — a single date, or an interval.
+
+    Pass ``end`` to emit an interval ``start/end`` (a release *window*, e.g. ``2027~/2029~``);
+    the same certainty qualifier is applied to both bounds.
+    """
+    start = _single_edtf(when, precision, certainty)
+    if end is None:
+        return start
+    return f"{start}/{_single_edtf(end, end_precision or precision, certainty)}"
+
+
 def parse_edtf(text: str) -> EdtfDate:
     """Decode an EDTF level-1 single-date literal into the internal model.
 
@@ -90,6 +113,12 @@ def parse_edtf(text: str) -> EdtfDate:
     body = text.strip()
     if not body:
         raise ValueError("empty date")
+    if "/" in body:  # an interval: start/end (each side a valid single-date literal)
+        left, right = body.split("/", 1)
+        start, finish = parse_edtf(left), parse_edtf(right)
+        if start.when is None or finish.when is None or finish.when < start.when:
+            raise ValueError(f"not a valid EDTF interval: {body!r}")
+        return EdtfDate(start.when, start.precision, start.certainty, finish.when, finish.precision)
     qualifier = ""
     if body[-1] in _QUALIFIER_CHARS:
         qualifier, body = body[-1], body[:-1]

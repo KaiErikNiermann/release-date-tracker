@@ -322,7 +322,13 @@ def _render(rows: list[tuple[str, MediaKind, object]]) -> None:
             kind.value,
             est.channel.value,
             est.region,
-            to_edtf(est.release_date, est.precision, est.certainty),
+            to_edtf(
+                est.release_date,
+                est.precision,
+                est.certainty,
+                end=est.date_end,
+                end_precision=est.precision,
+            ),
             f"[{_stance_color(est.certainty in (Certainty.CONFIRMED, Certainty.DELAYED))}]"
             f"{est.certainty.value}[/]",
             str(est.price) if est.price else "—",
@@ -1306,7 +1312,13 @@ def edit_date(
         db.close()
         raise typer.BadParameter(f"unknown channel {channel!r}") from None
     confirmed = parsed.certainty is Certainty.CONFIRMED
-    canonical = to_edtf(parsed.when, parsed.precision, parsed.certainty)
+    canonical = to_edtf(
+        parsed.when,
+        parsed.precision,
+        parsed.certainty,
+        end=parsed.end,
+        end_precision=parsed.end_precision,
+    )
     db.delete_channel_observations(entity.id, "manual", chan)
     db.upsert_observation(
         ReleaseObservation(
@@ -1314,6 +1326,7 @@ def edit_date(
             channel=chan,
             region="WW",
             release_date=parsed.when,
+            date_end=parsed.end,  # set for an EDTF interval (a release window), else None
             precision=parsed.precision,
             certainty=parsed.certainty,
             source_tier=SourceTier.OFFICIAL if confirmed else SourceTier.RUMOR,
@@ -1437,8 +1450,6 @@ def _fmt_when(when: date | None, precision: DatePrecision) -> str:
             return when.isoformat()
 
 
-
-
 def _stance_color(confirmed: bool) -> str:
     """Configurable confirmed/speculative color (color-blind-safe cyan/orange by default)."""
     s = get_settings()
@@ -1458,10 +1469,15 @@ def _legend_dots() -> str:
 
 
 def _fmt_cell(cell: views.DateCell | None) -> str:
-    """A date colored by stance (confirmed vs speculative); colors are configurable."""
+    """A date colored by stance (confirmed vs speculative); colors are configurable.
+
+    A window renders as ``start-end`` (e.g. 2027-2029), preserving the ambiguity.
+    """
     if cell is None or cell.when is None:
         return "[dim]—[/]"
     text = _fmt_when(cell.when, cell.precision)
+    if cell.end is not None:
+        text = f"{text}–{_fmt_when(cell.end, cell.precision)}"  # noqa: RUF001
     return f"[{_stance_color(cell.confirmed)}]{text}[/]"
 
 

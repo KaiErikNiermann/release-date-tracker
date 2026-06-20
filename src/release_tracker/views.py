@@ -98,6 +98,7 @@ class DateCell:
     when: date | None
     precision: DatePrecision
     confirmed: bool
+    end: date | None = None  # upper bound for a window (e.g. 2027-2029); None for a single date
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,7 +199,9 @@ def _pick(
 def _cell(est: BestEstimate | None) -> DateCell | None:
     if est is None:
         return None
-    return DateCell(est.release_date, est.precision, est.certainty is Certainty.CONFIRMED)
+    return DateCell(
+        est.release_date, est.precision, est.certainty is Certainty.CONFIRMED, end=est.date_end
+    )
 
 
 def _pivot(

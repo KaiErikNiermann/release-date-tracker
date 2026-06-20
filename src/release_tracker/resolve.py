@@ -116,6 +116,7 @@ def best_estimates(observations: Iterable[ReleaseObservation]) -> list[BestEstim
                 channel=winner.channel,
                 region=region,
                 release_date=winner.release_date,
+                date_end=winner.date_end,
                 precision=winner.precision,
                 certainty=winner.certainty,
                 price=winner.price,

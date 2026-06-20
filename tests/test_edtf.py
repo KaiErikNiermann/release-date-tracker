@@ -67,7 +67,39 @@ def test_round_trip_is_stable_on_precision_and_date() -> None:
         assert (back.when, back.precision) == (when, precision)
 
 
-@pytest.mark.parametrize("bad", ["2026-13", "garbage", "2026-9", "2026/2027", "", "26-09", "2026-"])
+@pytest.mark.parametrize("bad", ["2026-13", "garbage", "2026-9", "2029/2027", "", "26-09", "2026-"])
 def test_parse_rejects_unsupported(bad: str) -> None:
-    with pytest.raises(ValueError, match=r"EDTF|empty"):
+    # note 2029/2027 is a *reversed* interval (end before start) -> rejected
+    with pytest.raises(ValueError, match=r"EDTF|empty|interval"):
         parse_edtf(bad)
+
+
+def test_to_edtf_emits_interval() -> None:
+    assert (
+        to_edtf(
+            date(2027, 1, 1),
+            DatePrecision.YEAR,
+            Certainty.ESTIMATED,
+            end=date(2029, 1, 1),
+            end_precision=DatePrecision.YEAR,
+        )
+        == "2027~/2029~"
+    )
+    # confirmed window has no qualifier on either bound
+    assert (
+        to_edtf(date(2026, 3, 1), DatePrecision.MONTH, end=date(2026, 9, 1)) == "2026-03/2026-09"
+    )
+
+
+def test_parse_interval_into_bounds() -> None:
+    parsed = parse_edtf("2027~/2029~")
+    assert parsed.when == date(2027, 1, 1)
+    assert parsed.end == date(2029, 1, 1)
+    assert parsed.precision is DatePrecision.YEAR and parsed.end_precision is DatePrecision.YEAR
+    assert parsed.certainty is Certainty.ESTIMATED  # start-bound qualifier governs
+
+
+def test_interval_round_trips_on_bounds_and_precision() -> None:
+    edtf = "2027~/2029~"
+    back = parse_edtf(edtf)
+    assert to_edtf(back.when, back.precision, back.certainty, end=back.end) == edtf
