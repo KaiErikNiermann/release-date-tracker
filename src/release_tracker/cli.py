@@ -1683,7 +1683,9 @@ def _render_upcoming(rows: list[views.TrackRow], days: int | None) -> None:
         if prev_month is not None and month != prev_month:
             table.add_section()  # cluster the spreadsheet by month
         prev_month = month
-        no_date = firm is None
+        # "no date yet" only for the truly date-less; a released-but-blocked/stale row still
+        # shows its real (past) date — it sorts to the tail but isn't pretending to be undated.
+        no_date = r.pivot_when is None
         table.add_row(
             "[dim]no date[/]" if no_date else _fmt_cell(r.theatrical),
             "[dim]yet[/]" if no_date else _fmt_cell(r.digital),
