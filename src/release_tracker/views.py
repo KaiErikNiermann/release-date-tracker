@@ -33,7 +33,7 @@ from release_tracker.models import (
     SourceTier,
     WorkRelation,
 )
-from release_tracker.resolve import best_estimates
+from release_tracker.resolve import PRECISION_RANK, best_estimates
 
 Freshness = Literal["fresh", "aging", "stale"]
 _THEATRICAL = (
@@ -170,18 +170,25 @@ def _pick(
     *,
     region: str | None = None,
 ) -> BestEstimate | None:
-    """Soonest dated estimate matching ``channels`` (any if None), preferring ``region``.
+    """Best dated estimate matching ``channels`` (any if None), preferring ``region``.
 
     Confirmed dates win over speculative ones: a wishlist/early *estimated* date must
     not shadow the real *confirmed* release (e.g. a game with a speculative early-access
-    guess and a confirmed launch). Only fall back to speculative when nothing is confirmed.
+    guess and a confirmed launch). Within the surviving pool, the most *precise* date
+    wins before the soonest — a coarse year-date's materialized day (Jan 1 / Dec 31) is
+    an artifact, so a known month/day must not be shadowed by a vague "2026". Only fall
+    back to speculative when nothing is confirmed.
     """
     cands = [e for e in estimates if e.release_date and (channels is None or e.channel in channels)]
     if region is not None:
         cands = [e for e in cands if e.region == region] or cands  # fall back to any region
     confirmed = [e for e in cands if e.certainty is Certainty.CONFIRMED]
     pool = confirmed or cands
-    return min(pool, key=lambda e: e.release_date or date.max) if pool else None
+    if not pool:
+        return None
+    finest = max(PRECISION_RANK[e.precision] for e in pool)
+    pool = [e for e in pool if PRECISION_RANK[e.precision] == finest]
+    return min(pool, key=lambda e: e.release_date or date.max)
 
 
 def _cell(est: BestEstimate | None) -> DateCell | None:

@@ -29,13 +29,16 @@ _CERTAINTY_WEIGHT: dict[Certainty, float] = {
     Certainty.PREDICTED: 0.35,
 }
 
-_PRECISION_RANK: dict[DatePrecision, int] = {
+PRECISION_RANK: dict[DatePrecision, int] = {
     DatePrecision.EXACT: 4,
     DatePrecision.MONTH: 3,
     DatePrecision.QUARTER: 2,
     DatePrecision.YEAR: 1,
     DatePrecision.TBA: 0,
 }
+
+# stances that represent an officially committed date (vs a best-guess window)
+_CONFIRMED: frozenset[Certainty] = frozenset({Certainty.CONFIRMED, Certainty.DELAYED})
 
 
 def score_observation(obs: ReleaseObservation, *, corroboration: int = 1) -> float:
@@ -76,13 +79,23 @@ def _slot_key(obs: ReleaseObservation) -> tuple[str, str, str]:
     return (obs.channel.value, obs.region, obs.release_date.isoformat() if obs.release_date else "")
 
 
-def _sort_key(obs: ReleaseObservation) -> tuple[float, int, int, str]:
-    """Best claim first: confidence, then tier, then precision, then recency."""
+def _sort_key(obs: ReleaseObservation) -> tuple[int, int, float, int, str, str]:
+    """Best claim first.
+
+    A *confirmed* official date wins outright; after that **precision dominates** —
+    a known month ("Oct 2026") beats a vague year ("2026") even from a higher-trust
+    source, because a coarse date's materialized day (Jan 1 / Dec 31) is an artifact,
+    not a real early date. Only then do confidence (tier + corroboration) and recency
+    break the remaining ties; ``fetched_at`` lets a freshly re-curated manual date
+    supersede an older one of equal standing.
+    """
     return (
+        1 if obs.certainty in _CONFIRMED else 0,
+        PRECISION_RANK[obs.precision],
         obs.confidence,
         int(obs.source_tier),
-        _PRECISION_RANK[obs.precision],
         obs.published_at.isoformat() if obs.published_at else "",
+        obs.fetched_at.isoformat() if obs.fetched_at else "",
     )
 
 

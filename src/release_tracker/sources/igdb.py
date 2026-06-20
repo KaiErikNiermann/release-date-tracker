@@ -135,33 +135,11 @@ class IgdbSource:
             await post_text(client, RELEASE_DATES_URL, content=body, headers=headers),
         )
         now = datetime.now(UTC)
-        observations: list[ReleaseObservation] = []
-        for row in rows:
-            precision = _CATEGORY_TO_PRECISION.get(int(row.get("category", 7)), DatePrecision.TBA)
-            rel = _ts_to_date(row.get("date"))
-            if rel is None and precision is not DatePrecision.TBA:
-                continue
-            platform = row.get("platform")
-            platform_name = (
-                str(platform["name"]) if isinstance(platform, dict) and "name" in platform else None
-            )
-            slug = entity.external_ids.get("igdb_slug", str(game_id))
-            observations.append(
-                ReleaseObservation(
-                    entity_id=entity.id,
-                    channel=ReleaseChannel.PRIMARY,
-                    region=_REGION.get(int(row.get("region", 8)), "WW"),
-                    release_date=rel,
-                    precision=precision,
-                    certainty=Certainty.CONFIRMED,
-                    source_tier=SourceTier.AGGREGATOR,
-                    provider=self.name,
-                    source_name=f"IGDB ({platform_name})" if platform_name else "IGDB",
-                    source_url=f"https://www.igdb.com/games/{slug}",
-                    source_quote=str(row.get("human")) if row.get("human") else None,
-                    fetched_at=now,
-                )
-            )
+        observations = [
+            obs
+            for row in rows
+            if (obs := row_to_observation(row, entity, game_id, now)) is not None
+        ]
         log.info("igdb.game", entity=entity.title, igdb_id=game_id, observations=len(observations))
         return SourceResult(observations=observations, external_ids={"igdb": str(game_id)})
 
@@ -341,6 +319,46 @@ class IgdbSource:
                 )
             )
         return out
+
+
+def row_to_observation(
+    row: dict[str, Any], entity: Entity, game_id: str | int, now: datetime
+) -> ReleaseObservation | None:
+    """One IGDB ``release_dates`` row -> an observation (``None`` if it carries no date).
+
+    Derives certainty from precision (only an exact, announced day is *confirmed*; a
+    coarse "2026"/"Q3 2026" is an ``ESTIMATED`` window) and normalises a "TBD" row that
+    still carries a placeholder timestamp down to a coarse YEAR at the period start.
+    """
+    precision = _CATEGORY_TO_PRECISION.get(int(row.get("category", 7)), DatePrecision.TBA)
+    rel = _ts_to_date(row.get("date"))
+    if rel is None and precision is not DatePrecision.TBA:
+        return None
+    if rel is not None and precision is DatePrecision.TBA:
+        # IGDB sometimes ships a "TBD" row with a placeholder year-end timestamp — the
+        # year is the only trustworthy part, so anchor it at the period start as a coarse
+        # YEAR (narrowable) rather than a spuriously precise Dec-31.
+        precision, rel = DatePrecision.YEAR, date(rel.year, 1, 1)
+    certainty = Certainty.CONFIRMED if precision is DatePrecision.EXACT else Certainty.ESTIMATED
+    platform = row.get("platform")
+    platform_name = (
+        str(platform["name"]) if isinstance(platform, dict) and "name" in platform else None
+    )
+    slug = entity.external_ids.get("igdb_slug", str(game_id))
+    return ReleaseObservation(
+        entity_id=entity.id,
+        channel=ReleaseChannel.PRIMARY,
+        region=_REGION.get(int(row.get("region", 8)), "WW"),
+        release_date=rel,
+        precision=precision,
+        certainty=certainty,
+        source_tier=SourceTier.AGGREGATOR,
+        provider=IgdbSource.name,
+        source_name=f"IGDB ({platform_name})" if platform_name else "IGDB",
+        source_url=f"https://www.igdb.com/games/{slug}",
+        source_quote=str(row.get("human")) if row.get("human") else None,
+        fetched_at=now,
+    )
 
 
 def _ts_to_date(value: object) -> date | None:

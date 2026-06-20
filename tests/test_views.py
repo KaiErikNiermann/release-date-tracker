@@ -179,6 +179,38 @@ def test_confirmed_date_preferred_over_earlier_speculative(tmp_path: Path) -> No
     assert [(r.title, r.pivot_when) for r in up] == [("Ontos", date(2026, 12, 31))]
 
 
+def test_coarse_year_does_not_shadow_a_precise_month(tmp_path: Path) -> None:
+    # the real ONTOS shape: a curated month (Oct) plus vague aggregator/store "2026"
+    # years. The precise month must govern the pivot, not a year's Jan-1/Dec-31 artifact.
+    db = Database(tmp_path / "v.db")
+    today = date(2026, 6, 19)
+    ent = Entity.create("Ontos", MediaKind.GAME, consumption_state=ConsumptionState.WANT)
+    db.upsert_entity(ent)
+    db.upsert_node(Node(id=ent.id, node_kind=NodeKind.WORK, name=ent.title, owned=True))
+
+    def _o(channel: ReleaseChannel, when: date, precision: DatePrecision, tier: SourceTier) -> None:
+        db.upsert_observation(
+            ReleaseObservation(
+                entity_id=ent.id,
+                channel=channel,
+                release_date=when,
+                precision=precision,
+                certainty=Certainty.ESTIMATED,
+                source_tier=tier,
+                provider=f"{channel.value}-{when.isoformat()}",
+                fetched_at=datetime(2026, 6, 19, tzinfo=UTC),
+            )
+        )
+
+    _o(ReleaseChannel.PRIMARY, date(2026, 10, 6), DatePrecision.MONTH, SourceTier.RUMOR)
+    _o(ReleaseChannel.PRIMARY, date(2026, 1, 1), DatePrecision.YEAR, SourceTier.AGGREGATOR)
+    _o(ReleaseChannel.STEAM, date(2026, 1, 1), DatePrecision.YEAR, SourceTier.FIRST_PARTY_STORE)
+
+    assert [r.title for r in views.available(db, today, _settings())] == []
+    up = views.upcoming(db, today, _settings())
+    assert [(r.title, r.pivot_when) for r in up] == [("Ontos", date(2026, 10, 6))]
+
+
 def test_freshness_buckets(tmp_path: Path) -> None:
     s = _settings()
     today = date(2026, 6, 1)
