@@ -88,14 +88,63 @@ def _credit(db: Database, work: Entity, person: Node, role: CreditRole) -> None:
     )
 
 
-def test_upcoming_is_future_only_and_date_sorted(tmp_path: Path) -> None:
+def _seed_undated(db: Database, title: str, *, state: ConsumptionState) -> Entity:
+    """A tracked work with no observations at all — not even enough to speculate a date."""
+    ent = Entity.create(title, MediaKind.MOVIE, consumption_state=state)
+    db.upsert_entity(ent)
+    db.upsert_node(Node(id=ent.id, node_kind=NodeKind.WORK, name=title, owned=True))
+    return ent
+
+
+def test_upcoming_is_future_dated_then_no_date_tail(tmp_path: Path) -> None:
     db = Database(tmp_path / "v.db")
     today = date(2026, 6, 1)
-    _seed_work(db, "Past Film", date(2026, 1, 1))
-    _seed_work(db, "Soon Film", date(2026, 7, 1))
-    _seed_work(db, "Later Film", date(2026, 12, 1))
+    # confirmed-out (digital) + want -> available, NOT upcoming
+    _seed_work(db, "Out", date(2025, 1, 1), digital=date(2025, 3, 1), state=ConsumptionState.WANT)
+    _seed_work(db, "Soon Film", date(2026, 7, 1), state=ConsumptionState.WANT)
+    _seed_work(db, "Later Film", date(2026, 12, 1), state=ConsumptionState.WANT)
+    _seed_work(db, "Done", date(2026, 8, 1), state=ConsumptionState.WATCHED)  # finished -> hidden
+    _seed_undated(db, "No Date Yet", state=ConsumptionState.WANT)  # -> the TBA tail, last
     rows = views.upcoming(db, today, _settings())
-    assert [r.title for r in rows] == ["Soon Film", "Later Film"]  # past dropped, sorted
+    # future-dated soonest-first, then the no-date tail; out/finished excluded
+    assert [r.title for r in rows] == ["Soon Film", "Later Film", "No Date Yet"]
+    assert rows[-1].pivot_when is None  # the tail row carries no date
+
+
+def test_watched_view_lists_finished_newest_first(tmp_path: Path) -> None:
+    db = Database(tmp_path / "v.db")
+    today = date(2026, 6, 1)
+    _seed_work(db, "Old Watch", date(2024, 1, 1), state=ConsumptionState.WATCHED)
+    _seed_work(db, "New Watch", date(2025, 9, 1), state=ConsumptionState.WATCHED)
+    _seed_work(db, "Dropped It", date(2025, 1, 1), state=ConsumptionState.DROPPED)
+    _seed_work(db, "Still Want", date(2026, 9, 1), state=ConsumptionState.WANT)  # excluded
+    rows = views.watched(db, today, _settings())
+    assert [r.title for r in rows] == [
+        "New Watch",
+        "Dropped It",
+        "Old Watch",
+    ]  # newest release first
+
+
+def test_no_limbo_every_active_row_lands_in_exactly_one_bucket(tmp_path: Path) -> None:
+    # the partition is the whole point: nothing is "neither available nor upcoming".
+    db = Database(tmp_path / "v.db")
+    today = date(2026, 6, 1)
+    _seed_work(db, "Out", date(2025, 1, 1), digital=date(2025, 3, 1), state=ConsumptionState.WANT)
+    _seed_work(db, "Future", date(2026, 9, 1), state=ConsumptionState.WANT)
+    _seed_undated(db, "Undated", state=ConsumptionState.WANT)
+    _seed_work(db, "Finished", date(2025, 1, 1), state=ConsumptionState.WATCHED)
+    s = _settings()
+    buckets = {
+        t: n
+        for n, view in (
+            ("avail", views.available),
+            ("up", views.upcoming),
+            ("watch", views.watched),
+        )
+        for t in [r.title for r in view(db, today, s)]
+    }
+    assert buckets == {"Out": "avail", "Future": "up", "Undated": "up", "Finished": "watch"}
 
 
 def test_upcoming_days_window_and_kind_filter(tmp_path: Path) -> None:

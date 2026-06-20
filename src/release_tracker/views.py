@@ -336,6 +336,39 @@ def _series_names(db: Database, entity_id: str) -> tuple[str, ...]:
 
 
 # --- public builders ------------------------------------------------------
+# the three consumption buckets are exhaustive + disjoint, so nothing falls into limbo:
+#   finished (watched/dropped) -> `watched`;  out + active -> `available`;
+#   everything else not-finished -> `upcoming` (dated, or an explicit "no date yet").
+_FINISHED = (ConsumptionState.WATCHED, ConsumptionState.DROPPED)
+_ACTIVE = (ConsumptionState.WANT, ConsumptionState.WATCHING)
+
+
+def _is_available(r: TrackRow, today: date) -> bool:
+    """Out and unfinished: a *confirmed* consumption-channel date has elapsed, still active.
+
+    A speculative past date does not count (we don't know it released), and neither does a
+    theatrical release under a digital preference — only the strict ``available_when`` governs.
+    """
+    return (
+        r.available_when is not None
+        and r.available_when < today
+        and r.available_confirmed
+        and r.state in _ACTIVE
+    )
+
+
+def _has_firm_upcoming_date(r: TrackRow, today: date) -> bool:
+    """A real future date to schedule on (vs. a stale past guess or no date at all)."""
+    return r.pivot_when is not None and r.pivot_when >= today
+
+
+def _upcoming_sort_key(r: TrackRow, today: date) -> date:
+    """Firm future date for ordering; no-firm-date rows sort to the TBA tail."""
+    if r.pivot_when is not None and r.pivot_when >= today:
+        return r.pivot_when
+    return date.max
+
+
 def upcoming(
     db: Database,
     today: date,
@@ -344,15 +377,23 @@ def upcoming(
     days: int | None = None,
     kind: MediaKind | None = None,
 ) -> list[TrackRow]:
-    """Works whose consumption (pivot) date is still in the future, soonest first."""
-    rows = [
-        r
-        for r in _track_rows(db, today, settings, kind=kind)
-        if r.pivot_when is not None
-        and r.pivot_when >= today
-        and (days is None or (r.pivot_when - today).days <= days)
-    ]
-    rows.sort(key=lambda r: r.pivot_when or date.max)
+    """Anything not finished and not yet available — i.e. still ahead of you.
+
+    Future-dated first (soonest first), then an explicit **no-date** tail: not-finished
+    works with no firm future date (none at all, or only a stale past guess). A title can't
+    be "neither available nor upcoming" — if it isn't out and isn't watched, it's upcoming.
+    The ``days`` window only applies to firm-dated rows; the no-date tail is dropped when set.
+    """
+    rows: list[TrackRow] = []
+    for r in _track_rows(db, today, settings, kind=kind):
+        if r.state in _FINISHED or _is_available(r, today):
+            continue
+        if _has_firm_upcoming_date(r, today):
+            if r.pivot_when is not None and (days is None or (r.pivot_when - today).days <= days):
+                rows.append(r)
+        elif days is None:  # the no-date tail only shows on an unbounded view
+            rows.append(r)
+    rows.sort(key=lambda r: _upcoming_sort_key(r, today))
     return rows
 
 
@@ -363,23 +404,22 @@ def available(
     *,
     kind: MediaKind | None = None,
 ) -> list[TrackRow]:
-    """Works that are out and unfinished (want/watching), newest first.
-
-    "Out" requires a *confirmed* date on the user's consumption channel to have elapsed.
-    A speculative past date does not count (we don't know it released), and neither does
-    a theatrical release under a digital preference — only ``available_when`` (the strict
-    consumption date, no film fallback) governs.
-    """
-    watch_states = (ConsumptionState.WANT, ConsumptionState.WATCHING)
-    rows = [
-        r
-        for r in _track_rows(db, today, settings, kind=kind)
-        if r.available_when is not None
-        and r.available_when < today
-        and r.available_confirmed
-        and r.state in watch_states
-    ]
+    """Works that are out and unfinished (want/watching), newest first."""
+    rows = [r for r in _track_rows(db, today, settings, kind=kind) if _is_available(r, today)]
     rows.sort(key=lambda r: r.available_when or date.min, reverse=True)
+    return rows
+
+
+def watched(
+    db: Database,
+    today: date,
+    settings: Settings,
+    *,
+    kind: MediaKind | None = None,
+) -> list[TrackRow]:
+    """Works you're done with (watched/dropped), most recently released first."""
+    rows = [r for r in _track_rows(db, today, settings, kind=kind) if r.state in _FINISHED]
+    rows.sort(key=lambda r: r.pivot_when or date.min, reverse=True)
     return rows
 
 

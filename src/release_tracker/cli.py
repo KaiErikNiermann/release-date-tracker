@@ -438,6 +438,20 @@ def available(
 
 
 @app.command()
+def watched(
+    kind: Annotated[str | None, typer.Option(help="filter to a MediaKind")] = None,
+) -> None:
+    """Things you're done with (watched/dropped), most recently released first."""
+    configure_logging()
+    settings = get_settings()
+    db = _db()
+    kind_filter = MediaKind(kind) if kind else None
+    rows = views.watched(db, _today(), settings, kind=kind_filter)
+    db.close()
+    _render_watched(rows)
+
+
+@app.command()
 def card(ref: Annotated[str, typer.Argument(help="entity id or title substring")]) -> None:
     """Full who/where/what + dates for one tracked work."""
     configure_logging()
@@ -1432,15 +1446,19 @@ def _render_upcoming(rows: list[views.TrackRow], days: int | None) -> None:
     table.add_column("Title", min_width=18, max_width=30, no_wrap=True, overflow="ellipsis")
     table.add_column("Kind", min_width=5, no_wrap=True)
     _wcw(table)
+    today = _today()
     prev_month: tuple[int, int] | None = None
     for r in rows:
-        month = (r.pivot_when.year, r.pivot_when.month) if r.pivot_when else (9999, 12)
+        # a stale past guess is no firmer than no date at all — both land in the TBA tail
+        firm = r.pivot_when if (r.pivot_when and r.pivot_when >= today) else None
+        month = (firm.year, firm.month) if firm else (9999, 12)
         if prev_month is not None and month != prev_month:
             table.add_section()  # cluster the spreadsheet by month
         prev_month = month
+        no_date = firm is None
         table.add_row(
-            _fmt_cell(r.theatrical),
-            _fmt_cell(r.digital),
+            "[dim]no date[/]" if no_date else _fmt_cell(r.theatrical),
+            "[dim]yet[/]" if no_date else _fmt_cell(r.digital),
             _fresh_dot(r.freshness),
             _title_cell(r),
             r.kind.value,
@@ -1450,10 +1468,34 @@ def _render_upcoming(rows: list[views.TrackRow], days: int | None) -> None:
     if rows:
         console.print(
             "[dim]dates: [green]confirmed[/] / [yellow]speculative[/]   "
+            "[dim]no date yet[/] = announced but not datable   "
             "⟳ [green]●[/]fresh [yellow]●[/]aging [red]●[/]stale   [yellow]*[/]=notes[/]"
         )
     else:
         console.print("[dim]No upcoming releases. `rdt add` then `rdt enrich`.[/]")
+
+
+def _render_watched(rows: list[views.TrackRow]) -> None:
+    table = Table(title="Watched · done", show_lines=False)
+    table.add_column("Released", min_width=10, no_wrap=True)
+    table.add_column("Title", min_width=18, max_width=32, no_wrap=True, overflow="ellipsis")
+    table.add_column("Kind", min_width=5, no_wrap=True)
+    table.add_column("State", min_width=8, no_wrap=True)
+    _wcw(table)
+    for r in rows:
+        state = "[red]dropped[/]" if r.state is ConsumptionState.DROPPED else r.state.value
+        table.add_row(
+            r.pivot_when.isoformat() if r.pivot_when else "[dim]—[/]",
+            _title_cell(r),
+            r.kind.value,
+            state,
+            *_wcw_cells(r),
+        )
+    console.print(table)
+    if rows:
+        console.print(f"[dim]{len(rows)} finished   [yellow]*[/]=notes[/]")
+    else:
+        console.print("[dim]Nothing finished yet. `rdt state <title> watched`.[/]")
 
 
 def _render_available(rows: list[views.TrackRow]) -> None:
