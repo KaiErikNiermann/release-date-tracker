@@ -7,6 +7,7 @@ mutation lands the right entity/node/edge state.
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -15,7 +16,9 @@ from typer.testing import CliRunner
 from release_tracker import cli
 from release_tracker.db import Database
 from release_tracker.models import (
+    Certainty,
     CreditRole,
+    DatePrecision,
     DescriptorKind,
     Edge,
     Entity,
@@ -23,6 +26,8 @@ from release_tracker.models import (
     Node,
     NodeKind,
     RelationKind,
+    ReleaseChannel,
+    ReleaseObservation,
     SourceTier,
     WorkRelation,
 )
@@ -226,4 +231,52 @@ def test_delete_edge_primitive(edit_db: Path) -> None:
     assert db.delete_edge(edge.id) is True
     assert db.delete_edge(edge.id) is False  # already gone
     assert db.edges_from(ent.id, RelationKind.DERIVED_FROM) == []
+    db.close()
+
+
+def _manual_obs(db: Database, entity_id: str) -> list[ReleaseObservation]:
+    return [o for o in db.iter_observations(entity_id) if o.provider == "manual"]
+
+
+def test_edit_date_writes_a_partial_uncertain_manual_observation(edit_db: Path) -> None:
+    db = Database(edit_db)
+    ent = next(db.iter_entities())
+    db.close()
+    res = runner.invoke(cli.app, ["edit", "date", ent.id, "2026-09~", "--channel", "theatrical"])
+    assert res.exit_code == 0
+    db = Database(edit_db)
+    obs = _manual_obs(db, ent.id)
+    db.close()
+    assert len(obs) == 1
+    (o,) = obs
+    assert o.channel is ReleaseChannel.THEATRICAL
+    assert o.release_date == date(2026, 9, 1)
+    assert o.precision is DatePrecision.MONTH
+    assert o.certainty is Certainty.ESTIMATED  # '~' widened to estimated
+
+
+def test_edit_date_replaces_prior_manual_date_on_same_channel(edit_db: Path) -> None:
+    db = Database(edit_db)
+    ent = next(db.iter_entities())
+    db.close()
+    runner.invoke(cli.app, ["edit", "date", ent.id, "2026", "--channel", "theatrical"])
+    res = runner.invoke(cli.app, ["edit", "date", ent.id, "2027-09-18", "--channel", "theatrical"])
+    assert res.exit_code == 0
+    db = Database(edit_db)
+    obs = _manual_obs(db, ent.id)
+    db.close()
+    assert len(obs) == 1  # replaced, not duplicated
+    assert obs[0].release_date == date(2027, 9, 18)
+    assert obs[0].precision is DatePrecision.EXACT
+    assert obs[0].certainty is Certainty.CONFIRMED
+
+
+def test_edit_date_rejects_a_bad_edtf_literal(edit_db: Path) -> None:
+    db = Database(edit_db)
+    ent = next(db.iter_entities())
+    db.close()
+    res = runner.invoke(cli.app, ["edit", "date", ent.id, "2026-13"])
+    assert res.exit_code != 0
+    db = Database(edit_db)
+    assert _manual_obs(db, ent.id) == []  # nothing written
     db.close()

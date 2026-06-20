@@ -327,6 +327,21 @@ class Database:
             )
             return cur.rowcount
 
+    def delete_channel_observations(
+        self, entity_id: str, provider: str, channel: ReleaseChannel
+    ) -> int:
+        """Drop an entity's rows for one (provider, channel) — re-authoring a hand date.
+
+        Scoped to a single channel so a manual theatrical date isn't lost when its
+        digital sibling is re-authored.
+        """
+        with self._tx() as conn:
+            cur = conn.execute(
+                "DELETE FROM observations WHERE entity_id = ? AND provider = ? AND channel = ?",
+                (entity_id, provider, channel.value),
+            )
+            return cur.rowcount
+
     def upsert_observations(self, observations: Iterable[ReleaseObservation]) -> int:
         count = 0
         with self._tx() as conn:

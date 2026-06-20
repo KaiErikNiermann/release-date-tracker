@@ -37,6 +37,7 @@ from release_tracker.artists import (
     refresh_artist,
 )
 from release_tracker.config import Settings, get_settings
+from release_tracker.dates_edtf import parse_edtf, to_edtf
 from release_tracker.db import Database
 from release_tracker.enrich import EnrichSummary, enrich_work
 from release_tracker.logging import configure_logging
@@ -55,6 +56,8 @@ from release_tracker.models import (
     Node,
     NodeKind,
     RelationKind,
+    ReleaseChannel,
+    ReleaseObservation,
     SocialPlatform,
     SourceTier,
     WorkRelation,
@@ -289,7 +292,9 @@ def _render(rows: list[tuple[str, MediaKind, object]]) -> None:
     from release_tracker.models import BestEstimate  # local import for typing only
 
     table = Table(title="Release best-estimates", show_lines=False)
-    for col in ("Title", "Kind", "Channel", "Region", "Date", "Prec.", "Stance", "Price", "Conf."):
+    # EDTF folds date + precision + uncertainty into one canonical token (e.g. 2026-09~);
+    # Stance keeps the precise internal certainty word the qualifier can only approximate.
+    for col in ("Title", "Kind", "Channel", "Region", "EDTF", "Stance", "Price", "Conf."):
         table.add_column(col)
     for title, kind, est_obj in rows:
         est = est_obj if isinstance(est_obj, BestEstimate) else None
@@ -300,8 +305,7 @@ def _render(rows: list[tuple[str, MediaKind, object]]) -> None:
             kind.value,
             est.channel.value,
             est.region,
-            est.release_date.isoformat() if est.release_date else "—",
-            est.precision.value,
+            to_edtf(est.release_date, est.precision, est.certainty),
             est.certainty.value,
             str(est.price) if est.price else "—",
             f"{est.confidence:.2f}",
@@ -1170,6 +1174,68 @@ def edit_part(
     db.close()
     coord = f"S{season}" + (f" Pt{part}" if part is not None else "")
     console.print(f"[green]Set[/] {entity.title} → [bold]{coord}[/]")
+
+
+@edit_app.command("date")
+def edit_date(
+    ref: Annotated[str, typer.Argument(help="the work (id or title)")],
+    edtf: Annotated[
+        str,
+        typer.Argument(
+            help="EDTF date: 2026 (year), 2026-09 (month), 2026-34 (Q2), 2026-09-18 (day); "
+            "trailing ? = uncertain, ~ = approximate (e.g. 2026-09~)"
+        ),
+    ],
+    channel: Annotated[
+        str,
+        typer.Option("--channel", help="primary|theatrical|digital|streaming|… (default primary)"),
+    ] = "primary",
+) -> None:
+    """Hand-author a release date in EDTF — partial and uncertain dates welcome.
+
+    EDTF folds precision and uncertainty into one token, so a "we only know the month,
+    and it's a guess" date is just ``2026-09~``. Stored as a manual observation on the
+    given channel (re-running replaces the prior manual date for that channel).
+    """
+    configure_logging()
+    db = _db()
+    entity = _edit_entity(db, ref)
+    if entity is None:
+        raise typer.Exit(1)
+    try:
+        parsed = parse_edtf(edtf)
+    except ValueError as exc:
+        db.close()
+        raise typer.BadParameter(str(exc)) from None
+    try:
+        chan = ReleaseChannel(channel.lower())
+    except ValueError:
+        db.close()
+        raise typer.BadParameter(f"unknown channel {channel!r}") from None
+    confirmed = parsed.certainty is Certainty.CONFIRMED
+    canonical = to_edtf(parsed.when, parsed.precision, parsed.certainty)
+    db.delete_channel_observations(entity.id, "manual", chan)
+    db.upsert_observation(
+        ReleaseObservation(
+            entity_id=entity.id,
+            channel=chan,
+            region="WW",
+            release_date=parsed.when,
+            precision=parsed.precision,
+            certainty=parsed.certainty,
+            source_tier=SourceTier.OFFICIAL if confirmed else SourceTier.RUMOR,
+            provider="manual",
+            source_name="Manual (EDTF)",
+            source_quote=canonical,
+            confidence=1.0 if confirmed else 0.5,
+            fetched_at=datetime.now(UTC),
+        )
+    )
+    db.close()
+    console.print(
+        f"[green]Dated[/] {entity.title} [{chan.value}] → [bold]{canonical}[/] "
+        f"({parsed.certainty.value})"
+    )
 
 
 @app.command()
