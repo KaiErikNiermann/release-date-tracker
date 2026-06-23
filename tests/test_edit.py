@@ -375,3 +375,15 @@ def test_relate_warns_on_ambiguous_source_but_still_links(edit_db: Path) -> None
     edges = db.edges_from(ent.id, RelationKind.DERIVED_FROM)
     db.close()
     assert len(edges) == 1  # ...but still wrote the edge (warning, not a hard stop)
+
+
+def test_add_season_canonical_titles_and_sets_coords(edit_db: Path) -> None:
+    # `rdt add "Pluribus" --season 2` (no --now: no network) -> a fully-coorded TV-season entry
+    res = runner.invoke(cli.app, ["add", "Pluribus", "--season", "2"])
+    assert res.exit_code == 0
+    db = Database(edit_db)
+    ent = next(e for e in db.iter_entities() if e.title == "Pluribus: Season 2")
+    db.close()
+    assert ent.kind is MediaKind.TV  # --season implies tv
+    assert ent.season == 2 and ent.part is None  # structured coords, not just a parsed title
+    assert ent.id.startswith("tv-pluribus-season-2-")

@@ -52,6 +52,8 @@ CREATE TABLE IF NOT EXISTS entities (
     notes           TEXT,
     watch           INTEGER NOT NULL DEFAULT 1,
     consumption_state TEXT NOT NULL DEFAULT 'unset',
+    season          INTEGER,
+    part            INTEGER,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
 );
@@ -177,6 +179,10 @@ class Database:
             self._conn.execute(
                 "ALTER TABLE entities ADD COLUMN consumption_state TEXT NOT NULL DEFAULT 'unset'"
             )
+        if "season" not in entity_cols:
+            self._conn.execute("ALTER TABLE entities ADD COLUMN season INTEGER")
+        if "part" not in entity_cols:
+            self._conn.execute("ALTER TABLE entities ADD COLUMN part INTEGER")
         node_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(nodes)")}
         if "followed" not in node_cols:
             self._conn.execute("ALTER TABLE nodes ADD COLUMN followed INTEGER NOT NULL DEFAULT 0")
@@ -205,9 +211,11 @@ class Database:
             conn.execute(
                 """
                 INSERT INTO entities (id, title, kind, aliases, external_ids,
-                    notion_page_id, notes, watch, consumption_state, created_at, updated_at)
+                    notion_page_id, notes, watch, consumption_state, season, part,
+                    created_at, updated_at)
                 VALUES (:id, :title, :kind, :aliases, :external_ids,
-                    :notion_page_id, :notes, :watch, :consumption_state, :now, :now)
+                    :notion_page_id, :notes, :watch, :consumption_state, :season, :part,
+                    :now, :now)
                 ON CONFLICT(id) DO UPDATE SET
                     title=excluded.title,
                     kind=excluded.kind,
@@ -222,6 +230,10 @@ class Database:
                     consumption_state=CASE
                         WHEN excluded.consumption_state = 'unset' THEN entities.consumption_state
                         ELSE excluded.consumption_state END,
+                    -- season/part are explicit coords; a stateless pull leaves them None, so
+                    -- COALESCE keeps any previously-set value rather than wiping it.
+                    season=COALESCE(excluded.season, entities.season),
+                    part=COALESCE(excluded.part, entities.part),
                     updated_at=:now
                 """,
                 {
@@ -234,6 +246,8 @@ class Database:
                     "notes": entity.notes,
                     "watch": int(entity.watch),
                     "consumption_state": entity.consumption_state.value,
+                    "season": entity.season,
+                    "part": entity.part,
                     "now": now,
                 },
             )
@@ -737,6 +751,8 @@ def _row_to_entity(row: sqlite3.Row) -> Entity:
         notes=row["notes"],
         watch=bool(row["watch"]),
         consumption_state=ConsumptionState(row["consumption_state"]),
+        season=row["season"],
+        part=row["part"],
     )
 
 

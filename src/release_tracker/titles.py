@@ -33,6 +33,15 @@ def split_season(title: str) -> tuple[str, int | None]:
     return _QUALIFIER_RE.sub("", title).strip(), None
 
 
+def season_label(show: str, season: int) -> str:
+    """Canonical season title, e.g. ('Pluribus', 2) -> 'Pluribus: Season 2'.
+
+    The inverse of :func:`split_season`; used by the explicit ``--season`` capture path so a
+    season entry is titled consistently regardless of how the user typed the show name.
+    """
+    return f"{show.strip()}: Season {season}"
+
+
 def extract_part(title: str) -> int | None:
     """('Stranger Things: Season 5, Part 2') -> 2; a mid-season cut (Part/Volume/Cour N)."""
     m = _PART_RE.search(title)

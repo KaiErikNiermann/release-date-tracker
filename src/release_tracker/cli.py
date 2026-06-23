@@ -69,6 +69,7 @@ from release_tracker.resolve import best_estimates
 from release_tracker.seed import LocalSeed, NotionSeed, SeedProvider
 from release_tracker.sources.base import Candidate, make_client
 from release_tracker.sources.ddg import WebInfo, instant_answer
+from release_tracker.titles import season_label
 
 app = typer.Typer(add_completion=False, help="Free-first release date tracker.")
 seed_app = typer.Typer(help="Manage the entity watchlist (seed).")
@@ -195,6 +196,10 @@ def rd(
         str | None,
         typer.Option(help="ISO country for tech (hard constraint; defaults to RDT_REGIONS[0])"),
     ] = None,
+    season: Annotated[
+        int | None,
+        typer.Option(help="pin a specific TV season (preferred over 'Show: Season N' titles)"),
+    ] = None,
     track: Annotated[
         bool,
         typer.Option("--track", "--add", help="also capture it into the tracker (state: want)"),
@@ -206,13 +211,17 @@ def rd(
     """One-shot lookup: confirmed + speculative release dates for a single title.
 
     With --track, also captures the resolved title into the tracker (the /rd-add path):
-    pins its canonical id, pulls dates + enriches who/where/what, marks it 'want'.
+    pins its canonical id, pulls dates + enriches who/where/what, marks it 'want'. Pass
+    --season N for a TV season — it resolves that season's date and, with --track, files a
+    fully-wired 'Show: Season N' entry (series link + coords + subtitle), no edit needed.
     """
     configure_logging()
     settings = get_settings()
-    kind_hint = MediaKind(kind) if kind else None
-    report = asyncio.run(lookup(name, settings, kind_hint=kind_hint, region=region))
-    tracked = asyncio.run(_track_from_report(settings, name, report)) if track else False
+    kind_hint = MediaKind(kind) if kind else (MediaKind.TV if season is not None else None)
+    report = asyncio.run(lookup(name, settings, kind_hint=kind_hint, region=region, season=season))
+    tracked = (
+        asyncio.run(_track_from_report(settings, name, report, season=season)) if track else False
+    )
     if as_json:
         out = report.to_dict()
         if track:
@@ -227,25 +236,33 @@ def rd(
             console.print("[yellow]Not tracked[/] — no resolvable canonical match to capture.")
 
 
-async def _track_from_report(settings: Settings, name: str, report: RdReport) -> bool:
+async def _track_from_report(
+    settings: Settings, name: str, report: RdReport, *, season: int | None = None
+) -> bool:
     """Capture a looked-up title into the tracker using the already-resolved ids.
 
     Captures any title that resolved to a canonical id — *including date-less (TBA) ones*.
     A confident match with no date yet is still worth tracking (the skill then proposes a
     speculative window so nothing sits date-less); only a true miss / tech is skipped.
+
+    With ``season``, the entry is canonical-titled ``"Show: Season N"`` and carries the
+    structured coord so enrichment auto-wires the series link + subtitle (full-auto path).
     """
     if not (report.kind and matching.is_resolvable(report.kind) and report.canonical):
         return False
+    # the show's matched name drives a clean "Show: Season N" title for a season capture
+    title = season_label(report.matched_title or name, season) if season is not None else name
     db = _db()
     entity = Entity.create(
-        name,
+        title,
         report.kind,
         external_ids=dict(report.canonical),
         consumption_state=ConsumptionState.WANT,
+        season=season,
     )
     db.upsert_entity(entity)
     db.upsert_node(
-        Node(id=entity.id, node_kind=NodeKind.WORK, name=name, owned=True, external_ids={})
+        Node(id=entity.id, node_kind=NodeKind.WORK, name=title, owned=True, external_ids={})
     )
     async with make_client() as client:
         await pull_entity(db, settings, entity, client=client)  # dates via the pinned ids
@@ -353,29 +370,42 @@ def add(
     kind: Annotated[
         str | None, typer.Option(help="movie|tv|game|tech|...; detected on enrich if omitted")
     ] = None,
+    season: Annotated[
+        int | None,
+        typer.Option(help="TV season number — titles it 'Show: Season N' + wires coords on enrich"),
+    ] = None,
+    part: Annotated[
+        int | None, typer.Option(help="mid-season cut (Part/Vol/Cour N) within the season")
+    ] = None,
     now: Annotated[bool, typer.Option("--now", help="resolve + enrich immediately")] = False,
     no_themes: Annotated[
         bool, typer.Option("--no-themes", help="skip LLM theme extraction")
     ] = False,
 ) -> None:
-    """Capture a title instantly. Resolve + enrich later (or now with --now)."""
+    """Capture a title instantly. Resolve + enrich later (or now with --now).
+
+    With --season N the entry is titled 'Show: Season N' and carries structured season/part
+    coords, so enrichment auto-links it to the series with a 'Season N of Show' subtitle.
+    """
     configure_logging()
     settings = get_settings()
-    media = MediaKind(kind) if kind else MediaKind.OTHER
+    # --season implies a TV season unless the caller said otherwise
+    media = MediaKind(kind) if kind else (MediaKind.TV if season is not None else MediaKind.OTHER)
+    title = season_label(name, season) if season is not None else name
     db = _db()
-    entity = Entity.create(name, media)
+    entity = Entity.create(title, media, season=season, part=part)
     db.upsert_entity(entity)
     db.upsert_node(
-        Node(id=entity.id, node_kind=NodeKind.WORK, name=name, owned=True, external_ids={})
+        Node(id=entity.id, node_kind=NodeKind.WORK, name=title, owned=True, external_ids={})
     )
-    console.print(f"[green]Added[/] {name} [dim]({media.value})[/]")
+    console.print(f"[green]Added[/] {title} [dim]({media.value})[/]")
     if now:
         summary = asyncio.run(
             _resolve_and_enrich(db, settings, entity, include_themes=not no_themes)
         )
         _print_enrich(entity, summary)
     else:
-        console.print(f'[dim]Run `rdt enrich "{name}"` to populate who/where/what.[/]')
+        console.print(f'[dim]Run `rdt enrich "{title}"` to populate who/where/what.[/]')
     db.close()
 
 
@@ -1296,6 +1326,9 @@ def edit_part(
             owned=True,
         )
     )
+    # keep the structured coord on the entity in sync with the edge, so the puller's
+    # season resolution stays authoritative (not dependent on title parsing).
+    db.upsert_entity(entity.model_copy(update={"season": season, "part": part}))
     db.close()
     coord = f"S{season}" + (f" Pt{part}" if part is not None else "")
     console.print(f"[green]Set[/] {entity.title} → [bold]{coord}[/]")

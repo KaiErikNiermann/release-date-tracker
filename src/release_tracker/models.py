@@ -207,6 +207,11 @@ class Entity(BaseModel):
     watch: bool = True
     # the user's watch/play progress (seeded from Notion Status, set via `rdt state`)
     consumption_state: ConsumptionState = ConsumptionState.UNSET
+    # structured season/part coordinates for a TV-season entry (the explicit `--season`/`--part`
+    # path). Authoritative over title parsing: pullers and enrichment prefer these, falling back
+    # to `split_season(title)`/`extract_part(title)` only when they're None (back-compat shorthand).
+    season: int | None = None
+    part: int | None = None
 
     @staticmethod
     def make_id(title: str, kind: MediaKind) -> str:

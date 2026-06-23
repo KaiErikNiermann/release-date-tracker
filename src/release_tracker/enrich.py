@@ -118,9 +118,10 @@ async def enrich_work(
         )
 
     if graph.series is not None:
-        is_tv = entity.kind is MediaKind.TV
-        season = split_season(entity.title)[1] if is_tv else None
-        part = extract_part(entity.title) if is_tv else None
+        season = part = None
+        if entity.kind is MediaKind.TV:  # explicit coords win; fall back to title parsing
+            season = entity.season if entity.season is not None else split_season(entity.title)[1]
+            part = entity.part if entity.part is not None else extract_part(entity.title)
         _write_series(db, entity, graph.series, provider, now, ordinal=season, part=part)
         summary.series = 1
 

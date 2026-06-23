@@ -150,10 +150,11 @@ class TmdbSource:
 
     # -- tv ----------------------------------------------------------------
     async def _pull_tv(self, client: httpx.AsyncClient, entity: Entity, key: str) -> SourceResult:
-        # Watchlist titles encode the season ("The Boys: Season 5"), but TMDB
-        # search only matches the *show*. Split the show name from the season so
-        # we can search the show and then resolve that specific season's date.
-        show_title, season_no = split_season(entity.title)
+        # Prefer the explicit structured coord (the `--season` path); fall back to parsing the
+        # title ("The Boys: Season 5") for back-compat. Either way we search the *show* and then
+        # resolve that specific season's date.
+        show_title, parsed_season = split_season(entity.title)
+        season_no = entity.season if entity.season is not None else parsed_season
         tmdb_id, skip = pinned_id(entity.external_ids, "tmdb")
         if skip:
             return SourceResult()
@@ -172,13 +173,20 @@ class TmdbSource:
             # yet is TBA — do NOT fall back to the show's first_air_date / next episode,
             # those belong to a *different* (already-aired) season and would stamp the
             # unaired season with a wrong, ancient "confirmed" date (e.g. S3 -> S1's date).
-            season = cast(
-                "dict[str, Any]",
-                await get_json(
-                    client, f"{BASE}/tv/{tmdb_id}/season/{season_no}", params={"api_key": key}
-                ),
-            )
-            air = _parse_tmdb_date(season.get("air_date"))
+            # A 404 means TMDB hasn't created this season yet (very-early renewal, e.g.
+            # Pluribus S2) — also TBA, not an error.
+            try:
+                season = cast(
+                    "dict[str, Any]",
+                    await get_json(
+                        client, f"{BASE}/tv/{tmdb_id}/season/{season_no}", params={"api_key": key}
+                    ),
+                )
+                air = _parse_tmdb_date(season.get("air_date"))
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 404:
+                    raise
+                log.info("tmdb.season_absent", tmdb_id=tmdb_id, season=season_no)
         else:
             # whole show (no season pinned): next episode to air, else first air date
             detail = cast(

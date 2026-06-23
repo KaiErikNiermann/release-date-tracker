@@ -156,11 +156,13 @@ async def lookup(
     *,
     kind_hint: MediaKind | None = None,
     region: str | None = None,
+    season: int | None = None,
 ) -> RdReport:
     """Resolve a single title to confirmed + speculative dates.
 
     ``region`` only matters for tech (a hard per-country constraint); film/tv/game
-    dates are reported as earliest-worldwide and ignore it.
+    dates are reported as earliest-worldwide and ignore it. ``season`` pins a specific TV
+    season explicitly (preferred over parsing it out of the title).
     """
     if kind_hint is MediaKind.TECH:
         return _tech_report(query, settings, region)
@@ -188,7 +190,10 @@ async def lookup(
         kind, cand = picked
         # keep the raw query as the title (so "Show: Season 5" still resolves the
         # season) but pin the canonical id we just chose so pullers don't re-search.
-        entity = Entity.create(query, kind, external_ids={cand.id_key: cand.canonical_id})
+        # An explicit `season` (the `--season` path) is authoritative over title parsing.
+        entity = Entity.create(
+            query, kind, external_ids={cand.id_key: cand.canonical_id}, season=season
+        )
 
         results: list[SourceResult] = []
         for src in sources_for(kind):

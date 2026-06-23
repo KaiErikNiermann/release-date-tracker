@@ -32,3 +32,10 @@ def test_similarity_ranks_exact_over_partial() -> None:
     partial = title_similarity("Marvel's Blade", "Mount & Blade II")
     assert exact == 1.0
     assert exact > partial
+
+
+def test_season_label_is_inverse_of_split_season() -> None:
+    from release_tracker.titles import season_label
+
+    assert season_label("Pluribus", 2) == "Pluribus: Season 2"
+    assert split_season(season_label("The Boys", 5)) == ("The Boys", 5)  # round-trips
