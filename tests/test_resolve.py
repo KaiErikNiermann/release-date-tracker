@@ -107,9 +107,7 @@ def test_dateless_tba_row_suppressed_when_a_dated_estimate_exists() -> None:
             ),
         ]
     )
-    assert [(e.channel, e.release_date) for e in ests] == [
-        (ReleaseChannel.STEAM, date(2026, 7, 1))
-    ]
+    assert [(e.channel, e.release_date) for e in ests] == [(ReleaseChannel.STEAM, date(2026, 7, 1))]
 
 
 def test_tba_row_kept_when_no_date_exists_anywhere() -> None:

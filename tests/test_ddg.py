@@ -35,10 +35,12 @@ def test_empty_payload_is_a_miss() -> None:
 def test_related_links_flatten_and_cap() -> None:
     related = [
         {"Text": "A24 (company)", "FirstURL": "https://example.com/a24"},
-        {"Topics": [  # nested grouping — flattened one level
-            {"Text": "A24 films", "FirstURL": "https://example.com/films"},
-            {"Text": "no url here"},  # dropped: missing FirstURL
-        ]},
+        {
+            "Topics": [  # nested grouping — flattened one level
+                {"Text": "A24 films", "FirstURL": "https://example.com/films"},
+                {"Text": "no url here"},  # dropped: missing FirstURL
+            ]
+        },
         *[{"Text": f"t{i}", "FirstURL": f"https://example.com/{i}"} for i in range(10)],
     ]
     info = parse_instant_answer(_payload(AbstractText="", RelatedTopics=related), max_related=3)

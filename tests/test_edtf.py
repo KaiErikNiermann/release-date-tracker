@@ -86,9 +86,7 @@ def test_to_edtf_emits_interval() -> None:
         == "2027~/2029~"
     )
     # confirmed window has no qualifier on either bound
-    assert (
-        to_edtf(date(2026, 3, 1), DatePrecision.MONTH, end=date(2026, 9, 1)) == "2026-03/2026-09"
-    )
+    assert to_edtf(date(2026, 3, 1), DatePrecision.MONTH, end=date(2026, 9, 1)) == "2026-03/2026-09"
 
 
 def test_parse_interval_into_bounds() -> None:
