@@ -101,10 +101,24 @@ def combine(parts: Iterable[Resolution]) -> Resolution:
     return Resolution(ResolutionStatus.PENDING)  # nothing to go on
 
 
+_REGION_WILDCARD: frozenset[str] = frozenset({"ANY", "*"})
+
+
 def matcher_from_settings(settings: Settings) -> ProfileMatcher:
-    """Build the user's profile matcher; an empty set for a dim => unconstrained (wildcard)."""
+    """Build the user's profile matcher; an empty set for a dim => unconstrained (wildcard).
+
+    Region is otherwise privileged — every observation carries a region facet and the matcher
+    always folds in ``WW``, so region can't go wildcard via the empty-set path the other dims
+    use. The ``ANY``/``*`` sentinel in ``RDT_REGIONS`` is the deliberate escape: it drops region
+    entirely (the "I bypass region, e.g. via VPN, so it's inapplicable to me" case).
+    """
+    region = (
+        frozenset[str]()
+        if _REGION_WILDCARD & frozenset(settings.regions)
+        else frozenset({*settings.regions, "WW"})
+    )
     accepted: dict[str, frozenset[str]] = {
-        ContingencyDimension.REGION.value: frozenset({*settings.regions, "WW"}),
+        ContingencyDimension.REGION.value: region,
         ContingencyDimension.PLATFORM.value: frozenset(settings.platforms),
         ContingencyDimension.OS.value: frozenset(settings.os_targets),
         ContingencyDimension.LANGUAGE.value: frozenset(settings.languages),

@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     notion_database_id: str | None = Field(default=None, alias="NOTION_DATABASE_ID")
 
     # --- defaults ---
+    # CSV of accepted ISO-2 regions; the sentinel ANY (or *) means "region never gates me"
+    # (e.g. a VPN makes region-locks inapplicable) — see contingency.matcher_from_settings.
     regions_raw: str = Field(default="US,DE,GB", alias="RDT_REGIONS")
     db_path: Path = Field(default=Path("data/releases.db"), alias="RDT_DB_PATH")
     seeds_path: Path = Field(default=Path("local/seeds.json"), alias="RDT_SEEDS_PATH")

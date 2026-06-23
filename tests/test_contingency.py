@@ -4,12 +4,17 @@ from __future__ import annotations
 
 from datetime import date
 
+import pytest
+
+from release_tracker.config import Settings
 from release_tracker.contingency import (
+    ContingencyDimension,
     ProfileMatcher,
     Resolution,
     ResolutionStatus,
     combine,
     estimate_resolution,
+    matcher_from_settings,
 )
 from release_tracker.models import BestEstimate, Certainty, DatePrecision, ReleaseChannel
 
@@ -54,6 +59,26 @@ def test_estimate_resolution_three_valued() -> None:
     assert confirmed.status is ResolutionStatus.RESOLVED and confirmed.when == date(2026, 9, 1)
     spec = estimate_resolution(_est(date(2026, 9, 1), Certainty.ESTIMATED))
     assert spec.status is ResolutionStatus.PENDING  # speculative date doesn't gate availability
+
+
+def test_matcher_from_settings_region_gates_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RDT_REGIONS", "US,DE,GB")
+    m = matcher_from_settings(Settings())
+    assert m.matches({"region": "WW"}) is True  # worldwide always accepted
+    assert m.matches({"region": "US"}) is True
+    assert m.matches({"region": "RO"}) is False  # the FUZE case: region-locked, gated
+
+
+@pytest.mark.parametrize("sentinel", ["ANY", "*", "us,ANY", "any"])
+def test_matcher_from_settings_region_wildcard_sentinel(
+    monkeypatch: pytest.MonkeyPatch, sentinel: str
+) -> None:
+    # ANY/* drops region entirely -> a VPN'd user is gated by nothing region-wise
+    monkeypatch.setenv("RDT_REGIONS", sentinel)
+    m = matcher_from_settings(Settings())
+    assert ContingencyDimension.REGION.value not in m.accepted  # region not even a constrained dim
+    assert m.matches({"region": "RO"}) is True
+    assert m.matches({"region": "JP"}) is True
 
 
 def test_combine_never_dominates_then_pending_then_max() -> None:
