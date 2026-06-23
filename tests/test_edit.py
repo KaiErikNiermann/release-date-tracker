@@ -344,3 +344,34 @@ def test_edit_condition_blocked_by_and_unblock(edit_db: Path) -> None:
 def test_edit_condition_resolved_requires_a_date(edit_db: Path) -> None:
     assert runner.invoke(cli.app, ["edit", "condition", "X", "resolved"]).exit_code != 0
     assert runner.invoke(cli.app, ["edit", "condition", "X", "nonsense"]).exit_code != 0
+
+
+def test_relate_refuses_self_link_from_substring_collision(edit_db: Path) -> None:
+    # "Untitled" only matches the seeded "Untitled Project" -> src==dst; must refuse, not self-loop
+    db0 = Database(edit_db)
+    ent = next(db0.iter_entities())  # "Untitled Project"
+    db0.close()
+    res = runner.invoke(cli.app, ["relate", ent.id, "sequel", "Untitled"])
+    assert res.exit_code == 1 and "Self-link refused" in res.output
+    db = Database(edit_db)
+    edges = db.edges_from(ent.id, RelationKind.DERIVED_FROM)
+    db.close()
+    assert edges == []  # no self-referential lineage edge was written
+
+
+def test_relate_warns_on_ambiguous_source_but_still_links(edit_db: Path) -> None:
+    # two distinct works share a prefix; relating to the bare prefix is ambiguous (no exact title)
+    db0 = Database(edit_db)
+    ent = next(db0.iter_entities())  # the derivative
+    src = Entity.create("Source Saga: Origins", MediaKind.MOVIE)
+    other = Entity.create("Source Saga: Reckoning", MediaKind.MOVIE)
+    for e in (src, other):
+        db0.upsert_entity(e)
+        db0.upsert_node(Node(id=e.id, node_kind=NodeKind.WORK, name=e.title, owned=True))
+    db0.close()
+    res = runner.invoke(cli.app, ["relate", ent.id, "sequel", "Source Saga"])
+    assert res.exit_code == 0 and "matched 2 works" in res.output  # warned...
+    db = Database(edit_db)
+    edges = db.edges_from(ent.id, RelationKind.DERIVED_FROM)
+    db.close()
+    assert len(edges) == 1  # ...but still wrote the edge (warning, not a hard stop)

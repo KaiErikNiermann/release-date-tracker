@@ -847,6 +847,25 @@ def relate(
         db.close()
         console.print(f"[red]No work/node matches[/] '{missing}'.")
         raise typer.Exit(1)
+    # guard (a): a work can't derive from itself. This usually means `other` only matched
+    # `work` as a substring because the real source isn't tracked (e.g. "Baby Driver"
+    # collapsing onto "Baby Driver 2"). Refuse rather than silently write a self-loop edge.
+    if src.id == dst.id:
+        db.close()
+        console.print(
+            f"[red]Self-link refused[/]: '{other}' resolved to the same work as '{work}' "
+            f"([dim]{src.name}[/]). The source probably isn't tracked yet — add it first, "
+            f"or pass a more specific id."
+        )
+        raise typer.Exit(1)
+    # guard (b): warn when `other` was an ambiguous substring hit (>1 match, none exact), so a
+    # wrong lineage target isn't linked silently — the user can re-run with an explicit id.
+    other_matches = db.find_entities(other)
+    if len(other_matches) > 1 and not any(e.title.lower() == other.lower() for e in other_matches):
+        console.print(
+            f"[yellow]Note[/]: '{other}' matched {len(other_matches)} works; linked to "
+            f"[bold]{dst.name}[/]. Re-run with an id if that's not the intended source."
+        )
     db.upsert_edge(
         Edge(
             src_id=src.id,
