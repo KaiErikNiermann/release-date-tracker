@@ -965,6 +965,33 @@ def state(
 
 
 @app.command()
+def forget(
+    ref: Annotated[str, typer.Argument(help="entity id or title substring")],
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="skip the confirmation prompt")] = False,
+) -> None:
+    """Permanently delete a tracked work — its dates, credits, and graph edges all cascade.
+
+    Destructive and irreversible. To keep a title you've passed on (preserving the
+    preference), use ``rdt state <title> skipped`` instead.
+    """
+    configure_logging()
+    db = _db()
+    entity = _resolve_ref(db, ref)
+    if entity is None:
+        db.close()
+        raise typer.Exit(1)
+    if not yes and not typer.confirm(
+        f"Permanently forget '{entity.title}' ({entity.kind.value})? This cannot be undone."
+    ):
+        db.close()
+        console.print("[dim]Aborted — nothing deleted.[/]")
+        raise typer.Exit(1)
+    db.delete_entity(entity.id)
+    db.close()
+    console.print(f"[green]Forgot[/] {entity.title} [dim]({entity.id})[/]")
+
+
+@app.command()
 def note(
     ref: Annotated[str, typer.Argument(help="entity id or title substring")],
     text: Annotated[
