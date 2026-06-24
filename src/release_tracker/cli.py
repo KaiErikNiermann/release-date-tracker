@@ -233,22 +233,35 @@ def rd(
         if tracked:
             console.print(f"[green]Tracked[/] {report.matched_title} [dim](state: want)[/].")
         else:
-            console.print("[yellow]Not tracked[/] — no resolvable canonical match to capture.")
+            console.print(
+                "[yellow]Not tracked[/] — couldn't tell what this is "
+                "(unknown kind, or a resolvable title that pinned no canonical id)."
+            )
 
 
 async def _track_from_report(
     settings: Settings, name: str, report: RdReport, *, season: int | None = None
 ) -> bool:
-    """Capture a looked-up title into the tracker using the already-resolved ids.
+    """Capture a looked-up title into the tracker — always, whenever we know its kind.
 
-    Captures any title that resolved to a canonical id — *including date-less (TBA) ones*.
-    A confident match with no date yet is still worth tracking (the skill then proposes a
-    speculative window so nothing sits date-less); only a true miss / tech is skipped.
+    This is a *tracker*, tech included, so ``/rd-add`` never refuses a capture:
+    - **Resolvable kinds** (movie/tv/game) that pinned a canonical id capture *with* it, then
+      pull dates + enrich who/where/what — *including date-less (TBA) ones* (the skill then
+      proposes a speculative window so nothing sits date-less).
+    - **Unresolvable kinds** (tech, other) have no Tier-0 source, so they capture as a bare
+      entity with no ids and no auto-pull — exactly like the manual ``rdt add`` path that
+      seeded e.g. Steam Frames. The skill follows up with a release window.
+
+    The only true skip is a total miss with no kind at all; and a *resolvable* kind we
+    couldn't pin is skipped too (a bare unpinned movie would be a bogus, un-enrichable stub
+    — better surfaced as "not tracked" so the title can be corrected).
 
     With ``season``, the entry is canonical-titled ``"Show: Season N"`` and carries the
     structured coord so enrichment auto-wires the series link + subtitle (full-auto path).
     """
-    if not (report.kind and matching.is_resolvable(report.kind) and report.canonical):
+    if report.kind is None:
+        return False
+    if matching.is_resolvable(report.kind) and not report.canonical:
         return False
     # the show's matched name drives a clean "Show: Season N" title for a season capture
     title = season_label(report.matched_title or name, season) if season is not None else name
@@ -264,9 +277,10 @@ async def _track_from_report(
     db.upsert_node(
         Node(id=entity.id, node_kind=NodeKind.WORK, name=title, owned=True, external_ids={})
     )
-    async with make_client() as client:
-        await pull_entity(db, settings, entity, client=client)  # dates via the pinned ids
-        await enrich_work(client, db, settings, entity)  # who/where/what
+    if report.canonical:  # only a pinned, resolvable entity has ids to pull dates / enrich from
+        async with make_client() as client:
+            await pull_entity(db, settings, entity, client=client)  # dates via the pinned ids
+            await enrich_work(client, db, settings, entity)  # who/where/what
     db.close()
     return True
 

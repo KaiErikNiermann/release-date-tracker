@@ -15,8 +15,10 @@ from typer.testing import CliRunner
 
 from release_tracker import cli
 from release_tracker.db import Database
+from release_tracker.lookup import RdReport
 from release_tracker.models import (
     Certainty,
+    ConsumptionState,
     CreditRole,
     DatePrecision,
     DescriptorKind,
@@ -387,3 +389,51 @@ def test_add_season_canonical_titles_and_sets_coords(edit_db: Path) -> None:
     assert ent.kind is MediaKind.TV  # --season implies tv
     assert ent.season == 2 and ent.part is None  # structured coords, not just a parsed title
     assert ent.id.startswith("tv-pluribus-season-2-")
+
+
+def _stub_lookup(report: RdReport, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make `rdt rd --track` resolve to a fixed report (no network), exercising the real CLI."""
+
+    async def _fake(*_a: object, **_k: object) -> RdReport:
+        return report
+
+    monkeypatch.setattr(cli, "lookup", _fake)
+
+
+def test_rdadd_captures_tech_without_a_canonical_id(
+    edit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # /rd-add is a media AND tech tracker: an unresolvable kind (tech, no Tier-0 id) must still
+    # capture as a bare WANT entity (no auto-pull) — the path that seeds gadgets like Steam Frame.
+    _stub_lookup(
+        RdReport(
+            query="AYANEO Pocket PLAY",
+            found=False,
+            kind=MediaKind.TECH,
+            matched_title="AYANEO Pocket PLAY",
+            canonical={},  # tech pins nothing
+        ),
+        monkeypatch,
+    )
+    res = runner.invoke(
+        cli.app, ["rd", "AYANEO Pocket PLAY", "--kind", "tech", "--region", "DE", "--track"]
+    )
+    assert res.exit_code == 0 and "Tracked" in res.output
+    db = Database(edit_db)
+    ent = next(e for e in db.iter_entities() if e.title == "AYANEO Pocket PLAY")
+    db.close()
+    assert ent.kind is MediaKind.TECH
+    assert ent.consumption_state is ConsumptionState.WANT
+    assert ent.external_ids == {}  # no canonical id, and that's fine
+
+
+def test_rdadd_skips_unknown_kind(edit_db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # the one non-capture: the engine can't even tell what the title is (no kind) -> not tracked
+    _stub_lookup(RdReport(query="???", found=False, kind=None), monkeypatch)
+    before = {e.title for e in Database(edit_db).iter_entities()}
+    res = runner.invoke(cli.app, ["rd", "???", "--track"])
+    assert res.exit_code == 2  # a true no-match short-circuits ("No confident match")
+    db = Database(edit_db)
+    titles = {e.title for e in db.iter_entities()}
+    db.close()
+    assert titles == before  # the kind-less miss wrote nothing
