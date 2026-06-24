@@ -937,9 +937,15 @@ def related(ref: Annotated[str, typer.Argument(help="a work (id or title)")]) ->
 @app.command()
 def state(
     ref: Annotated[str, typer.Argument(help="entity id or title substring")],
-    value: Annotated[str, typer.Argument(help="unset | want | watching | watched | dropped")],
+    value: Annotated[
+        str, typer.Argument(help="unset | want | watching | watched | dropped | skipped")
+    ],
 ) -> None:
-    """Set a title's watch/play state (want/watching/watched/dropped)."""
+    """Set a title's watch/play state (want/watching/watched/dropped/skipped).
+
+    ``skipped`` = a conscious pass (not for me): kept for the preference record but out of
+    the upcoming/available queues. To erase a title entirely instead, use ``rdt forget``.
+    """
     configure_logging()
     db = _db()
     entity = _resolve_ref(db, ref)
@@ -1758,6 +1764,17 @@ def _render_upcoming(rows: list[views.TrackRow], days: int | None) -> None:
         console.print("[dim]No upcoming releases. `rdt add` then `rdt enrich`.[/]")
 
 
+def _watched_state_label(state: ConsumptionState) -> str:
+    """Color-code the finished states in the watched view."""
+    match state:
+        case ConsumptionState.DROPPED:
+            return "[red]dropped[/]"
+        case ConsumptionState.SKIPPED:
+            return "[yellow]skipped[/]"
+        case _:
+            return state.value
+
+
 def _render_watched(rows: list[views.TrackRow]) -> None:
     table = Table(title="Watched · done", show_lines=False)
     table.add_column("Released", min_width=10, no_wrap=True)
@@ -1766,7 +1783,7 @@ def _render_watched(rows: list[views.TrackRow]) -> None:
     table.add_column("State", min_width=8, no_wrap=True)
     _wcw(table)
     for r in rows:
-        state = "[red]dropped[/]" if r.state is ConsumptionState.DROPPED else r.state.value
+        state = _watched_state_label(r.state)
         table.add_row(
             r.pivot_when.isoformat() if r.pivot_when else "[dim]—[/]",
             _title_cell(r),

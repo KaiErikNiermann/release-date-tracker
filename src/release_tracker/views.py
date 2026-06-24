@@ -417,9 +417,11 @@ def _series_names(db: Database, entity_id: str) -> tuple[str, ...]:
 
 # --- public builders ------------------------------------------------------
 # the three consumption buckets are exhaustive + disjoint, so nothing falls into limbo:
-#   finished (watched/dropped) -> `watched`;  out + active -> `available`;
+#   finished (watched/dropped/skipped) -> `watched`;  out + active -> `available`;
 #   everything else not-finished -> `upcoming` (dated, or an explicit "no date yet").
-_FINISHED = (ConsumptionState.WATCHED, ConsumptionState.DROPPED)
+# skipped is "done with it" even for an unreleased title: a conscious pass keeps it out of
+# the upcoming queue while preserving the preference (vs. `forget`, which deletes it).
+_FINISHED = (ConsumptionState.WATCHED, ConsumptionState.DROPPED, ConsumptionState.SKIPPED)
 _ACTIVE = (ConsumptionState.WANT, ConsumptionState.WATCHING)
 
 
@@ -497,7 +499,7 @@ def watched(
     *,
     kind: MediaKind | None = None,
 ) -> list[TrackRow]:
-    """Works you're done with (watched/dropped), most recently released first."""
+    """Works you're done with (watched/dropped/skipped), most recently released first."""
     rows = [r for r in _track_rows(db, today, settings, kind=kind) if r.state in _FINISHED]
     rows.sort(key=lambda r: r.pivot_when or date.min, reverse=True)
     return rows

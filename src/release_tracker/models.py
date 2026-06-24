@@ -112,7 +112,8 @@ class ConsumptionState(enum.StrEnum):
     WANT = "want"  # to watch / want to watch/play
     WATCHING = "watching"  # currently watching/playing
     WATCHED = "watched"  # watched / played (done)
-    DROPPED = "dropped"  # abandoned
+    DROPPED = "dropped"  # started, then abandoned
+    SKIPPED = "skipped"  # consciously passed on (not for me) — preserved, not deleted
 
 
 class SocialPlatform(enum.StrEnum):
