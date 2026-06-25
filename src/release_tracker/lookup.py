@@ -42,10 +42,11 @@ from release_tracker.models import (
     ReleaseObservation,
 )
 from release_tracker.platforms import learn_predicted_platform
-from release_tracker.sources import sources_for
+from release_tracker.sources import justwatch, sources_for
 from release_tracker.sources.base import Candidate, SourceResult, make_client
 from release_tracker.sources.ddg import WebInfo, instant_answer
 from release_tracker.sources.igdb import IgdbSource
+from release_tracker.sources.justwatch import JustWatchAvailability
 from release_tracker.sources.tmdb import TmdbSource
 from release_tracker.sources.wiki import WikiHints, wiki_hints
 from release_tracker.tech import classify_tech, looks_like_tech, tech_info
@@ -125,6 +126,11 @@ class RdReport:
     # Wikipedia pointer (always, when a page exists) + raw infobox facets (only when sources
     # were sparse) — the skill mines `sections` to pre-fill contingencies, cutting manual churn.
     wiki_hints: WikiHints | None = None
+    # JustWatch offer scan (film/TV): per-region buy/rent/stream offers with price + since-date,
+    # plus the derived earliest-VOD date and its storefront/country (the VPN target). Attached
+    # only when an offer surfaces somewhere — the structured "where + how much + how early" answer
+    # that lets the skill skip a manual "where to watch" web search.
+    availability: JustWatchAvailability | None = None
 
     def to_dict(self) -> dict[str, object]:
         out: dict[str, object] = {
@@ -147,6 +153,8 @@ class RdReport:
             out["web_info"] = self.web_info.to_dict()
         if self.wiki_hints is not None:
             out["wiki_hints"] = self.wiki_hints.to_dict()
+        if self.availability is not None:
+            out["availability"] = self.availability.to_dict()
         return out
 
 
@@ -223,6 +231,19 @@ async def lookup(
                 )
                 streaming = ()
 
+        # JustWatch (film/TV): real per-region store offers — the earliest VOD date beats a
+        # PVOD estimate, and the live flatrate homes replace the streaming prediction.
+        avail: JustWatchAvailability | None = None
+        if kind in (MediaKind.MOVIE, MediaKind.TV) and settings.justwatch_enabled:
+            avail = await justwatch.availability(
+                client, cand.title, kind, countries=settings.justwatch_regions, year=cand.year
+            )
+            if avail is not None:
+                claims, streaming, predicted, extra = _merge_justwatch(
+                    list(claims), streaming, predicted, avail
+                )
+                notes = (*notes, *extra)
+
         return RdReport(
             query=query,
             found=bool(claims),
@@ -239,6 +260,7 @@ async def lookup(
             web_info=None if claims else await instant_answer(client, query),
             # always pin the Wikipedia page; mine its facets only when sources were sparse
             wiki_hints=await wiki_hints(client, query, want_facets=not claims),
+            availability=avail,
         )
 
 
@@ -313,6 +335,53 @@ def _tech_report(query: str, settings: Settings, region: str | None) -> RdReport
         preferred_sources=info.preferred_sources,
         notes=notes,
     )
+
+
+# --- JustWatch merge (real store offers beat estimates / predictions) ----
+def _merge_justwatch(
+    claims: list[Claim],
+    streaming: tuple[str, ...],
+    predicted: str | None,
+    avail: JustWatchAvailability,
+) -> tuple[list[Claim], tuple[str, ...], str | None, tuple[str, ...]]:
+    """Fold JustWatch ground truth into the claims/streaming: earliest real VOD date as the
+    headline digital claim, and live flatrate homes in place of the streaming prediction."""
+    notes: list[str] = []
+    jw = avail.earliest_vod
+    if jw is not None:
+        tmdb_digital = next(
+            (c for c in claims if c.label == "Digital" and c.when is not None), None
+        )
+        where = f"{avail.earliest_vod_platform} ({avail.earliest_vod_country})"
+        if tmdb_digital is not None and tmdb_digital.when is not None and tmdb_digital.when <= jw:
+            # TMDB already has an equal/earlier confirmed digital — keep it, just drop any guess.
+            claims = [c for c in claims if not _is_speculative_digital(c)]
+            notes.append(f"JustWatch corroborates digital availability (earliest store: {where}).")
+        else:
+            # JustWatch is the earliest confirmed VOD — it supersedes any TMDB/estimate digital.
+            claims = [c for c in claims if not c.label.startswith("Digital")]
+            claims.append(
+                Claim(
+                    f"Digital (earliest · {avail.earliest_vod_country})",
+                    jw,
+                    DatePrecision.EXACT,
+                    "confirmed",
+                    0.95,
+                    None,
+                    f"JustWatch · {where}",
+                    avail.earliest_vod_country,
+                )
+            )
+    # Live flatrate homes are ground truth, so a distributor-based prediction is moot — but
+    # keep the (region-scoped) `streaming` headline as-is; the full cross-region subscription
+    # picture lives in the availability block, region-tagged, rather than flooding one line.
+    if avail.streaming_platforms:
+        predicted = None
+    return claims, streaming, predicted, tuple(notes)
+
+
+def _is_speculative_digital(c: Claim) -> bool:
+    return c.label.startswith("Digital") and c.stance == "speculative"
 
 
 # --- per-kind claim builders ---------------------------------------------

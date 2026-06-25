@@ -52,6 +52,16 @@ class Settings(BaseSettings):
     # self-growing distributor -> streaming-home map, learned as we meet new studios
     platform_db_path: Path = Field(default=Path("data/platforms.db"), alias="RDT_PLATFORM_DB_PATH")
 
+    # --- JustWatch offer scan (the "earliest digital + where" source for film/TV) ---
+    # On by default (keyless). The basket is the set of early-digital-window markets the offer
+    # query fans across to find the global-earliest VOD date + its storefront (a VPN target).
+    # Deliberately NOT tied to `regions` (which gates "available to me"): here we want the
+    # earliest date *anywhere*, region-blind, then report where it is.
+    justwatch_enabled: bool = Field(default=True, alias="RDT_JUSTWATCH")
+    justwatch_regions_raw: str = Field(
+        default="US,CA,GB,IE,AU,DE,FR,IT,ES,NL,JP,BR", alias="RDT_JUSTWATCH_REGIONS"
+    )
+
     # --- consumption / availability ---
     # which release channel decides "available to me": digital (can't do theatrical),
     # theatrical, or any (soonest). Drives the upcoming/available split.
@@ -86,6 +96,10 @@ class Settings(BaseSettings):
     @property
     def regions(self) -> tuple[str, ...]:
         return tuple(r.strip().upper() for r in self.regions_raw.split(",") if r.strip())
+
+    @property
+    def justwatch_regions(self) -> tuple[str, ...]:
+        return tuple(r.strip().upper() for r in self.justwatch_regions_raw.split(",") if r.strip())
 
     @property
     def platforms(self) -> tuple[str, ...]:

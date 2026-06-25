@@ -69,6 +69,7 @@ from release_tracker.resolve import best_estimates
 from release_tracker.seed import LocalSeed, NotionSeed, SeedProvider
 from release_tracker.sources.base import Candidate, make_client
 from release_tracker.sources.ddg import WebInfo, instant_answer
+from release_tracker.sources.justwatch import JustWatchAvailability
 from release_tracker.titles import season_label
 
 app = typer.Typer(add_completion=False, help="Free-first release date tracker.")
@@ -323,11 +324,54 @@ def _render_report(r: RdReport) -> None:
         )
     if r.price:
         console.print(f"[bold]Price:[/] {r.price}")
+    _render_availability(r.availability)
     for note in r.notes:
         console.print(f"[dim]• {note}[/]")
     if r.url:
         console.print(f"[dim]{r.url}[/]")
     _render_web_info(r.web_info)
+
+
+def _render_availability(avail: JustWatchAvailability | None) -> None:
+    """Render the JustWatch offer scan: earliest-VOD headline + a per-region buy/rent table."""
+    if avail is None:
+        return
+    if avail.earliest_vod is not None:
+        console.print(
+            f"[bold]Earliest digital:[/] {avail.earliest_vod.isoformat()} "
+            f"[cyan]· {avail.earliest_vod_platform} ({avail.earliest_vod_country})[/] "
+            f"[dim]← VPN here for the soonest VOD[/]"
+        )
+    # the actionable own/rent offers, soonest first (subscription homes get their own line).
+    vod = sorted(
+        (o for o in avail.offers if o.monetization in ("buy", "rent")),
+        key=lambda o: (o.available_from or date.max, o.country, o.platform),
+    )
+    if vod:
+        table = Table(show_header=True, header_style="bold", title="Buy / rent")
+        for col in ("Region", "Type", "Platform", "Price", "Since"):
+            table.add_column(col)
+        for o in vod[:14]:
+            price = f"{o.price:.2f} {o.currency}" if o.price is not None and o.currency else "—"
+            table.add_row(
+                o.country,
+                o.monetization,
+                o.platform + (f" [dim]{o.presentation}[/]" if o.presentation else ""),
+                price,
+                o.available_from.isoformat() if o.available_from else "—",
+            )
+        console.print(table)
+        if len(vod) > 14:
+            console.print(f"[dim]  … +{len(vod) - 14} more buy/rent offers[/]")
+    # flatrate (subscription) homes, each tagged with the regions it's live in — VPN targets.
+    by_platform: dict[str, list[str]] = {}
+    for o in avail.offers:
+        if o.monetization == "flatrate":
+            by_platform.setdefault(o.platform, []).append(o.country)
+    if by_platform:
+        console.print("[bold]Streaming (flatrate):[/]")
+        for platform, regions in sorted(by_platform.items()):
+            console.print(f"  [dim]·[/] {platform} [dim]({', '.join(sorted(set(regions)))})[/]")
 
 
 def _render_web_info(web: WebInfo | None) -> None:
