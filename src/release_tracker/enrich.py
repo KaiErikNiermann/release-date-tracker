@@ -12,7 +12,7 @@ canonical id is missing.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 
 import httpx
@@ -21,7 +21,11 @@ from pydantic import BaseModel, Field
 
 from release_tracker.config import Settings
 from release_tracker.db import Database
-from release_tracker.deltas import estimate_digital, match_studio
+from release_tracker.deltas import (
+    estimate_digital,
+    estimate_theatrical_from_premiere,
+    match_studio,
+)
 from release_tracker.logging import get_logger
 from release_tracker.models import (
     Certainty,
@@ -38,16 +42,11 @@ from release_tracker.models import (
     SourceTier,
 )
 from release_tracker.platforms import learn_predicted_platform
+from release_tracker.resolve import commercial_anchor, earliest_premiere
 from release_tracker.sources.base import Credit, MediaGraph, pinned_id
 from release_tracker.sources.igdb import IgdbSource
 from release_tracker.sources.tmdb import TmdbSource
 from release_tracker.titles import extract_part, split_season
-
-_THEATRICAL_CHANNELS = (
-    ReleaseChannel.THEATRICAL,
-    ReleaseChannel.THEATRICAL_LIMITED,
-    ReleaseChannel.PREMIERE,
-)
 
 log = get_logger("enrich")
 
@@ -146,24 +145,32 @@ async def enrich_work(
 def _persist_speculative_digital(
     db: Database, entity: Entity, graph: MediaGraph, now: datetime
 ) -> None:
-    """Movie with a confirmed theatrical but no confirmed digital: store the
-    theatrical + studio-window estimate as a PREDICTED digital observation, so the
-    speculative digital date is a first-class, freshness-tracked fact (not live-only).
+    """Movie with no confirmed digital: store a PREDICTED digital observation so the
+    speculative date is a first-class, freshness-tracked fact (not live-only).
+
+    The anchor is the wide/limited *commercial* theatrical (theatrical + studio window). A
+    festival PREMIERE never anchors directly — it precedes the commercial run — so if only a
+    premiere is known we chain through an estimated wide date, at compounded low confidence.
     """
     obs = list(db.iter_observations(entity.id))
     if any(o.channel is ReleaseChannel.DIGITAL and o.certainty is Certainty.CONFIRMED for o in obs):
         return
-    theatricals = [
-        o.release_date
-        for o in obs
-        if o.channel in _THEATRICAL_CHANNELS
-        and o.release_date
-        and o.certainty is Certainty.CONFIRMED
-    ]
-    if not theatricals:
-        return
+
     studio = match_studio([c.name for c in graph.credits if c.node_kind is NodeKind.ORG])
-    est = estimate_digital(min(theatricals), studio)
+    # the home-video clock starts at the wide/limited commercial release — never a festival
+    # PREMIERE. If only a premiere is known, chain through an estimated wide date (low confidence).
+    if anchor := commercial_anchor(obs, confirmed_only=True):
+        assert anchor.release_date is not None
+        est = estimate_digital(anchor.release_date, studio)
+        source_name = "theatrical + studio window"
+    elif premiere := earliest_premiere(obs, confirmed_only=True):
+        assert premiere.release_date is not None
+        est_wide = estimate_theatrical_from_premiere(premiere.release_date)
+        est = estimate_digital(est_wide.when, studio, theatrical_confirmed=False)
+        est = replace(est, basis=f"premiere-chained: {est.basis}")
+        source_name = "premiere -> est. wide -> digital"
+    else:
+        return
     db.upsert_observations(
         [
             ReleaseObservation(
@@ -175,7 +182,7 @@ def _persist_speculative_digital(
                 certainty=Certainty.PREDICTED,
                 source_tier=SourceTier.MODEL,
                 provider="model",
-                source_name="theatrical + studio window",
+                source_name=source_name,
                 source_quote=est.basis,
                 confidence=est.confidence,
                 fetched_at=now,

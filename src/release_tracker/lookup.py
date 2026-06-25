@@ -29,6 +29,7 @@ from release_tracker.config import Settings
 from release_tracker.deltas import (
     Estimate,
     estimate_digital,
+    estimate_theatrical_from_premiere,
     match_studio,
     precise_from_coarse,
 )
@@ -43,6 +44,7 @@ from release_tracker.models import (
     ReleaseObservation,
 )
 from release_tracker.platforms import learn_predicted_platform
+from release_tracker.resolve import commercial_anchor, earliest_premiere
 from release_tracker.sources import justwatch, sources_for
 from release_tracker.sources.base import Candidate, SourceResult, make_client
 from release_tracker.sources.ddg import WebInfo, instant_answer
@@ -59,11 +61,6 @@ log = get_logger("lookup")
 
 # Kinds we can auto-detect (each has at least one Tier-0 source).
 _DETECT_KINDS: tuple[MediaKind, ...] = (MediaKind.MOVIE, MediaKind.TV, MediaKind.GAME)
-_THEATRICAL = (
-    ReleaseChannel.THEATRICAL,
-    ReleaseChannel.THEATRICAL_LIMITED,
-    ReleaseChannel.PREMIERE,
-)
 # below this title-similarity we don't trust the match — caller should web-search.
 _MATCH_FLOOR = 0.4
 # a clear tech name wins over a media match weaker than this (e.g. "RTX 5090"
@@ -465,10 +462,13 @@ async def _movie_claims(
 ) -> tuple[list[Claim], list[str], tuple[str, ...], str | None]:
     notes: list[str] = []
     claims: list[Claim] = []
-    theatricals = [o for o in obs if o.channel in _THEATRICAL and o.release_date]
-    digitals = [o for o in obs if o.channel is ReleaseChannel.DIGITAL and o.release_date]
-    theatrical = min(theatricals, key=_obs_date) if theatricals else None
-    digital = min(digitals, key=_obs_date) if digitals else None
+    premiere = earliest_premiere(obs)  # festival/event premiere — informational, never an anchor
+    theatrical = commercial_anchor(obs)  # wide/limited commercial release (US-preferred)
+    digital = min(
+        (o for o in obs if o.channel is ReleaseChannel.DIGITAL and o.release_date),
+        key=_obs_date,
+        default=None,
+    )
 
     key = settings.tmdb_api_key
     src = TmdbSource()
@@ -476,6 +476,27 @@ async def _movie_claims(
     # estimate and the streaming-home prediction, plus the no-theatrical fallback.
     meta = await src.movie_meta(client, key, tmdb_id) if (tmdb_id and key) else None
     studio = match_studio(meta.studios) if meta else None
+
+    # the wide date estimated *from* a premiere — only when no commercial date exists yet.
+    est_wide = (
+        estimate_theatrical_from_premiere(premiere.release_date)
+        if premiere and premiere.release_date and theatrical is None
+        else None
+    )
+
+    if premiere and premiere.release_date:  # shown distinctly so the event date isn't lost
+        claims.append(
+            Claim(
+                "Premiere",
+                premiere.release_date,
+                premiere.precision,
+                "confirmed",
+                0.9,
+                None,
+                f"TMDB festival/premiere ({premiere.region})",
+                premiere.region,
+            )
+        )
 
     if theatrical and theatrical.release_date:
         claims.append(
@@ -488,6 +509,18 @@ async def _movie_claims(
                 None,
                 f"TMDB ({theatrical.region})",
                 theatrical.region,
+            )
+        )
+    elif est_wide is not None:  # only a premiere so far → estimate the wide release from it
+        claims.append(
+            Claim(
+                "Theatrical (est.)",
+                est_wide.when,
+                DatePrecision.EXACT,
+                "speculative",
+                est_wide.confidence,
+                est_wide.margin_days,
+                est_wide.basis,
             )
         )
 
@@ -515,6 +548,21 @@ async def _movie_claims(
                 est.confidence,
                 est.margin_days,
                 est.basis,
+            )
+        )
+    elif est_wide is not None:
+        # CHAIN: premiere → estimated wide theatrical → digital (uncertainty compounds, so the
+        # digital leg is built on a guessed theatrical and lands at low confidence).
+        est = estimate_digital(est_wide.when, studio, theatrical_confirmed=False)
+        claims.append(
+            Claim(
+                "Digital (est.)",
+                est.when,
+                DatePrecision.EXACT,
+                "speculative",
+                est.confidence,
+                est.margin_days,
+                f"premiere-chained: {est.basis}",
             )
         )
     elif meta and meta.primary_date:

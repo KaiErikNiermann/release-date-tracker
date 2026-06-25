@@ -6,8 +6,10 @@ from datetime import date
 
 from release_tracker.deltas import (
     DEFAULT_DIGITAL_DELTA_DAYS,
+    FESTIVAL_TO_WIDE_DAYS,
     digital_delta_days,
     estimate_digital,
+    estimate_theatrical_from_premiere,
     match_studio,
     precise_from_coarse,
     predicted_platform,
@@ -72,6 +74,23 @@ def test_predicted_platform_scans_all_companies() -> None:
     assert predicted_platform(["6th & Idaho", "DC Studios"]) == "HBO Max"
     assert predicted_platform(["Indie A", "Indie B"]) is None
     assert predicted_platform([]) is None
+
+
+def test_estimate_theatrical_from_premiere_is_low_confidence_window() -> None:
+    # a Cannes premiere -> the wide release is premiere + the festival-to-wide window, low conf.
+    est = estimate_theatrical_from_premiere(date(2026, 5, 17))
+    assert (est.when - date(2026, 5, 17)).days == FESTIVAL_TO_WIDE_DAYS
+    assert est.confidence <= 0.35 and est.margin_days >= 60  # genuinely uncertain leg
+
+
+def test_premiere_chained_digital_is_weaker_than_a_direct_estimate() -> None:
+    # chaining premiere -> est. wide -> digital compounds uncertainty: the chained digital must be
+    # less confident (and wider) than estimating off a *confirmed* theatrical for the same studio.
+    wide = estimate_theatrical_from_premiere(date(2026, 5, 17)).when
+    chained = estimate_digital(wide, "Neon", theatrical_confirmed=False)
+    direct = estimate_digital(wide, "Neon", theatrical_confirmed=True)
+    assert chained.confidence < direct.confidence
+    assert chained.margin_days > direct.margin_days
 
 
 def test_precise_from_coarse_collapses_to_midpoint() -> None:

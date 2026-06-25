@@ -80,6 +80,15 @@ class ReleaseChannel(enum.StrEnum):
     PRIMARY = "primary"
 
 
+# The commercial-release tiers whose date starts the home-video (PVOD/digital) clock. A festival
+# PREMIERE is deliberately excluded: it precedes the commercial run (often by months), so it must
+# never anchor a theatrical->digital estimate — it only *chains* into one. Wide before limited.
+COMMERCIAL_THEATRICAL: tuple[ReleaseChannel, ...] = (
+    ReleaseChannel.THEATRICAL,
+    ReleaseChannel.THEATRICAL_LIMITED,
+)
+
+
 class DatePrecision(enum.StrEnum):
     """How concrete a date is. Maps from IGDB date category & Notion RD Certainty."""
 

@@ -11,7 +11,7 @@ from release_tracker.models import (
     ReleaseObservation,
     SourceTier,
 )
-from release_tracker.resolve import best_estimates
+from release_tracker.resolve import best_estimates, commercial_anchor, earliest_premiere
 
 
 def _obs(
@@ -140,3 +140,67 @@ def test_facet_tagged_rows_stay_distinct_estimates() -> None:
     )
     by_platform = {e.contingencies.get("platform"): e.release_date for e in ests}
     assert by_platform == {"ps5": date(2026, 3, 1), "pc": date(2026, 9, 1)}
+
+
+def _theatrical_obs(
+    when: date,
+    channel: ReleaseChannel,
+    *,
+    region: str = "WW",
+    certainty: Certainty = Certainty.CONFIRMED,
+) -> ReleaseObservation:
+    return ReleaseObservation(
+        entity_id="movie-x",
+        channel=channel,
+        region=region,
+        release_date=when,
+        precision=DatePrecision.EXACT,
+        certainty=certainty,
+        source_tier=SourceTier.AGGREGATOR,
+        provider="tmdb",
+        fetched_at=datetime(2026, 6, 1, tzinfo=UTC),
+    )
+
+
+def test_commercial_anchor_excludes_premiere() -> None:
+    # a festival premiere must NOT anchor the home-video clock — only a commercial release does.
+    only_premiere = [_theatrical_obs(date(2026, 5, 17), ReleaseChannel.PREMIERE, region="FR")]
+    assert commercial_anchor(only_premiere) is None
+
+
+def test_commercial_anchor_prefers_wide_then_limited() -> None:
+    obs = [
+        _theatrical_obs(date(2026, 9, 9), ReleaseChannel.THEATRICAL),
+        _theatrical_obs(date(2026, 8, 1), ReleaseChannel.THEATRICAL_LIMITED),  # earlier, limited
+    ]
+    anchor = commercial_anchor(obs)
+    # wide beats an earlier limited release
+    assert anchor is not None and anchor.channel is ReleaseChannel.THEATRICAL
+
+
+def test_commercial_anchor_prefers_domestic_region() -> None:
+    # the digital-window table is US-calibrated: anchor on the US wide release, not an earlier
+    # foreign one, so a staggered rollout doesn't land the digital estimate far too early.
+    obs = [
+        _theatrical_obs(date(2026, 7, 15), ReleaseChannel.THEATRICAL, region="KR"),  # earlier intl
+        _theatrical_obs(date(2026, 9, 9), ReleaseChannel.THEATRICAL, region="US"),
+    ]
+    anchor = commercial_anchor(obs)
+    assert anchor is not None and anchor.region == "US" and anchor.release_date == date(2026, 9, 9)
+
+
+def test_commercial_anchor_confirmed_only_filters() -> None:
+    rumored = Certainty.RUMORED
+    obs = [_theatrical_obs(date(2026, 9, 9), ReleaseChannel.THEATRICAL, certainty=rumored)]
+    assert commercial_anchor(obs, confirmed_only=True) is None  # rumored excluded on persist path
+    assert commercial_anchor(obs) is not None  # default accepts any certainty (the live /rd path)
+
+
+def test_earliest_premiere_picks_soonest() -> None:
+    obs = [
+        _theatrical_obs(date(2026, 8, 30), ReleaseChannel.PREMIERE, region="IT"),  # Venice
+        _theatrical_obs(date(2026, 5, 17), ReleaseChannel.PREMIERE, region="FR"),  # Cannes, earlier
+        _theatrical_obs(date(2026, 9, 9), ReleaseChannel.THEATRICAL, region="US"),  # not a premiere
+    ]
+    prem = earliest_premiere(obs)
+    assert prem is not None and prem.region == "FR" and prem.release_date == date(2026, 5, 17)

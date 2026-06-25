@@ -12,12 +12,17 @@ from collections.abc import Iterable, Sequence
 from datetime import date
 
 from release_tracker.models import (
+    COMMERCIAL_THEATRICAL,
     BestEstimate,
     Certainty,
     DatePrecision,
+    ReleaseChannel,
     ReleaseObservation,
     SourceTier,
 )
+
+# region the theatrical->digital window table is calibrated on (US/domestic PVOD deals).
+_DOMESTIC_REGION = "US"
 
 # how much each stance is trusted, before source-tier / corroboration adjustments
 _CERTAINTY_WEIGHT: dict[Certainty, float] = {
@@ -39,6 +44,46 @@ PRECISION_RANK: dict[DatePrecision, int] = {
 
 # stances that represent an officially committed date (vs a best-guess window)
 _CONFIRMED: frozenset[Certainty] = frozenset({Certainty.CONFIRMED, Certainty.DELAYED})
+
+
+def _anchor_date(o: ReleaseObservation) -> date:
+    # only called on observations already filtered to release_date is not None
+    assert o.release_date is not None
+    return o.release_date
+
+
+def commercial_anchor(
+    obs: Iterable[ReleaseObservation], *, confirmed_only: bool = False
+) -> ReleaseObservation | None:
+    """The release that starts the home-video (PVOD/digital) clock: wide theatrical, falling
+    back to limited. A festival PREMIERE never qualifies — it precedes the commercial run.
+
+    Within a tier, prefer a US/domestic release (the digital-window table is US-calibrated) so a
+    staggered international rollout doesn't anchor digital on the earliest foreign date; else the
+    earliest region. ``confirmed_only`` restricts to officially committed dates (the persist path).
+    """
+    pool = [o for o in obs if o.release_date and (not confirmed_only or o.certainty in _CONFIRMED)]
+    for chan in COMMERCIAL_THEATRICAL:  # wide before limited
+        tier = [o for o in pool if o.channel is chan]
+        if tier:
+            domestic = [o for o in tier if o.region == _DOMESTIC_REGION]
+            return min(domestic or tier, key=_anchor_date)
+    return None
+
+
+def earliest_premiere(
+    obs: Iterable[ReleaseObservation], *, confirmed_only: bool = False
+) -> ReleaseObservation | None:
+    """The earliest festival/event premiere — informational, and the chain root when no
+    commercial date exists yet (premiere -> estimated wide -> digital)."""
+    cands = [
+        o
+        for o in obs
+        if o.channel is ReleaseChannel.PREMIERE
+        and o.release_date
+        and (not confirmed_only or o.certainty in _CONFIRMED)
+    ]
+    return min(cands, key=_anchor_date) if cands else None
 
 
 def score_observation(obs: ReleaseObservation, *, corroboration: int = 1) -> float:

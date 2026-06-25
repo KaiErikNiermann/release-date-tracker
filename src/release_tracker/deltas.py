@@ -63,6 +63,13 @@ STUDIO_DIGITAL_DELTA_DAYS: Final[dict[str, int]] = {
 # When we know nothing about the distributor: an industry-ish median window.
 DEFAULT_DIGITAL_DELTA_DAYS: Final[int] = 75
 
+# A festival/event premiere (Cannes, Venice, TIFF, Sundance, Berlin…) is NOT the start of the
+# home-video clock — it precedes the wide commercial release, often by months. This is the rough
+# premiere -> wide-release window, used only to *chain* a digital estimate when a film has so far
+# only premiered. Hugely variable (some go wide in weeks, some 6mo+, some never), so the leg is
+# low-confidence with a wide margin and the chained digital compounds that uncertainty.
+FESTIVAL_TO_WIDE_DAYS: Final[int] = 120
+
 
 # Distributor -> the streaming service a film typically lands on (the studio's
 # in-house service or its current pay-1-window partner). This is the *predicted*
@@ -200,6 +207,19 @@ def estimate_digital(
         margin += 40
         basis = f"guessed {basis}"
     return Estimate(when=when, margin_days=margin, confidence=round(confidence, 2), basis=basis)
+
+
+def estimate_theatrical_from_premiere(premiere: date) -> Estimate:
+    """Estimate the WIDE theatrical date from a festival/event premiere: premiere + the
+    festival->wide window. Deliberately low-confidence — this leg is genuinely uncertain, and
+    it exists so a premiere can *chain* into a digital estimate instead of anchoring one directly.
+    """
+    return Estimate(
+        when=premiere + timedelta(days=FESTIVAL_TO_WIDE_DAYS),
+        margin_days=75,
+        confidence=0.3,
+        basis=f"premiere + festival-to-wide window (~{FESTIVAL_TO_WIDE_DAYS}d)",
+    )
 
 
 def precise_from_coarse(when: date, precision: DatePrecision) -> Estimate:
