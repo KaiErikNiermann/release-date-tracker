@@ -1510,6 +1510,55 @@ def edit_date(
     )
 
 
+@edit_app.command("cleardate")
+def edit_cleardate(
+    ref: Annotated[str, typer.Argument(help="the work (id or title)")],
+    channel: Annotated[
+        str,
+        typer.Argument(help="channel to clear: primary|theatrical|digital|streaming|premiere|…"),
+    ],
+    predicted: Annotated[
+        bool,
+        typer.Option(
+            "--predicted",
+            help="clear only model predictions (provider=model) — e.g. a stale digital estimate",
+        ),
+    ] = False,
+    provider: Annotated[
+        str | None,
+        typer.Option("--provider", help="clear only this provider's rows (manual|tmdb|model|…)"),
+    ] = None,
+) -> None:
+    """Remove a stale/wrong date from a channel so it stops driving the best-estimate.
+
+    The common case is a stale *prediction* (a digital window estimated off the wrong anchor):
+    ``rdt edit cleardate "<ref>" digital --predicted`` drops just the model rows and lets a
+    confirmed pull or a hand-authored date surface. Omit the flags to wipe the channel entirely.
+    """
+    configure_logging()
+    if predicted and provider is not None and provider != "model":
+        raise typer.BadParameter("--predicted is shorthand for --provider model; don't combine")
+    db = _db()
+    entity = _edit_entity(db, ref)
+    if entity is None:
+        raise typer.Exit(1)
+    try:
+        chan = ReleaseChannel(channel.lower())
+    except ValueError:
+        db.close()
+        raise typer.BadParameter(f"unknown channel {channel!r}") from None
+    which = "model" if predicted else provider
+    removed = db.clear_observations(entity.id, chan, provider=which)
+    db.close()
+    scope = f" (provider={which})" if which else ""
+    if removed:
+        console.print(
+            f"[green]Cleared[/] {removed} {chan.value} date(s){scope} from {entity.title}."
+        )
+    else:
+        console.print(f"[yellow]No {chan.value} dates{scope}[/] to clear on {entity.title}.")
+
+
 @edit_app.command("contingency")
 def edit_contingency(
     ref: Annotated[str, typer.Argument(help="the work (id or title)")],

@@ -374,6 +374,23 @@ class Database:
             )
             return cur.rowcount
 
+    def clear_observations(
+        self, entity_id: str, channel: ReleaseChannel, *, provider: str | None = None
+    ) -> int:
+        """Drop an entity's rows on a channel — all of them, or just one provider's.
+
+        Backs ``rdt edit cleardate``: pass ``provider='model'`` to remove a stale *prediction*
+        (e.g. a digital window estimated off an event premiere) while keeping confirmed pulls;
+        omit ``provider`` to wipe the channel entirely (a wrong hand-authored date and all).
+        """
+        sql = "DELETE FROM observations WHERE entity_id = ? AND channel = ?"
+        params: list[str] = [entity_id, channel.value]
+        if provider is not None:
+            sql += " AND provider = ?"
+            params.append(provider)
+        with self._tx() as conn:
+            return conn.execute(sql, params).rowcount
+
     def upsert_observations(self, observations: Iterable[ReleaseObservation]) -> int:
         count = 0
         with self._tx() as conn:

@@ -7,7 +7,7 @@ mutation lands the right entity/node/edge state.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -437,3 +437,58 @@ def test_rdadd_skips_unknown_kind(edit_db: Path, monkeypatch: pytest.MonkeyPatch
     titles = {e.title for e in db.iter_entities()}
     db.close()
     assert titles == before  # the kind-less miss wrote nothing
+
+
+def _seed_obs(db: Database, entity_id: str, channel: ReleaseChannel, provider: str) -> None:
+    db.upsert_observation(
+        ReleaseObservation(
+            entity_id=entity_id,
+            channel=channel,
+            region="WW",
+            release_date=date(2026, 7, 31),
+            precision=DatePrecision.EXACT,
+            certainty=Certainty.ESTIMATED,
+            source_tier=SourceTier.RUMOR,
+            provider=provider,
+            source_name=provider,
+            confidence=0.3,
+            fetched_at=datetime.now(UTC),
+        )
+    )
+
+
+def test_cleardate_predicted_only_keeps_other_providers(edit_db: Path) -> None:
+    db = Database(edit_db)
+    eid = next(iter(db.iter_entities())).id
+    _seed_obs(db, eid, ReleaseChannel.DIGITAL, "model")  # a stale prediction
+    _seed_obs(db, eid, ReleaseChannel.DIGITAL, "manual")  # a hand-authored date
+    _seed_obs(db, eid, ReleaseChannel.THEATRICAL, "tmdb")  # a different channel
+    db.close()
+
+    res = runner.invoke(cli.app, ["edit", "cleardate", eid, "digital", "--predicted"])
+    assert res.exit_code == 0 and "Cleared 1" in res.output
+
+    db = Database(edit_db)
+    rows = {(o.channel, o.provider) for o in db.iter_observations(eid)}
+    db.close()
+    assert (ReleaseChannel.DIGITAL, "model") not in rows  # the prediction is gone
+    assert (ReleaseChannel.DIGITAL, "manual") in rows  # the hand date survives
+    assert (ReleaseChannel.THEATRICAL, "tmdb") in rows  # the other channel is untouched
+
+
+def test_cleardate_whole_channel_when_no_flag(edit_db: Path) -> None:
+    db = Database(edit_db)
+    eid = next(iter(db.iter_entities())).id
+    _seed_obs(db, eid, ReleaseChannel.DIGITAL, "model")
+    _seed_obs(db, eid, ReleaseChannel.DIGITAL, "manual")
+    _seed_obs(db, eid, ReleaseChannel.THEATRICAL, "tmdb")
+    db.close()
+
+    res = runner.invoke(cli.app, ["edit", "cleardate", eid, "digital"])
+    assert res.exit_code == 0 and "Cleared 2" in res.output
+
+    db = Database(edit_db)
+    channels = {o.channel for o in db.iter_observations(eid)}
+    db.close()
+    assert ReleaseChannel.DIGITAL not in channels  # both digital rows cleared
+    assert ReleaseChannel.THEATRICAL in channels  # theatrical preserved
