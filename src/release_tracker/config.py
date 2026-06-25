@@ -61,6 +61,9 @@ class Settings(BaseSettings):
     justwatch_regions_raw: str = Field(
         default="US,CA,GB,IE,AU,DE,FR,IT,ES,NL,JP,BR", alias="RDT_JUSTWATCH_REGIONS"
     )
+    # When To Stream (movies): a US PVOD/SVOD scrape that corroborates the digital window and
+    # adds the predicted subscription-drop date + service. Best-effort; on by default.
+    whentostream_enabled: bool = Field(default=True, alias="RDT_WHENTOSTREAM")
 
     # --- consumption / availability ---
     # which release channel decides "available to me": digital (can't do theatrical),

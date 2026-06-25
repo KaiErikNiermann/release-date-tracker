@@ -18,6 +18,7 @@ Every dated claim is annotated confirmed/speculative with a rough confidence.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Literal
@@ -48,6 +49,8 @@ from release_tracker.sources.ddg import WebInfo, instant_answer
 from release_tracker.sources.igdb import IgdbSource
 from release_tracker.sources.justwatch import JustWatchAvailability
 from release_tracker.sources.tmdb import TmdbSource
+from release_tracker.sources.whentostream import WhenToStreamHints
+from release_tracker.sources.whentostream import hints as wts_hints
 from release_tracker.sources.wiki import WikiHints, wiki_hints
 from release_tracker.tech import classify_tech, looks_like_tech, tech_info
 from release_tracker.trends import StudioTrend, narrow_coarse
@@ -131,6 +134,9 @@ class RdReport:
     # only when an offer surfaces somewhere — the structured "where + how much + how early" answer
     # that lets the skill skip a manual "where to watch" web search.
     availability: JustWatchAvailability | None = None
+    # When To Stream (movies): US PVOD/SVOD dates mined from the per-film article — corroborates
+    # the digital window and carries the predicted subscription-drop date + named service.
+    whentostream: WhenToStreamHints | None = None
 
     def to_dict(self) -> dict[str, object]:
         out: dict[str, object] = {
@@ -155,6 +161,8 @@ class RdReport:
             out["wiki_hints"] = self.wiki_hints.to_dict()
         if self.availability is not None:
             out["availability"] = self.availability.to_dict()
+        if self.whentostream is not None:
+            out["whentostream"] = self.whentostream.to_dict()
         return out
 
 
@@ -231,17 +239,32 @@ async def lookup(
                 )
                 streaming = ()
 
-        # JustWatch (film/TV): real per-region store offers — the earliest VOD date beats a
-        # PVOD estimate, and the live flatrate homes replace the streaming prediction.
+        # JustWatch (film/TV) + When To Stream (movies): fetched concurrently. JustWatch gives the
+        # global-earliest real VOD date + live flatrate homes; When To Stream corroborates the US
+        # digital window and adds the predicted SVOD-drop date + service.
         avail: JustWatchAvailability | None = None
-        if kind in (MediaKind.MOVIE, MediaKind.TV) and settings.justwatch_enabled:
-            avail = await justwatch.availability(
-                client, cand.title, kind, countries=settings.justwatch_regions, year=cand.year
+        wts: WhenToStreamHints | None = None
+        if kind in (MediaKind.MOVIE, MediaKind.TV):
+            jw_task = (
+                justwatch.availability(
+                    client, cand.title, kind, countries=settings.justwatch_regions, year=cand.year
+                )
+                if settings.justwatch_enabled
+                else _none()
             )
+            wts_task = (
+                wts_hints(client, cand.title, kind=kind, year=cand.year)
+                if settings.whentostream_enabled
+                else _none()
+            )
+            avail, wts = await asyncio.gather(jw_task, wts_task)
             if avail is not None:
                 claims, streaming, predicted, extra = _merge_justwatch(
                     list(claims), streaming, predicted, avail
                 )
+                notes = (*notes, *extra)
+            if wts is not None:
+                claims, extra = _merge_whentostream(list(claims), wts)
                 notes = (*notes, *extra)
 
         return RdReport(
@@ -261,6 +284,7 @@ async def lookup(
             # always pin the Wikipedia page; mine its facets only when sources were sparse
             wiki_hints=await wiki_hints(client, query, want_facets=not claims),
             availability=avail,
+            whentostream=wts,
         )
 
 
@@ -337,6 +361,11 @@ def _tech_report(query: str, settings: Settings, region: str | None) -> RdReport
     )
 
 
+async def _none() -> None:
+    """An already-resolved None — lets a disabled source slot into asyncio.gather cleanly."""
+    return None
+
+
 # --- JustWatch merge (real store offers beat estimates / predictions) ----
 def _merge_justwatch(
     claims: list[Claim],
@@ -382,6 +411,49 @@ def _merge_justwatch(
 
 def _is_speculative_digital(c: Claim) -> bool:
     return c.label.startswith("Digital") and c.stance == "speculative"
+
+
+# --- When To Stream merge (US PVOD corroboration + the predicted SVOD-drop date) ---
+def _merge_whentostream(
+    claims: list[Claim], wts: WhenToStreamHints
+) -> tuple[list[Claim], tuple[str, ...]]:
+    """Add the SVOD-drop claim (US subscription date + service) and corroborate the digital
+    window with the US PVOD date — flagging a discrepancy rather than silently overriding."""
+    notes: list[str] = []
+    if wts.svod_date is not None:  # the subscription drop — not predicted by TMDB/JustWatch
+        label = f"Streaming (SVOD · {wts.svod_service})" if wts.svod_service else "Streaming (SVOD)"
+        basis = "WhenToStream (US)" + (f" · {wts.svod_service}" if wts.svod_service else "")
+        claims.append(
+            Claim(label, wts.svod_date, DatePrecision.EXACT, "confirmed", 0.8, None, basis, "US")
+        )
+    if wts.pvod is not None:
+        digital = next(
+            (c for c in claims if c.label.startswith("Digital") and c.when is not None), None
+        )
+        if digital is None or digital.when is None:
+            # no digital date from any source — the US PVOD becomes our confirmed digital line.
+            claims.append(
+                Claim(
+                    "Digital (US PVOD)",
+                    wts.pvod,
+                    DatePrecision.EXACT,
+                    "confirmed",
+                    0.8,
+                    None,
+                    "WhenToStream PVOD (US)",
+                    "US",
+                )
+            )
+        elif abs((wts.pvod - digital.when).days) <= 7:
+            notes.append(
+                f"WhenToStream PVOD (US) {wts.pvod.isoformat()} corroborates the digital date."
+            )
+        else:
+            notes.append(
+                f"WhenToStream PVOD (US) {wts.pvod.isoformat()} differs from the earliest digital "
+                f"{digital.when.isoformat()} — US window vs earliest regional offer; verify."
+            )
+    return claims, tuple(notes)
 
 
 # --- per-kind claim builders ---------------------------------------------

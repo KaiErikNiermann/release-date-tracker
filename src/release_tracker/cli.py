@@ -70,6 +70,7 @@ from release_tracker.seed import LocalSeed, NotionSeed, SeedProvider
 from release_tracker.sources.base import Candidate, make_client
 from release_tracker.sources.ddg import WebInfo, instant_answer
 from release_tracker.sources.justwatch import JustWatchAvailability
+from release_tracker.sources.whentostream import WhenToStreamHints
 from release_tracker.titles import season_label
 
 app = typer.Typer(add_completion=False, help="Free-first release date tracker.")
@@ -325,11 +326,26 @@ def _render_report(r: RdReport) -> None:
     if r.price:
         console.print(f"[bold]Price:[/] {r.price}")
     _render_availability(r.availability)
+    _render_whentostream(r.whentostream)
     for note in r.notes:
         console.print(f"[dim]• {note}[/]")
     if r.url:
         console.print(f"[dim]{r.url}[/]")
     _render_web_info(r.web_info)
+
+
+def _render_whentostream(wts: WhenToStreamHints | None) -> None:
+    """A compact corroboration line: US PVOD/SVOD dates + the source link (SVOD is also a claim)."""
+    if wts is None:
+        return
+    bits: list[str] = []
+    if wts.pvod is not None:
+        bits.append(f"PVOD {wts.pvod.isoformat()}")
+    if wts.svod_date is not None:
+        svc = f" → {wts.svod_service}" if wts.svod_service else ""
+        bits.append(f"SVOD {wts.svod_date.isoformat()}{svc}")
+    if bits:
+        console.print(f"[bold]When To Stream (US):[/] {' · '.join(bits)} [dim]{wts.url}[/]")
 
 
 def _render_availability(avail: JustWatchAvailability | None) -> None:
