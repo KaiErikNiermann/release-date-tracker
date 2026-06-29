@@ -11,7 +11,12 @@ from release_tracker.models import (
     ReleaseObservation,
     SourceTier,
 )
-from release_tracker.resolve import best_estimates, commercial_anchor, earliest_premiere
+from release_tracker.resolve import (
+    best_estimates,
+    commercial_anchor,
+    earliest_confirmed_theatrical,
+    earliest_premiere,
+)
 
 
 def _obs(
@@ -204,3 +209,29 @@ def test_earliest_premiere_picks_soonest() -> None:
     ]
     prem = earliest_premiere(obs)
     assert prem is not None and prem.region == "FR" and prem.release_date == date(2026, 5, 17)
+
+
+def test_earliest_confirmed_theatrical_is_earliest_anywhere() -> None:
+    # the VOD-collision floor is the soonest commercial in-cinema date across ALL regions (not the
+    # US-preferred anchor), so a legit foreign VOD following an earlier foreign theatrical survives.
+    obs = [
+        _theatrical_obs(date(2026, 7, 15), ReleaseChannel.THEATRICAL, region="KR"),  # earliest
+        _theatrical_obs(date(2026, 9, 9), ReleaseChannel.THEATRICAL, region="US"),
+    ]
+    assert earliest_confirmed_theatrical(obs) == date(2026, 7, 15)
+
+
+def test_earliest_confirmed_theatrical_excludes_premiere_and_unconfirmed() -> None:
+    obs = [
+        _theatrical_obs(date(2026, 5, 17), ReleaseChannel.PREMIERE, region="FR"),  # not commercial
+        _theatrical_obs(
+            date(2026, 8, 1), ReleaseChannel.THEATRICAL, certainty=Certainty.RUMORED
+        ),  # not committed
+        _theatrical_obs(date(2026, 9, 9), ReleaseChannel.THEATRICAL_LIMITED),  # earliest confirmed
+    ]
+    assert earliest_confirmed_theatrical(obs) == date(2026, 9, 9)
+
+
+def test_earliest_confirmed_theatrical_none_without_commercial_date() -> None:
+    only_premiere = [_theatrical_obs(date(2026, 5, 17), ReleaseChannel.PREMIERE, region="FR")]
+    assert earliest_confirmed_theatrical(only_premiere) is None

@@ -86,6 +86,25 @@ def earliest_premiere(
     return min(cands, key=_anchor_date) if cands else None
 
 
+def earliest_confirmed_theatrical(obs: Iterable[ReleaseObservation]) -> date | None:
+    """The earliest *confirmed commercial* theatrical date across all regions — the hard floor a
+    real digital/VOD release cannot predate.
+
+    Used to reject wrong-title aggregator matches: a "digital" date landing before any in-cinema
+    release is almost always a different title sharing the name (e.g. a same-named stand-up special
+    already on VOD). Compared earliest-anywhere (not the US-preferred anchor) so a legitimate
+    foreign VOD that follows an earlier foreign theatrical isn't falsely rejected.
+    """
+    dates = [
+        o.release_date
+        for o in obs
+        if o.channel in COMMERCIAL_THEATRICAL
+        and o.release_date is not None
+        and o.certainty in _CONFIRMED
+    ]
+    return min(dates) if dates else None
+
+
 def score_observation(obs: ReleaseObservation, *, corroboration: int = 1) -> float:
     """Confidence in [0, 1] for a single claim.
 

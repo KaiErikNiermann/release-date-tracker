@@ -44,7 +44,11 @@ from release_tracker.models import (
     ReleaseObservation,
 )
 from release_tracker.platforms import learn_predicted_platform
-from release_tracker.resolve import commercial_anchor, earliest_premiere
+from release_tracker.resolve import (
+    commercial_anchor,
+    earliest_confirmed_theatrical,
+    earliest_premiere,
+)
 from release_tracker.sources import justwatch, sources_for
 from release_tracker.sources.base import Candidate, SourceResult, make_client
 from release_tracker.sources.ddg import WebInfo, instant_answer
@@ -255,6 +259,11 @@ async def lookup(
                 else _none()
             )
             avail, wts = await asyncio.gather(jw_task, wts_task)
+            if avail is not None and justwatch_predates_theatrical(avail, observations):
+                # a real VOD release can't precede the in-cinema run — this is a wrong-title match
+                # (a same-named title already on digital). Drop the offer block, don't fold it.
+                notes = (*notes, _collision_note(avail, observations))
+                avail = None
             if avail is not None:
                 claims, streaming, predicted, extra = _merge_justwatch(
                     list(claims), streaming, predicted, avail
@@ -361,6 +370,32 @@ def _tech_report(query: str, settings: Settings, region: str | None) -> RdReport
 async def _none() -> None:
     """An already-resolved None — lets a disabled source slot into asyncio.gather cleanly."""
     return None
+
+
+# --- JustWatch wrong-title guard (a VOD date can't precede the cinema run) ----
+def justwatch_predates_theatrical(
+    avail: JustWatchAvailability, obs: list[ReleaseObservation]
+) -> bool:
+    """True when JustWatch's earliest VOD lands *before* the earliest confirmed theatrical anywhere.
+
+    That ordering is physically impossible for the real film, so it flags a same-name collision
+    (the aggregator matched a different title already on digital). No confirmed theatrical, or no
+    dated VOD, means we can't make the call → not a collision (be conservative, keep the data).
+    """
+    vod = avail.earliest_vod
+    floor = earliest_confirmed_theatrical(obs)
+    return vod is not None and floor is not None and vod < floor
+
+
+def _collision_note(avail: JustWatchAvailability, obs: list[ReleaseObservation]) -> str:
+    floor = earliest_confirmed_theatrical(obs)
+    vod = avail.earliest_vod
+    assert vod is not None and floor is not None  # guaranteed by the guard that gates this call
+    return (
+        f"JustWatch match discarded: earliest VOD {vod.isoformat()} ({avail.earliest_vod_country}) "
+        f"predates the confirmed theatrical {floor.isoformat()} — almost certainly a different "
+        "title sharing the name."
+    )
 
 
 # --- JustWatch merge (real store offers beat estimates / predictions) ----

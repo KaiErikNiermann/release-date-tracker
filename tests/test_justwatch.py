@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Any
 
+from release_tracker.lookup import justwatch_predates_theatrical
+from release_tracker.models import (
+    Certainty,
+    DatePrecision,
+    ReleaseChannel,
+    ReleaseObservation,
+    SourceTier,
+)
 from release_tracker.sources.justwatch import (
     JustWatchAvailability,
     Offer,
@@ -141,3 +149,51 @@ def test_availability_to_dict_omits_nothing_and_derives_streaming() -> None:
     assert d["earliest_vod"] == "2024-12-25"
     assert d["streaming_platforms"] == ["Peacock Premium"]
     assert len(d["offers"]) == 3  # pyright: ignore[reportArgumentType]
+
+
+def _theatrical(
+    when: date, channel: ReleaseChannel = ReleaseChannel.THEATRICAL
+) -> ReleaseObservation:
+    return ReleaseObservation(
+        entity_id="movie-x",
+        channel=channel,
+        region="US",
+        release_date=when,
+        precision=DatePrecision.EXACT,
+        certainty=Certainty.CONFIRMED,
+        source_tier=SourceTier.AGGREGATOR,
+        provider="tmdb",
+        fetched_at=datetime(2026, 6, 1, tzinfo=UTC),
+    )
+
+
+def _avail(vod: date | None) -> JustWatchAvailability:
+    return JustWatchAvailability(
+        object_id=1,
+        title="X",
+        year=2026,
+        offers=(),
+        earliest_vod=vod,
+        earliest_vod_country="AU",
+        earliest_vod_platform="Apple TV Store",
+    )
+
+
+def test_guard_flags_vod_before_theatrical() -> None:
+    # the Tim-Dillon-special collision: a "digital" date months before the film's own theatrical.
+    obs = [_theatrical(date(2026, 9, 25))]
+    assert justwatch_predates_theatrical(_avail(date(2026, 4, 24)), obs) is True
+
+
+def test_guard_allows_vod_on_or_after_theatrical() -> None:
+    obs = [_theatrical(date(2026, 9, 25))]
+    assert justwatch_predates_theatrical(_avail(date(2026, 12, 2)), obs) is False
+    assert justwatch_predates_theatrical(_avail(date(2026, 9, 25)), obs) is False  # day-and-date
+
+
+def test_guard_is_conservative_without_a_floor_or_vod() -> None:
+    # no confirmed theatrical (premiere-only) -> can't judge -> keep the data
+    premiere_only = [_theatrical(date(2026, 5, 17), ReleaseChannel.PREMIERE)]
+    assert justwatch_predates_theatrical(_avail(date(2026, 1, 1)), premiere_only) is False
+    # no dated VOD -> nothing to compare
+    assert justwatch_predates_theatrical(_avail(None), [_theatrical(date(2026, 9, 25))]) is False
