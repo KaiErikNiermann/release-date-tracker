@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from typing import Any
 
-from release_tracker.lookup import justwatch_predates_theatrical
+from release_tracker.lookup import justwatch_predates_theatrical, justwatch_year_mismatch
 from release_tracker.models import (
     Certainty,
     DatePrecision,
@@ -22,6 +22,7 @@ from release_tracker.sources.justwatch import (
     parse_offers,
     parse_price,
     pick_node,
+    title_match_score,
 )
 
 # one JustWatch title node, as the GraphQL hands it back (prices are localized strings).
@@ -133,6 +134,27 @@ def test_pick_node_none_when_year_off() -> None:
     assert pick_node(edges, "Wicked", 2099) is None
 
 
+def test_title_match_score_prefix_subtitle_vs_trailing_word() -> None:
+    assert title_match_score("Nosferatu", "Nosferatu") == 2
+    # a prefix abbreviation / subtitle is a partial match
+    assert title_match_score("Wicked", "Wicked: Part I") == 1
+    assert title_match_score("Nosferatu", "Nosferatu the Vampyre") == 1
+    # a shared *trailing* word is NOT a match (the "Ghosts" collision)
+    assert title_match_score("Anything but Ghosts", "Ghosts") == 0
+    # word-boundary: a partial word never matches
+    assert title_match_score("Wick", "Wicked") == 0
+    # wholly unrelated
+    assert title_match_score("Anything but Ghosts", "Absolutely Anything") == 0
+
+
+def test_pick_node_rejects_zero_title_overlap_even_when_year_unknown() -> None:
+    # the "Absolutely Anything" collision: fuzzy search returns an unrelated popular title; with the
+    # film's year unknown the year filter can't reject it, so the title floor must.
+    content = {"title": "Absolutely Anything", "originalReleaseYear": 2015}
+    edges = [{"node": {"objectId": 9, "content": content}}]
+    assert pick_node(edges, "Anything but Ghosts", None) is None
+
+
 def test_availability_to_dict_omits_nothing_and_derives_streaming() -> None:
     av = JustWatchAvailability(
         object_id=1,
@@ -167,16 +189,32 @@ def _theatrical(
     )
 
 
-def _avail(vod: date | None) -> JustWatchAvailability:
+def _avail(vod: date | None, year: int | None = 2026) -> JustWatchAvailability:
     return JustWatchAvailability(
         object_id=1,
         title="X",
-        year=2026,
+        year=year,
         offers=(),
         earliest_vod=vod,
         earliest_vod_country="AU",
         earliest_vod_platform="Apple TV Store",
     )
+
+
+def test_year_mismatch_flags_far_matched_year() -> None:
+    # matched JustWatch title is 2015, the film is 2026 -> collision.
+    assert justwatch_year_mismatch(_avail(None, year=2015), 2026) is not None
+
+
+def test_year_mismatch_flags_ancient_vod_even_without_film_year() -> None:
+    # the "Absolutely Anything" tell: a 2001 VOD on a match whose own year is 2015 (film undated).
+    assert justwatch_year_mismatch(_avail(date(2001, 10, 26), year=2015), None) is not None
+
+
+def test_year_mismatch_passes_a_sane_match() -> None:
+    assert justwatch_year_mismatch(_avail(date(2026, 12, 2), year=2026), 2026) is None
+    # VOD in the release year itself is fine (day-and-date / early-window)
+    assert justwatch_year_mismatch(_avail(date(2026, 1, 1), year=2026), 2026) is None
 
 
 def test_guard_flags_vod_before_theatrical() -> None:

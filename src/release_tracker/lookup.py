@@ -259,6 +259,12 @@ async def lookup(
                 else _none()
             )
             avail, wts = await asyncio.gather(jw_task, wts_task)
+            year_reason = justwatch_year_mismatch(avail, cand.year) if avail is not None else None
+            if avail is not None and year_reason is not None:
+                # the matched title's year is implausible for this film — a same-name collision.
+                note = f"JustWatch match discarded: {year_reason} — likely a wrong title."
+                notes = (*notes, note)
+                avail = None
             if avail is not None and justwatch_predates_theatrical(avail, observations):
                 # a real VOD release can't precede the in-cinema run — this is a wrong-title match
                 # (a same-named title already on digital). Drop the offer block, don't fold it.
@@ -369,6 +375,25 @@ def _tech_report(query: str, settings: Settings, region: str | None) -> RdReport
 
 async def _none() -> None:
     """An already-resolved None — lets a disabled source slot into asyncio.gather cleanly."""
+    return None
+
+
+# --- JustWatch wrong-title guards (year-sanity + a VOD date can't precede the cinema run) ----
+def justwatch_year_mismatch(avail: JustWatchAvailability, film_year: int | None) -> str | None:
+    """Year-sanity on a JustWatch match: the matched title's year must sit within ±1 of the
+    film's (when known), and its earliest VOD can't predate the release year by more than a year
+    (a buy/rent never precedes the film). Either failing means a same-name collision — returns a
+    short reason for the note, else None.
+
+    Anchors on the *matched* title's own year when the film's is unknown (not yet dated in TMDB),
+    so an absurdly old VOD date — e.g. a 2001 offer surfacing for a 2026 film — is still caught.
+    """
+    if film_year is not None and avail.year is not None and abs(avail.year - film_year) > 1:
+        return f"matched title year {avail.year} is far from the film's {film_year}"
+    anchor = film_year if film_year is not None else avail.year
+    vod = avail.earliest_vod
+    if vod is not None and anchor is not None and vod.year < anchor - 1:
+        return f"earliest VOD {vod.isoformat()} predates the {anchor} release by over a year"
     return None
 
 

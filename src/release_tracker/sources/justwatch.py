@@ -207,10 +207,32 @@ def parse_offers(node: dict[str, Any], country: str) -> list[Offer]:
     return out
 
 
+def title_match_score(want: str, cand: str) -> int:
+    """Title-overlap strength: ``2`` exact, ``1`` a prefix abbreviation/subtitle, ``0`` unrelated.
+
+    A partial counts only when the shorter title is a *word-aligned prefix* of the longer one — an
+    abbreviation or subtitle ("Wicked" ↔ "Wicked: Part I", "Nosferatu" ↔ "Nosferatu the Vampyre").
+    A shared *trailing* word does not match, so "Ghosts" never claims "Anything but Ghosts".
+    """
+    want, cand = want.casefold().strip(), cand.casefold().strip()
+    if not want or not cand:
+        return 0
+    if want == cand:
+        return 2
+    short, long = sorted((want, cand), key=len)
+    boundary = len(short) == len(long) or not long[len(short)].isalnum()
+    return 1 if long.startswith(short) and boundary else 0
+
+
 def pick_node(
     edges: list[Any], title: str, year: int | None
 ) -> tuple[dict[str, Any], dict[str, Any]] | None:
-    """Choose the best title node: prefer an exact-ish title whose year matches (±1)."""
+    """Choose the best title node: prefer an exact-ish title whose year matches (±1).
+
+    A node with *no* name overlap is never selected — JustWatch's fuzzy ``popularTitles`` can return
+    an unrelated popular title (e.g. "Absolutely Anything" for "Anything but Ghosts"), and when the
+    film's year is unknown the year filter can't reject it, so the title floor is the only guard.
+    """
     best: tuple[tuple[int, int], dict[str, Any], dict[str, Any]] | None = None
     want = title.casefold().strip()
     for raw_edge in edges:
@@ -226,9 +248,9 @@ def pick_node(
         content = cast("dict[str, Any]", raw_content)
         cand_title = str(content.get("title", "")).casefold().strip()
         cand_year: object = content.get("originalReleaseYear")
-        title_score = (
-            2 if cand_title == want else (1 if want in cand_title or cand_title in want else 0)
-        )
+        title_score = title_match_score(want, cand_title)
+        if title_score == 0:  # no real name overlap → wrong title, never select it
+            continue
         year_ok = year is None or not isinstance(cand_year, int) or abs(cand_year - year) <= 1
         if not year_ok:
             continue
