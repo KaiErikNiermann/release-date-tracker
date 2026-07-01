@@ -246,11 +246,15 @@ async def lookup(
         avail: JustWatchAvailability | None = None
         wts: WhenToStreamHints | None = None
         if kind in (MediaKind.MOVIE, MediaKind.TV):
+            # JustWatch offers are *show-level*, not per-season: on a specific-season lookup they'd
+            # surface the earliest VOD across the whole series (usually S1's), which can't answer
+            # "when does *this* season drop digitally". Skip the scan and say so, don't mislead.
+            jw_season_blocked = season is not None
             jw_task = (
                 justwatch.availability(
                     client, cand.title, kind, countries=settings.justwatch_regions, year=cand.year
                 )
-                if settings.justwatch_enabled
+                if settings.justwatch_enabled and not jw_season_blocked
                 else _none()
             )
             wts_task = (
@@ -259,6 +263,12 @@ async def lookup(
                 else _none()
             )
             avail, wts = await asyncio.gather(jw_task, wts_task)
+            if jw_season_blocked:
+                notes = (
+                    *notes,
+                    "JustWatch offers are show-level; skipped for a season-specific "
+                    "lookup (they'd report the series' earliest VOD, not this season's).",
+                )
             year_reason = justwatch_year_mismatch(avail, cand.year) if avail is not None else None
             if avail is not None and year_reason is not None:
                 # the matched title's year is implausible for this film — a same-name collision.
