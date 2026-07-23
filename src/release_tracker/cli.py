@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Annotated
 
@@ -42,7 +43,13 @@ from release_tracker.dates_edtf import parse_edtf, to_edtf
 from release_tracker.db import Database
 from release_tracker.enrich import EnrichSummary, enrich_work
 from release_tracker.logging import configure_logging
-from release_tracker.lookup import RdReport, lookup
+from release_tracker.lookup import (
+    RdReport,
+    capture_candidates,
+    lookup,
+    report_for_candidate,
+    select_candidate,
+)
 from release_tracker.models import (
     ArtistLink,
     BestEstimate,
@@ -64,7 +71,7 @@ from release_tracker.models import (
     SourceTier,
     WorkRelation,
 )
-from release_tracker.pipeline import pull_all, pull_entity
+from release_tracker.pipeline import RefreshResult, pull_all, pull_entity, refresh_entities
 from release_tracker.resolve import best_estimates
 from release_tracker.seed import LocalSeed, NotionSeed, SeedProvider
 from release_tracker.sources.base import Candidate, make_client
@@ -144,6 +151,169 @@ def pull(
 
 
 @app.command()
+def refresh(
+    refs: Annotated[
+        list[str] | None,
+        typer.Argument(help="titles or ids to refresh (resolved to entities, deduped)"),
+    ] = None,
+    since: Annotated[
+        str | None, typer.Option(help="only entities whose pivot date is on/after this (ISO)")
+    ] = None,
+    until: Annotated[
+        str | None, typer.Option(help="only entities whose pivot date is on/before this (ISO)")
+    ] = None,
+    days: Annotated[int | None, typer.Option(help="only entities releasing within N days")] = None,
+    kind: Annotated[str | None, typer.Option(help="filter to a MediaKind")] = None,
+    state: Annotated[
+        str | None, typer.Option(help="filter to a consumption state (want/watching/...)")
+    ] = None,
+    all_entities: Annotated[
+        bool, typer.Option("--all", help="refresh every tracked entity")
+    ] = False,
+    offers: Annotated[
+        bool, typer.Option("--offers/--no-offers", help="also run the JustWatch offer scan")
+    ] = True,
+    enrich: Annotated[bool, typer.Option("--enrich", help="also refresh who/where/what")] = False,
+    concurrency: Annotated[int, typer.Option(help="max entities in flight")] = 6,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="list the resolved targets, write nothing")
+    ] = False,
+    as_json: Annotated[bool, typer.Option("--json", help="machine-readable diff")] = False,
+) -> None:
+    """Batch-refresh tracked dates, keyed by canonical id (no title collisions).
+
+    Target a list of titles/ids, or a window (--since/--until/--days) over the display pivot, or
+    --all. Each target is re-pulled (Tier-0 + recomputed estimates) and, by default, re-scanned on
+    JustWatch (confirmed digital persisted). Prints a before/after diff of what actually moved.
+    """
+    configure_logging()
+    settings = get_settings()
+    kind_filter = MediaKind(kind) if kind else None
+    state_filter = ConsumptionState(state) if state else None
+    since_d = date.fromisoformat(since) if since else None
+    until_d = date.fromisoformat(until) if until else None
+    db = _db()
+    today = _today()
+    if refs:
+        targets = _resolve_refs(db, refs)
+    elif all_entities:
+        targets = list(db.iter_entities())
+    else:
+        targets = views.refresh_targets(
+            db,
+            today,
+            settings,
+            kind=kind_filter,
+            state=state_filter,
+            since=since_d,
+            until=until_d,
+            days=days,
+        )
+    if not targets:
+        console.print("[yellow]No matching entities to refresh.[/]")
+        db.close()
+        return
+    if dry_run:
+        _render_refresh_targets(db, targets)
+        db.close()
+        return
+    results = asyncio.run(
+        refresh_entities(
+            db, settings, targets, offers=offers, enrich=enrich, concurrency=concurrency
+        )
+    )
+    db.close()
+    if as_json:
+        print(
+            json.dumps(
+                {"refreshed": len(results), "results": [_refresh_json(r) for r in results]},
+                indent=2,
+            )
+        )
+        return
+    _render_refresh(results)
+
+
+def _resolve_refs(db: Database, refs: list[str]) -> list[Entity]:
+    """Resolve each ref to an entity (printing the usual missing/ambiguous diagnostics), deduped by
+    id — so a supplied list can never double-refresh or guess a collision."""
+    picked: dict[str, Entity] = {}
+    for ref in refs:
+        entity = _resolve_ref(db, ref)
+        if entity is not None:
+            picked[entity.id] = entity
+    return list(picked.values())
+
+
+def _render_refresh_targets(db: Database, targets: list[Entity]) -> None:
+    table = Table(title=f"Refresh targets ({len(targets)}) — dry run", show_lines=False)
+    for col in ("Title", "Kind", "Next known date"):
+        table.add_column(col)
+    for e in targets:
+        dates = db.observation_dates(e.id)
+        nxt = min(dates, default=None)
+        table.add_row(e.title, e.kind.value, nxt.isoformat() if nxt else "—")
+    console.print(table)
+
+
+def _fmt_date(d: date | None) -> str:
+    return d.isoformat() if d else "—"
+
+
+def _render_refresh(results: list[RefreshResult]) -> None:
+    changed = unchanged = errored = 0
+    table = Table(title="Refreshed dates", show_lines=False)
+    for col in ("Title", "Channel", "Was", "Now", ""):
+        table.add_column(col)
+    for r in results:
+        if r.error is not None:
+            errored += 1
+            continue
+        diffs = views.diff_estimates(r.before, r.after)
+        if not diffs:
+            unchanged += 1
+            continue
+        changed += 1
+        for i, d in enumerate(diffs):
+            table.add_row(
+                r.title if i == 0 else "",
+                d.channel,
+                _fmt_date(d.old),
+                _fmt_date(d.new),
+                "✅" if d.new_confirmed else "~",
+            )
+    if changed:
+        console.print(table)
+    console.print(
+        f"[green]{changed} changed[/], {unchanged} unchanged"
+        + (f", [red]{errored} errored[/]" if errored else "")
+        + "."
+    )
+    for r in results:
+        if r.error is not None:
+            console.print(f"[red]Failed[/] {r.title}: {r.error}")
+
+
+def _refresh_json(r: RefreshResult) -> dict[str, object]:
+    diffs = views.diff_estimates(r.before, r.after)
+    return {
+        "title": r.title,
+        "entity_id": r.entity_id,
+        "error": r.error,
+        "changes": [
+            {
+                "channel": d.channel,
+                "region": d.region,
+                "was": _fmt_date(d.old) if d.old else None,
+                "now": _fmt_date(d.new) if d.new else None,
+                "confirmed": d.new_confirmed,
+            }
+            for d in diffs
+        ],
+    }
+
+
+@app.command()
 def show(
     region: Annotated[str | None, typer.Option(help="filter to a region code")] = None,
     kind: Annotated[str | None, typer.Option(help="filter to a MediaKind")] = None,
@@ -206,6 +376,18 @@ def rd(
         bool,
         typer.Option("--track", "--add", help="also capture it into the tracker (state: want)"),
     ] = False,
+    latest: Annotated[
+        bool,
+        typer.Option("--latest", help="with --track: pick the newest matching release"),
+    ] = False,
+    year: Annotated[
+        int | None,
+        typer.Option("--year", help="with --track: pick the match released this year"),
+    ] = None,
+    id_pick: Annotated[
+        str | None,
+        typer.Option("--id", help="with --track: pick by canonical id, e.g. tmdb=1368337"),
+    ] = None,
     as_json: Annotated[
         bool, typer.Option("--json", help="emit machine-readable JSON (for the /rd skill)")
     ] = False,
@@ -216,29 +398,147 @@ def rd(
     pins its canonical id, pulls dates + enriches who/where/what, marks it 'want'. Pass
     --season N for a TV season — it resolves that season's date and, with --track, files a
     fully-wired 'Show: Season N' entry (series link + coords + subtitle), no edit needed.
+
+    On --track, a title with several plausible matches is **not** auto-added — the candidates
+    are listed and you pick one with --latest (newest), --year YYYY, or --id key=id. A plain
+    lookup (no --track) always takes the best single match, unchanged.
     """
     configure_logging()
     settings = get_settings()
     kind_hint = MediaKind(kind) if kind else (MediaKind.TV if season is not None else None)
-    report = asyncio.run(lookup(name, settings, kind_hint=kind_hint, region=region, season=season))
-    tracked = (
-        asyncio.run(_track_from_report(settings, name, report, season=season)) if track else False
+    if (latest or year is not None or id_pick is not None) and not track:
+        raise typer.BadParameter("--latest / --year / --id only apply together with --track")
+    pairs = _parse_pairs([id_pick]) if id_pick else None
+    outcome = asyncio.run(
+        _run_rd(
+            name,
+            settings,
+            kind_hint=kind_hint,
+            region=region,
+            season=season,
+            track=track,
+            latest=latest,
+            want_year=year,
+            id_pick=pairs,
+        )
     )
     if as_json:
-        out = report.to_dict()
+        if outcome.ambiguous:
+            print(
+                json.dumps(
+                    {
+                        "query": name,
+                        "tracked": False,
+                        "ambiguous": True,
+                        "candidates": [_candidate_json(k, c) for k, c in outcome.ambiguous],
+                    },
+                    indent=2,
+                )
+            )
+            return
+        assert outcome.report is not None
+        out = outcome.report.to_dict()
         if track:
-            out["tracked"] = tracked
+            out["tracked"] = outcome.tracked
         print(json.dumps(out, indent=2))
         return
-    _render_report(report)
+    if outcome.ambiguous:
+        console.print(
+            _candidate_table(
+                f"Several matches for '{name}' — pick one to add", [c for _, c in outcome.ambiguous]
+            )
+        )
+        console.print(
+            "[dim]Re-run --track with a picker:[/] [bold]--latest[/] (newest), "
+            "[bold]--year <YYYY>[/], or [bold]--id <key=id>[/] (e.g. --id tmdb=1368337)."
+        )
+        return
+    assert outcome.report is not None
+    _render_report(outcome.report)
     if track:
-        if tracked:
-            console.print(f"[green]Tracked[/] {report.matched_title} [dim](state: want)[/].")
+        if outcome.tracked:
+            console.print(
+                f"[green]Tracked[/] {outcome.report.matched_title} [dim](state: want)[/]."
+            )
         else:
             console.print(
                 "[yellow]Not tracked[/] — couldn't tell what this is "
                 "(unknown kind, or a resolvable title that pinned no canonical id)."
             )
+
+
+@dataclass(slots=True)
+class _RdOutcome:
+    """What one `rd` invocation resolved to: a report (rendered), whether it was captured, and —
+    on the capture path — an ambiguous candidate set to surface instead of auto-adding."""
+
+    report: RdReport | None
+    tracked: bool
+    ambiguous: tuple[tuple[MediaKind, Candidate], ...] = ()
+
+
+async def _run_rd(
+    name: str,
+    settings: Settings,
+    *,
+    kind_hint: MediaKind | None,
+    region: str | None,
+    season: int | None,
+    track: bool,
+    latest: bool,
+    want_year: int | None,
+    id_pick: dict[str, str] | None,
+) -> _RdOutcome:
+    """Drive a lookup and, on --track, the disambiguation gate before persisting.
+
+    Plain lookups and tech captures keep the old single-best-match behaviour; only a resolvable
+    --track goes through ``select_candidate`` so a name collision surfaces the list rather than
+    silently adding the wrong (or a duplicate) title.
+    """
+    if not track:
+        report = await lookup(name, settings, kind_hint=kind_hint, region=region, season=season)
+        return _RdOutcome(report=report, tracked=False)
+    # tech has no Tier-0 candidate list to disambiguate — capture it via the plain path.
+    if kind_hint is MediaKind.TECH:
+        report = await lookup(name, settings, kind_hint=kind_hint, region=region, season=season)
+        tracked = await _track_from_report(settings, name, report, season=season)
+        return _RdOutcome(report=report, tracked=tracked)
+
+    async with make_client() as client:
+        kinded = await capture_candidates(client, name, settings, kind_hint=kind_hint)
+        kind_of = {id(c): k for k, c in kinded}
+        pick = select_candidate(
+            [c for _, c in kinded], latest=latest, want_year=want_year, id_pick=id_pick
+        )
+        if pick.outcome == "ambiguous":
+            # too close to call — surface the list, persist nothing (force an explicit pick).
+            return _RdOutcome(
+                report=None,
+                tracked=False,
+                ambiguous=tuple((kind_of[id(c)], c) for c in pick.candidates),
+            )
+        if pick.outcome == "no_match" or pick.cand is None:
+            # nothing solid — same web-fallback report as a plain miss, not tracked.
+            report = await lookup(name, settings, kind_hint=kind_hint, region=region, season=season)
+            return _RdOutcome(report=report, tracked=False)
+        chosen = pick.cand
+        report = await report_for_candidate(
+            client, name, kind_of[id(chosen)], chosen, settings, season=season
+        )
+    tracked = await _track_from_report(settings, name, report, season=season)
+    return _RdOutcome(report=report, tracked=tracked)
+
+
+def _candidate_json(kind: MediaKind, c: Candidate) -> dict[str, object]:
+    """One ambiguous candidate as JSON for the /rd-add skill to render + re-pick from."""
+    return {
+        "kind": kind.value,
+        "id_key": c.id_key,
+        "canonical_id": c.canonical_id,
+        "title": c.title,
+        "year": c.year,
+        "score": c.score,
+    }
 
 
 async def _track_from_report(
@@ -265,19 +565,11 @@ async def _track_from_report(
         return False
     if matching.is_resolvable(report.kind) and not report.canonical:
         return False
-    # the show's matched name drives a clean "Show: Season N" title for a season capture
-    title = season_label(report.matched_title or name, season) if season is not None else name
     db = _db()
-    entity = Entity.create(
-        title,
-        report.kind,
-        external_ids=dict(report.canonical),
-        consumption_state=ConsumptionState.WANT,
-        season=season,
-    )
+    entity = _capture_entity(db, name, report, season)
     db.upsert_entity(entity)
     db.upsert_node(
-        Node(id=entity.id, node_kind=NodeKind.WORK, name=title, owned=True, external_ids={})
+        Node(id=entity.id, node_kind=NodeKind.WORK, name=entity.title, owned=True, external_ids={})
     )
     if report.canonical:  # only a pinned, resolvable entity has ids to pull dates / enrich from
         async with make_client() as client:
@@ -285,6 +577,44 @@ async def _track_from_report(
             await enrich_work(client, db, settings, entity)  # who/where/what
     db.close()
     return True
+
+
+def _capture_entity(db: Database, name: str, report: RdReport, season: int | None) -> Entity:
+    """The entity to upsert for a capture — reusing an existing one keyed by canonical id.
+
+    Dedup by the pinned id (not the title slug) so re-capturing the same work under a different
+    typed title ("Odyssey" vs "The Odyssey") updates the one row instead of forking a duplicate.
+    Season captures keep the title-slug id ("Show: Season N" is already unique per season, and one
+    show id spans every season), so they only fold in via the slug path. A brand-new capture is
+    titled from the *canonical* ``matched_title`` for a deterministic, collision-free slug.
+    """
+    assert report.kind is not None  # guaranteed by the caller's kind-None guard
+    base_title = report.matched_title or name
+    if season is None:
+        for id_key, value in report.canonical.items():
+            existing = db.find_entity_by_external_id(id_key, value)
+            if existing is not None:
+                state = (
+                    ConsumptionState.WANT
+                    if existing.consumption_state is ConsumptionState.UNSET
+                    else existing.consumption_state
+                )
+                return existing.model_copy(
+                    update={
+                        "external_ids": {**existing.external_ids, **report.canonical},
+                        "consumption_state": state,
+                    }
+                )
+        title = base_title
+    else:
+        title = season_label(base_title, season)
+    return Entity.create(
+        title,
+        report.kind,
+        external_ids=dict(report.canonical),
+        consumption_state=ConsumptionState.WANT,
+        season=season,
+    )
 
 
 def _render_report(r: RdReport) -> None:

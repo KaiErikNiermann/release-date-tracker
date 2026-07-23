@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Literal
 
 from release_tracker.config import Settings
@@ -503,6 +503,84 @@ def watched(
     rows = [r for r in _track_rows(db, today, settings, kind=kind) if r.state in _FINISHED]
     rows.sort(key=lambda r: r.pivot_when or date.min, reverse=True)
     return rows
+
+
+# --- batch-refresh support (target selection + a before/after date diff) ----------------------
+def refresh_targets(
+    db: Database,
+    today: date,
+    settings: Settings,
+    *,
+    kind: MediaKind | None = None,
+    state: ConsumptionState | None = None,
+    since: date | None = None,
+    until: date | None = None,
+    days: int | None = None,
+) -> list[Entity]:
+    """Tracked entities matching the `rdt refresh` filters — keyed by entity, never by title.
+
+    ``kind``/``state`` filter directly; ``since``/``until``/``days`` filter on the same display
+    *pivot* date ``upcoming`` sorts on (so "everything releasing in a window" means what the user
+    sees). An entity with no pivot date is excluded from any date-window filter.
+    """
+    dated = since is not None or until is not None or days is not None
+    out: list[Entity] = []
+    for e in db.iter_entities():
+        if kind is not None and e.kind is not kind:
+            continue
+        if state is not None and e.consumption_state is not state:
+            continue
+        if not dated:  # no date window: kind/state (or nothing) already decided it
+            out.append(e)
+            continue
+        pivot = _track_row(db, e, today, settings, False).pivot_when
+        if pivot is None:
+            continue
+        if since is not None and pivot < since:
+            continue
+        if until is not None and pivot > until:
+            continue
+        if days is not None and not (today <= pivot <= today + timedelta(days=days)):
+            continue
+        out.append(e)
+    return out
+
+
+@dataclass(frozen=True, slots=True)
+class DateChange:
+    """One channel's date moving between two refreshes (either side may be ``None``)."""
+
+    channel: str
+    region: str
+    old: date | None
+    new: date | None
+    new_confirmed: bool
+
+
+def diff_estimates(
+    before: Iterable[BestEstimate], after: Iterable[BestEstimate]
+) -> list[DateChange]:
+    """The per-channel date changes between two best-estimate snapshots (soonest region per
+    channel, matching the display pivot). Only channels whose date actually moved are returned."""
+    b = {e.channel: e for e in _collapse_estimates(before)}
+    a = {e.channel: e for e in _collapse_estimates(after)}
+    out: list[DateChange] = []
+    for channel in sorted(set(b) | set(a), key=lambda c: c.value):
+        bo, ao = b.get(channel), a.get(channel)
+        old = bo.release_date if bo else None
+        new = ao.release_date if ao else None
+        if old != new:
+            side = ao or bo
+            out.append(
+                DateChange(
+                    channel=channel.value,
+                    region=side.region if side else "WW",
+                    old=old,
+                    new=new,
+                    new_confirmed=bool(ao and ao.certainty is Certainty.CONFIRMED),
+                )
+            )
+    return out
 
 
 def _earliest_date(db: Database, entity_id: str) -> date | None:

@@ -19,6 +19,7 @@ Every dated claim is annotated confirmed/speculative with a rough confidence.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Literal
@@ -67,6 +68,11 @@ log = get_logger("lookup")
 _DETECT_KINDS: tuple[MediaKind, ...] = (MediaKind.MOVIE, MediaKind.TV, MediaKind.GAME)
 # below this title-similarity we don't trust the match — caller should web-search.
 _MATCH_FLOOR = 0.4
+# how far the top candidate's score must lead the runner-up to auto-pick it on the capture
+# (``--track``) path. Within this band the matches are "too close to call" — we refuse to
+# guess and surface the list so the user picks (via --latest / --year / --id). Plain `/rd`
+# ignores this and always takes the top match; the gate only guards persistence.
+_DOMINANCE = 0.15
 # a clear tech name wins over a media match weaker than this (e.g. "RTX 5090"
 # fuzzily hitting some film should still be treated as a GPU).
 _TECH_OVERRIDE = 0.85
@@ -205,109 +211,127 @@ async def lookup(
             )
 
         kind, cand = picked
-        # keep the raw query as the title (so "Show: Season 5" still resolves the
-        # season) but pin the canonical id we just chose so pullers don't re-search.
-        # An explicit `season` (the `--season` path) is authoritative over title parsing.
-        entity = Entity.create(
-            query, kind, external_ids={cand.id_key: cand.canonical_id}, season=season
-        )
+        return await report_for_candidate(client, query, kind, cand, settings, season=season)
 
-        results: list[SourceResult] = []
-        for src in sources_for(kind):
-            try:
-                results.append(await src.pull(client, entity, settings))
-            except Exception as exc:
-                log.warning("lookup.pull_error", source=src.name, error=str(exc))
-        observations = [obs for r in results for obs in r.observations]
-        canonical: dict[str, str] = {cand.id_key: cand.canonical_id}
-        for r in results:
-            canonical.update(r.external_ids)
 
-        tmdb_id = canonical.get("tmdb")
-        predicted: str | None = None
-        match kind:
-            case MediaKind.MOVIE:
-                claims, notes, streaming, predicted = await _movie_claims(
-                    client, settings, tmdb_id, observations
-                )
-                price = None
-            case MediaKind.TV:
-                claims, streaming, notes = await _tv_claims(client, settings, tmdb_id, observations)
-                price = None
-            case _:  # game / tech
-                claims, price, notes = await _game_claims(
-                    client, settings, canonical.get("igdb"), observations
-                )
-                streaming = ()
+async def report_for_candidate(
+    client: httpx.AsyncClient,
+    query: str,
+    kind: MediaKind,
+    cand: Candidate,
+    settings: Settings,
+    *,
+    season: int | None = None,
+) -> RdReport:
+    """Build the full dated report for an already-chosen (kind, candidate).
 
-        # JustWatch (film/TV) + When To Stream (movies): fetched concurrently. JustWatch gives the
-        # global-earliest real VOD date + live flatrate homes; When To Stream corroborates the US
-        # digital window and adds the predicted SVOD-drop date + service.
-        avail: JustWatchAvailability | None = None
-        wts: WhenToStreamHints | None = None
-        if kind in (MediaKind.MOVIE, MediaKind.TV):
-            # JustWatch offers are *show-level*, not per-season: on a specific-season lookup they'd
-            # surface the earliest VOD across the whole series (usually S1's), which can't answer
-            # "when does *this* season drop digitally". Skip the scan and say so, don't mislead.
-            jw_season_blocked = season is not None
-            jw_task = (
-                justwatch.availability(
-                    client, cand.title, kind, countries=settings.justwatch_regions, year=cand.year
-                )
-                if settings.justwatch_enabled and not jw_season_blocked
-                else _none()
+    Split out of :func:`lookup` so the capture path can pick a candidate explicitly
+    (``--latest`` / ``--year`` / ``--id`` / a disambiguation choice) and still get the
+    identical Tier-0 + JustWatch + WhenToStream report without re-running the search.
+    """
+    # keep the raw query as the title (so "Show: Season 5" still resolves the
+    # season) but pin the canonical id we just chose so pullers don't re-search.
+    # An explicit `season` (the `--season` path) is authoritative over title parsing.
+    entity = Entity.create(
+        query, kind, external_ids={cand.id_key: cand.canonical_id}, season=season
+    )
+
+    results: list[SourceResult] = []
+    for src in sources_for(kind):
+        try:
+            results.append(await src.pull(client, entity, settings))
+        except Exception as exc:
+            log.warning("lookup.pull_error", source=src.name, error=str(exc))
+    observations = [obs for r in results for obs in r.observations]
+    canonical: dict[str, str] = {cand.id_key: cand.canonical_id}
+    for r in results:
+        canonical.update(r.external_ids)
+
+    tmdb_id = canonical.get("tmdb")
+    predicted: str | None = None
+    match kind:
+        case MediaKind.MOVIE:
+            claims, notes, streaming, predicted = await _movie_claims(
+                client, settings, tmdb_id, observations
             )
-            wts_task = (
-                wts_hints(client, cand.title, kind=kind, year=cand.year)
-                if settings.whentostream_enabled
-                else _none()
+            price = None
+        case MediaKind.TV:
+            claims, streaming, notes = await _tv_claims(client, settings, tmdb_id, observations)
+            price = None
+        case _:  # game / tech
+            claims, price, notes = await _game_claims(
+                client, settings, canonical.get("igdb"), observations
             )
-            avail, wts = await asyncio.gather(jw_task, wts_task)
-            if jw_season_blocked:
-                notes = (
-                    *notes,
-                    "JustWatch offers are show-level; skipped for a season-specific "
-                    "lookup (they'd report the series' earliest VOD, not this season's).",
-                )
-            year_reason = justwatch_year_mismatch(avail, cand.year) if avail is not None else None
-            if avail is not None and year_reason is not None:
-                # the matched title's year is implausible for this film — a same-name collision.
-                note = f"JustWatch match discarded: {year_reason} — likely a wrong title."
-                notes = (*notes, note)
-                avail = None
-            if avail is not None and justwatch_predates_theatrical(avail, observations):
-                # a real VOD release can't precede the in-cinema run — this is a wrong-title match
-                # (a same-named title already on digital). Drop the offer block, don't fold it.
-                notes = (*notes, _collision_note(avail, observations))
-                avail = None
-            if avail is not None:
-                claims, streaming, predicted, extra = _merge_justwatch(
-                    list(claims), streaming, predicted, avail
-                )
-                notes = (*notes, *extra)
-            if wts is not None:
-                claims, extra = _merge_whentostream(list(claims), wts)
-                notes = (*notes, *extra)
+            streaming = ()
 
-        return RdReport(
-            query=query,
-            found=bool(claims),
-            kind=kind,
-            matched_title=cand.title,
-            url=cand.url,
-            canonical=canonical,
-            claims=tuple(claims),
-            streaming=streaming,
-            predicted_platform=predicted,
-            price=price,
-            notes=tuple(notes),
-            # matched the title but no dates surfaced — same gap a manual search would fill
-            web_info=None if claims else await instant_answer(client, query),
-            # always pin the Wikipedia page; mine its facets only when sources were sparse
-            wiki_hints=await wiki_hints(client, query, want_facets=not claims),
-            availability=avail,
-            whentostream=wts,
+    # JustWatch (film/TV) + When To Stream (movies): fetched concurrently. JustWatch gives the
+    # global-earliest real VOD date + live flatrate homes; When To Stream corroborates the US
+    # digital window and adds the predicted SVOD-drop date + service.
+    avail: JustWatchAvailability | None = None
+    wts: WhenToStreamHints | None = None
+    if kind in (MediaKind.MOVIE, MediaKind.TV):
+        # JustWatch offers are *show-level*, not per-season: on a specific-season lookup they'd
+        # surface the earliest VOD across the whole series (usually S1's), which can't answer
+        # "when does *this* season drop digitally". Skip the scan and say so, don't mislead.
+        jw_season_blocked = season is not None
+        jw_task = (
+            justwatch.availability(
+                client, cand.title, kind, countries=settings.justwatch_regions, year=cand.year
+            )
+            if settings.justwatch_enabled and not jw_season_blocked
+            else _none()
         )
+        wts_task = (
+            wts_hints(client, cand.title, kind=kind, year=cand.year)
+            if settings.whentostream_enabled
+            else _none()
+        )
+        avail, wts = await asyncio.gather(jw_task, wts_task)
+        if jw_season_blocked:
+            notes = (
+                *notes,
+                "JustWatch offers are show-level; skipped for a season-specific "
+                "lookup (they'd report the series' earliest VOD, not this season's).",
+            )
+        year_reason = justwatch_year_mismatch(avail, cand.year) if avail is not None else None
+        if avail is not None and year_reason is not None:
+            # the matched title's year is implausible for this film — a same-name collision.
+            note = f"JustWatch match discarded: {year_reason} — likely a wrong title."
+            notes = (*notes, note)
+            avail = None
+        if avail is not None and justwatch_predates_theatrical(avail, observations):
+            # a real VOD release can't precede the in-cinema run — this is a wrong-title match
+            # (a same-named title already on digital). Drop the offer block, don't fold it.
+            notes = (*notes, _collision_note(avail, observations))
+            avail = None
+        if avail is not None:
+            claims, streaming, predicted, extra = _merge_justwatch(
+                list(claims), streaming, predicted, avail
+            )
+            notes = (*notes, *extra)
+        if wts is not None:
+            claims, extra = _merge_whentostream(list(claims), wts)
+            notes = (*notes, *extra)
+
+    return RdReport(
+        query=query,
+        found=bool(claims),
+        kind=kind,
+        matched_title=cand.title,
+        url=cand.url,
+        canonical=canonical,
+        claims=tuple(claims),
+        streaming=streaming,
+        predicted_platform=predicted,
+        price=price,
+        notes=tuple(notes),
+        # matched the title but no dates surfaced — same gap a manual search would fill
+        web_info=None if claims else await instant_answer(client, query),
+        # always pin the Wikipedia page; mine its facets only when sources were sparse
+        wiki_hints=await wiki_hints(client, query, want_facets=not claims),
+        availability=avail,
+        whentostream=wts,
+    )
 
 
 # --- candidate selection --------------------------------------------------
@@ -340,6 +364,108 @@ async def _detect(
     kind, cand = best
     cand.score = best_key[0]
     return kind, cand
+
+
+# --- disambiguation (the /rd-add capture gate) ---------------------------
+CandidateOutcome = Literal["picked", "ambiguous", "no_match"]
+
+
+@dataclass(slots=True, frozen=True)
+class CandidatePick:
+    """Outcome of narrowing a candidate list for capture: pick one, refuse, or nothing fit."""
+
+    outcome: CandidateOutcome
+    cand: Candidate | None = None
+    candidates: tuple[Candidate, ...] = ()  # populated on 'ambiguous' — the list to show
+
+
+def _latest_anchor(c: Candidate) -> date | None:
+    """The date to order 'latest' on: the full release date, else Jan-1 of the year, else None."""
+    if c.release_date is not None:
+        return c.release_date
+    return date(c.year, 1, 1) if c.year is not None else None
+
+
+def _pick_latest(pool: Sequence[Candidate]) -> Candidate | None:
+    """Newest by date (score breaks a same-date tie). Undated candidates are ignored while any
+    dated one exists — so 'latest' returns a real release, falling back to undated only when the
+    whole pool is undated (handled by the caller, which then runs the dominance test)."""
+    dated = [(a, c) for c in pool if (a := _latest_anchor(c)) is not None]
+    if not dated:
+        return None
+    return max(dated, key=lambda ac: (ac[0], ac[1].score))[1]
+
+
+def select_candidate(
+    cands: Sequence[Candidate],
+    *,
+    latest: bool = False,
+    want_year: int | None = None,
+    id_pick: dict[str, str] | None = None,
+    floor: float = _MATCH_FLOOR,
+    dominance: float = _DOMINANCE,
+) -> CandidatePick:
+    """Choose one candidate for capture, or refuse and surface the list.
+
+    Authority order: an explicit ``id_pick`` (exact canonical id) → ``want_year`` narrowing →
+    ``latest`` (newest dated) → a dominance test on scores. Explicit selectors are user-directed
+    and never return ``ambiguous``; only the fall-through dominance path does (the "too close to
+    call, you pick" case). ``no_match`` means nothing cleared the floor or satisfied a selector.
+
+    ``want_year``/``latest`` pick among the **contenders** — matches within ``dominance`` of the
+    top score — not everything above the floor. Otherwise "latest" would happily grab a newer but
+    *weak* match (a same-year promo/featurette whose title merely contains the query) over the real
+    film. The floor still gates the whole thing; the band just keeps a narrowing selector honest.
+    """
+    # an explicit id is fully user-directed — scan the whole list; the floor doesn't apply.
+    if id_pick:
+        for c in cands:
+            if c.canonical_id == id_pick.get(c.id_key):
+                return CandidatePick("picked", cand=c)
+        return CandidatePick("no_match")
+
+    pool = [c for c in cands if c.score >= floor]
+    if not pool:
+        return CandidatePick("no_match")
+    top = max(c.score for c in pool)
+    contenders = [c for c in pool if c.score >= top - dominance]  # the real, close-scoring matches
+
+    if want_year is not None:
+        contenders = [c for c in contenders if c.year == want_year]
+        if not contenders:
+            return CandidatePick("no_match")
+
+    if latest and (chosen := _pick_latest(contenders)) is not None:
+        return CandidatePick("picked", cand=chosen)
+
+    # a single contender means the top clearly leads (everything else is >dominance below it) →
+    # auto-pick; two or more close matches are genuinely ambiguous → surface them.
+    ranked = sorted(contenders, key=lambda c: c.score, reverse=True)
+    if len(ranked) == 1:
+        return CandidatePick("picked", cand=ranked[0])
+    return CandidatePick("ambiguous", candidates=tuple(ranked))
+
+
+async def capture_candidates(
+    client: httpx.AsyncClient,
+    query: str,
+    settings: Settings,
+    *,
+    kind_hint: MediaKind | None,
+    limit: int = 8,
+) -> list[tuple[MediaKind, Candidate]]:
+    """Ranked ``(kind, candidate)`` matches for the capture path: one kind when hinted, else a
+    cross-kind sweep. Mirrors what :func:`lookup` searches but returns the whole list (not just
+    the winner) so the caller can disambiguate before persisting."""
+    from release_tracker.matching import candidates_for
+
+    kinds = (kind_hint,) if kind_hint is not None else _DETECT_KINDS
+    out: list[tuple[MediaKind, Candidate]] = []
+    for kind in kinds:
+        found = await candidates_for(client, Entity.create(query, kind), settings, limit=limit)
+        out.extend((kind, c) for c in found)
+    out.sort(key=lambda kc: kc[1].score, reverse=True)
+    return out
 
 
 # --- tech (search-first, no Tier-0 DB) -----------------------------------

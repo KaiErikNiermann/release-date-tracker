@@ -315,6 +315,20 @@ class Database:
         )
         return [_row_to_entity(r) for r in rows]
 
+    def find_entity_by_external_id(self, id_key: str, value: str) -> Entity | None:
+        """The entity carrying a given canonical id (e.g. ``tmdb`` = ``1368337``), or None.
+
+        Keyed on the pinned id rather than the title slug, so re-capturing the *same* work under
+        a different typed title (``"Odyssey"`` vs ``"The Odyssey"``) updates the one entity in
+        place instead of minting a duplicate. Returns the oldest match if two ever share an id.
+        """
+        row = self._conn.execute(
+            "SELECT * FROM entities WHERE json_extract(external_ids, ?) = ? "
+            "ORDER BY created_at LIMIT 1",
+            (f"$.{id_key}", value),
+        ).fetchone()
+        return _row_to_entity(row) if row else None
+
     def observation_dates(self, entity_id: str) -> list[date]:
         """All known release dates for an entity (for released/upcoming + year hints)."""
         rows = self._conn.execute(

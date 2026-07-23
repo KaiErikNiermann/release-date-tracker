@@ -267,7 +267,12 @@ class TmdbSource:
         for r in cast("list[dict[str, Any]]", payload.get("results", []))[:limit]:
             name = str(r.get("title") or r.get("name") or "")
             date_str = str(r.get("release_date") or r.get("first_air_date") or "")
-            year = int(date_str[:4]) if date_str[:4].isdigit() else None
+            rel_date = _parse_tmdb_date(date_str)
+            year = (
+                rel_date.year
+                if rel_date
+                else (int(date_str[:4]) if date_str[:4].isdigit() else None)
+            )
             overview = str(r.get("overview") or "")
             pop = r.get("popularity")
             out.append(
@@ -277,6 +282,7 @@ class TmdbSource:
                     canonical_id=str(r["id"]),
                     title=name,
                     year=year,
+                    release_date=rel_date,
                     extra=(overview[:70] + "…") if len(overview) > 70 else overview,
                     url=f"https://www.themoviedb.org/{media}/{r['id']}",
                     popularity=float(pop) if isinstance(pop, (int, float)) else 0.0,

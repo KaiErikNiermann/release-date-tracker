@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Protocol, runtime_checkable
 
 import httpx
@@ -64,6 +65,10 @@ class Candidate:
     canonical_id: str
     title: str
     year: int | None = None
+    # the full release/air/first-release date when the search response carried one — used to
+    # pick "the latest match" at day granularity (``year`` alone can't separate two same-year
+    # candidates). ``year`` stays the display/scoring field; this is None when only a year is known.
+    release_date: date | None = None
     extra: str = ""  # disambiguators: media type, platforms, slug...
     url: str | None = None
     score: float = 0.0  # filled by the matching layer

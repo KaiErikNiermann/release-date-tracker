@@ -9,18 +9,34 @@ and never loses completed work.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 import httpx
 
 from release_tracker.config import Settings
 from release_tracker.db import Database
 from release_tracker.logging import get_logger
-from release_tracker.models import Entity
-from release_tracker.sources import sources_for
+from release_tracker.models import (
+    BestEstimate,
+    Certainty,
+    DatePrecision,
+    Entity,
+    MediaKind,
+    ReleaseChannel,
+    ReleaseObservation,
+    SourceTier,
+)
+from release_tracker.resolve import best_estimates
+from release_tracker.sources import justwatch, sources_for
 from release_tracker.sources.base import make_client
+from release_tracker.sources.justwatch import JustWatchAvailability
 
 log = get_logger("pipeline")
+
+# JustWatch offers are film/TV retailer ground truth; a persisted VOD row is a confirmed digital
+# date under a provider of its own, so a plain `pull` (which only clears API_PROVIDERS) leaves it.
+_JUSTWATCH_PROVIDER = "justwatch"
 
 
 @dataclass(slots=True)
@@ -28,6 +44,17 @@ class PullStats:
     entities: int = 0
     observations: int = 0
     errors: int = 0
+
+
+@dataclass(slots=True)
+class RefreshResult:
+    """Before/after best-estimates for one refreshed entity (or the error that stopped it)."""
+
+    entity_id: str
+    title: str
+    before: list[BestEstimate] = field(default_factory=list[BestEstimate])
+    after: list[BestEstimate] = field(default_factory=list[BestEstimate])
+    error: str | None = None
 
 
 async def _pull_entity(
@@ -107,3 +134,115 @@ async def pull_all(
         errors=stats.errors,
     )
     return stats
+
+
+# --- batch refresh (dates keyed by canonical id, full JustWatch fidelity) --------------------
+def persist_availability(db: Database, entity: Entity, avail: JustWatchAvailability) -> int:
+    """Persist JustWatch's earliest confirmed VOD as a ``digital`` observation (0/1 written).
+
+    JustWatch is display-only in the ``rd`` lookup path; ``refresh`` writes it so a confirmed
+    digital date (e.g. a store's ``availableFromTime``) survives into ``upcoming``/``available``.
+    Filed under its own ``justwatch`` provider — a plain ``pull`` only clears the live-API
+    providers, so this row (like a hand-authored ``manual`` one) is left intact by a later pull.
+    Re-persisting first drops the prior justwatch digital row so a moved date can't leave a ghost.
+    """
+    vod = avail.earliest_vod
+    if vod is None:
+        return 0
+    db.delete_channel_observations(entity.id, _JUSTWATCH_PROVIDER, ReleaseChannel.DIGITAL)
+    where = f"{avail.earliest_vod_platform} ({avail.earliest_vod_country})"
+    db.upsert_observation(
+        ReleaseObservation(
+            entity_id=entity.id,
+            channel=ReleaseChannel.DIGITAL,
+            region=avail.earliest_vod_country or "WW",
+            release_date=vod,
+            precision=DatePrecision.EXACT,
+            certainty=Certainty.CONFIRMED,
+            source_tier=SourceTier.FIRST_PARTY_STORE,
+            provider=_JUSTWATCH_PROVIDER,
+            source_name=f"JustWatch · {avail.earliest_vod_platform}",
+            source_quote=where,
+            confidence=0.95,
+            fetched_at=datetime.now(UTC),
+        )
+    )
+    return 1
+
+
+async def _refresh_offers(
+    client: httpx.AsyncClient, db: Database, settings: Settings, entity: Entity
+) -> None:
+    """Run the JustWatch scan for one entity and persist its earliest VOD, guarded against
+    wrong-title matches (the year-sanity / can't-predate-theatrical checks ``rd`` uses)."""
+    # deferred imports: the guards live in lookup, which pulls a heavy dependency graph.
+    from release_tracker.lookup import justwatch_predates_theatrical, justwatch_year_mismatch
+    from release_tracker.matching import year_hint
+
+    if not settings.justwatch_enabled or entity.kind not in (MediaKind.MOVIE, MediaKind.TV):
+        return
+    if entity.season is not None:  # show-level offers can't answer a specific season's digital date
+        return
+    obs = list(db.iter_observations(entity.id))
+    hint = year_hint([o.release_date for o in obs if o.release_date], datetime.now(UTC).date())
+    avail = await justwatch.availability(
+        client, entity.title, entity.kind, countries=settings.justwatch_regions, year=hint
+    )
+    if avail is None or justwatch_year_mismatch(avail, hint) is not None:
+        return
+    if justwatch_predates_theatrical(avail, obs):
+        return
+    persist_availability(db, entity, avail)
+
+
+async def _refresh_one(
+    client: httpx.AsyncClient,
+    db: Database,
+    settings: Settings,
+    entity: Entity,
+    *,
+    offers: bool,
+    enrich: bool,
+    sem: asyncio.Semaphore,
+) -> RefreshResult:
+    """Refresh one entity in place (Tier-0 + optional JustWatch + optional enrich), returning the
+    before/after best-estimates. Each stage acquires ``sem`` on its own (never nested), so the
+    batch stays bounded and one entity's failure is isolated to its own result."""
+    before = list(best_estimates(db.iter_observations(entity.id)))
+    try:
+        await _pull_entity(client, db, entity, settings, sem, PullStats())  # acquires sem itself
+        if offers:
+            async with sem:
+                await _refresh_offers(client, db, settings, entity)
+        if enrich:
+            from release_tracker.enrich import enrich_work
+
+            async with sem:
+                await enrich_work(client, db, settings, entity)
+    except Exception as exc:  # one bad entity must not abort the batch
+        log.error("pipeline.refresh_error", entity=entity.title, error=str(exc))
+        return RefreshResult(entity.id, entity.title, before, before, error=str(exc))
+    after = list(best_estimates(db.iter_observations(entity.id)))
+    return RefreshResult(entity.id, entity.title, before, after)
+
+
+async def refresh_entities(
+    db: Database,
+    settings: Settings,
+    entities: list[Entity],
+    *,
+    offers: bool = True,
+    enrich: bool = False,
+    concurrency: int = 6,
+) -> list[RefreshResult]:
+    """Refresh a set of already-tracked entities by their pinned canonical ids (no search, so no
+    name collisions). Reuses the single-entity pull path; one client + bounded concurrency."""
+    sem = asyncio.Semaphore(concurrency)
+    async with make_client() as client:
+        results = await asyncio.gather(
+            *(
+                _refresh_one(client, db, settings, e, offers=offers, enrich=enrich, sem=sem)
+                for e in entities
+            )
+        )
+    return list(results)

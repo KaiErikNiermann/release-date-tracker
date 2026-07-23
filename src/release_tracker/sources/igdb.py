@@ -394,6 +394,7 @@ class IgdbSource:
                     canonical_id=str(r["id"]),
                     title=str(r.get("name", "")),
                     year=year,
+                    release_date=rel_date,
                     extra=abbrevs,
                     url=f"https://www.igdb.com/games/{r.get('slug', r['id'])}",
                 )
