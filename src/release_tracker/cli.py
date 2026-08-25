@@ -27,7 +27,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from release_tracker import matching, views
+from release_tracker import matching, query, views
 from release_tracker.artists import (
     ArtistReport,
     add_artist,
@@ -53,6 +53,7 @@ from release_tracker.lookup import (
 from release_tracker.models import (
     ArtistLink,
     BestEstimate,
+    Bucket,
     Certainty,
     Condition,
     ConsumptionState,
@@ -857,8 +858,14 @@ def enrich(
     db.close()
 
 
-@app.command()
+@app.command(
+    context_settings={"ignore_unknown_options": True},  # so `-tag:horror` is a query, not `-t`
+)
 def upcoming(
+    expr: Annotated[
+        str | None,
+        typer.Argument(metavar="[QUERY]", help="filter, e.g. 'tag:horror kind:movie'"),
+    ] = None,
     days: Annotated[int | None, typer.Option(help="only releases within N days")] = None,
     kind: Annotated[str | None, typer.Option(help="filter to a MediaKind")] = None,
 ) -> None:
@@ -869,11 +876,17 @@ def upcoming(
     kind_filter = MediaKind(kind) if kind else None
     rows = views.upcoming(db, _today(), settings, days=days, kind=kind_filter)
     db.close()
-    _render_upcoming(rows, days)
+    _render_upcoming(_apply_filter(rows, expr), days)
 
 
-@app.command()
+@app.command(
+    context_settings={"ignore_unknown_options": True},  # so `-tag:horror` is a query, not `-t`
+)
 def available(
+    expr: Annotated[
+        str | None,
+        typer.Argument(metavar="[QUERY]", help="filter, e.g. 'tag:horror kind:movie'"),
+    ] = None,
     kind: Annotated[str | None, typer.Option(help="filter to a MediaKind")] = None,
 ) -> None:
     """Things out now that you haven't finished (want/watching), newest first."""
@@ -883,11 +896,17 @@ def available(
     kind_filter = MediaKind(kind) if kind else None
     rows = views.available(db, _today(), settings, kind=kind_filter)
     db.close()
-    _render_available(rows)
+    _render_available(_apply_filter(rows, expr))
 
 
-@app.command()
+@app.command(
+    context_settings={"ignore_unknown_options": True},  # so `-tag:horror` is a query, not `-t`
+)
 def watched(
+    expr: Annotated[
+        str | None,
+        typer.Argument(metavar="[QUERY]", help="filter, e.g. 'tag:horror kind:movie'"),
+    ] = None,
     kind: Annotated[str | None, typer.Option(help="filter to a MediaKind")] = None,
 ) -> None:
     """Things you're done with (watched/dropped), most recently released first."""
@@ -897,7 +916,31 @@ def watched(
     kind_filter = MediaKind(kind) if kind else None
     rows = views.watched(db, _today(), settings, kind=kind_filter)
     db.close()
-    _render_watched(rows)
+    _render_watched(_apply_filter(rows, expr))
+
+
+@app.command(
+    context_settings={"ignore_unknown_options": True},  # so `-tag:horror` is a query, not `-t`
+)
+def find(
+    expr: Annotated[
+        str,
+        typer.Argument(metavar="QUERY", help="e.g. 'cast:\"Alan Ritchson\" is:available'"),
+    ],
+) -> None:
+    """Search every tracked work with the query language, whatever bucket it is in.
+
+    The same string the TUI's query bar takes — `rdt find` is simply the CLI's window
+    onto it, so the two can never disagree about what a query means.
+    """
+    configure_logging()
+    settings = get_settings()
+    db = _db()
+    rows = views.track_rows(db, _today(), settings)
+    db.close()
+    matched = _apply_filter(rows, expr)
+    matched.sort(key=lambda r: r.pivot_when or date.max, reverse=True)
+    _render_find(matched, expr)
 
 
 @app.command()
@@ -2253,6 +2296,55 @@ def _watched_state_label(state: ConsumptionState) -> str:
             return "[yellow]skipped[/]"
         case _:
             return state.value
+
+
+def _apply_filter(rows: list[views.TrackRow], expr: str | None) -> list[views.TrackRow]:
+    """Narrow rows with the shared query language (see `release_tracker.query`)."""
+    if not expr:
+        return rows
+    parsed = query.parse(expr)
+    if parsed.unknown_fields:
+        console.print(
+            f"[dim]note: unknown field(s) searched as text: {', '.join(parsed.unknown_fields)}[/]"
+        )
+    return query.filter_rows(parsed, rows)
+
+
+def _bucket_label(bucket: Bucket) -> str:
+    match bucket:
+        case Bucket.AVAILABLE:
+            return "[cyan]available[/]"
+        case Bucket.UPCOMING:
+            return "[orange1]upcoming[/]"
+        case _:
+            return "[dim]watched[/]"
+
+
+def _render_find(rows: list[views.TrackRow], expr: str) -> None:
+    table = Table(title=f"Find · {expr}", show_lines=False)
+    table.add_column("Date", min_width=10, no_wrap=True)
+    table.add_column("⟳", width=1, no_wrap=True)
+    table.add_column("Title", min_width=18, max_width=32, no_wrap=True, overflow="ellipsis")
+    table.add_column("Kind", min_width=5, no_wrap=True)
+    table.add_column("Bucket", min_width=9, no_wrap=True)
+    table.add_column("State", min_width=8, no_wrap=True)
+    _wcw(table)
+    for r in rows:
+        table.add_row(
+            r.pivot_when.isoformat() if r.pivot_when else "[dim]—[/]",
+            _fresh_dot(r.freshness),
+            _title_cell(r),
+            r.kind.value,
+            _bucket_label(r.bucket),
+            r.state.value,
+            *_wcw_cells(r),
+        )
+    console.print(table)
+    console.print(
+        f"[dim]{len(rows)} match{'' if len(rows) == 1 else 'es'}[/]"
+        if rows
+        else "[dim]No matches. Fields: `rdt find --help`, or try a bare title substring.[/]"
+    )
 
 
 def _render_watched(rows: list[views.TrackRow]) -> None:
