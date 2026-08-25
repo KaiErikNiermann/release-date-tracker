@@ -2,15 +2,21 @@ Screen {
     background: $surface;
 }
 
+/* Laid out top-to-bottom by the screen's default vertical layout — NOT docked.
+   Docking several widgets to the same edge overlaps them rather than stacking them,
+   which previously painted the hint line straight over the query text. */
 #query {
-    dock: top;
+    height: 1;
     border: none;
     background: $panel;
     padding: 0 1;
 }
 
+#query:focus {
+    background: $panel-lighten-1;
+}
+
 #hint {
-    dock: top;
     height: 1;
     padding: 0 1;
     color: $text-muted;
@@ -23,7 +29,6 @@ Screen {
 }
 
 #status {
-    dock: bottom;
     height: 1;
     padding: 0 1;
     color: $text-muted;

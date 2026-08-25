@@ -12,7 +12,6 @@ from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import Vertical
 from textual.screen import Screen
 from textual.widgets import DataTable, Input, Static
 
@@ -66,8 +65,7 @@ class BrowseScreen(Screen[None]):
     def compose(self) -> ComposeResult:
         yield Input(placeholder="filter — e.g. kind:movie genre:horror year:2026", id="query")
         yield Static("", id="hint")
-        with Vertical():
-            yield DataTable[Text](id="rows")
+        yield DataTable[Text](id="rows")
         yield Static("", id="status")
 
     def on_mount(self) -> None:
@@ -75,9 +73,8 @@ class BrowseScreen(Screen[None]):
         table.cursor_type = "row"
         table.zebra_stripes = True
         table.add_columns(*_COLUMNS)
-        bar = self.query_one("#query", Input)
-        bar.value = with_bucket("", Bucket.AVAILABLE)
-        bar.focus()
+        self.set_query(f"{with_bucket('', Bucket.AVAILABLE)} ")
+        self.query_one("#query", Input).focus()
         self.refresh_rows()
 
     # --- filtering ---------------------------------------------------------------
@@ -135,9 +132,14 @@ class BrowseScreen(Screen[None]):
         self.query_one("#status", Static).update(Text.from_markup("  ·  ".join(parts)))
 
     # --- actions -----------------------------------------------------------------
-    def action_bucket(self, name: str) -> None:
+    def set_query(self, text: str) -> None:
+        """Set the query and park the caret at the end, so the next keystroke continues it."""
         bar = self.query_one("#query", Input)
-        bar.value = with_bucket(bar.value, Bucket(name))
+        bar.value = text
+        bar.cursor_position = len(text)
+
+    def action_bucket(self, name: str) -> None:
+        self.set_query(with_bucket(self.query_one("#query", Input).value, Bucket(name)))
 
     def action_cursor(self, delta: int) -> None:
         table = self.table
@@ -152,7 +154,7 @@ class BrowseScreen(Screen[None]):
         if self.screen.focused is not bar:
             bar.focus()
         elif bar.value:
-            bar.value = ""
+            self.set_query("")
 
     def action_complete(self) -> None:
         """Accept the top completion, splicing it into the token under the caret."""

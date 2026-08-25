@@ -9,6 +9,7 @@ do (the state-toggle flush in particular).
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
@@ -127,12 +128,9 @@ async def test_boots_on_available_and_shows_only_that_bucket(
     app = _app(path)
     async with app.run_test(size=(150, 40)) as pilot:
         await pilot.pause()
-        assert app.screen.query_one("#query", Input).value == "is:available"
-        assert sorted(_titles(app)) == ["Sinners", "The Long Walk", "Weapons"] or sorted(
-            _titles(app)
-        ) == ["Sinners", "Weapons"]
-        # The Long Walk is watched, so it must NOT be in the available bucket.
-        assert "The Long Walk" not in _titles(app)
+        assert app.screen.query_one("#query", Input).value.strip() == "is:available"
+        # The Long Walk is watched, so it belongs to the watched bucket, not available.
+        assert sorted(_titles(app)) == ["Sinners", "Weapons"]
         assert isinstance(app.screen.focused, Input)  # just start typing
 
 
@@ -282,3 +280,53 @@ def test_with_bucket_is_idempotent_and_preserves_other_terms() -> None:
     assert with_bucket("is:available x", Bucket.WATCHED) == "is:watched x"
     twice = with_bucket(with_bucket("tag:horror", Bucket.UPCOMING), Bucket.UPCOMING)
     assert twice == "is:upcoming tag:horror"
+
+
+def _painted(app: RdtApp) -> list[str]:
+    """Text actually rendered to the screen, as opposed to text a widget merely holds."""
+    import re
+
+    return re.findall(r">([^<>]{2,})</text>", app.export_screenshot())
+
+
+async def test_query_text_is_actually_visible(app_db: tuple[Path, dict[str, Entity]]) -> None:
+    """Regression: #query and #hint were both `dock: top`, so the hint painted over the
+    query text. Docking several widgets to one edge overlaps them; it does not stack them.
+    Every other test passed throughout, because they all asserted data and never pixels."""
+    path, _ = app_db
+    app = _app(path)
+    async with app.run_test(size=(120, 24)) as pilot:
+        await pilot.pause()
+        bar = app.screen.query_one("#query", Input)
+        bar.focus()
+        await pilot.press(*"genre:horror")
+        await pilot.pause()
+        assert any("genre:horror" in span for span in _painted(app))
+
+
+async def test_header_widgets_do_not_overlap(app_db: tuple[Path, dict[str, Entity]]) -> None:
+    path, _ = app_db
+    app = _app(path)
+    async with app.run_test(size=(120, 24)) as pilot:
+        await pilot.pause()
+        regions = [
+            app.screen.query_one(sel).region for sel in ("#query", "#hint", "#rows", "#status")
+        ]
+        for first, second in pairwise(regions):
+            assert first.y + first.height <= second.y, f"{first} overlaps {second}"
+
+
+async def test_typing_continues_the_prefilled_query(
+    app_db: tuple[Path, dict[str, Entity]],
+) -> None:
+    """The bar starts pinned to a bucket, so the caret must sit at the end of it."""
+    path, _ = app_db
+    app = _app(path)
+    async with app.run_test(size=(120, 24)) as pilot:
+        await pilot.pause()
+        bar = app.screen.query_one("#query", Input)
+        assert bar.cursor_position == len(bar.value)
+        bar.focus()
+        await pilot.press(*"genre:horror")
+        await pilot.pause()
+        assert bar.value == "is:available genre:horror"
