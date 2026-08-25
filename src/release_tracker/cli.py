@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Annotated
 
@@ -37,6 +36,7 @@ from release_tracker.artists import (
     parse_link_spec,
     refresh_artist,
 )
+from release_tracker.capture import CaptureOutcome, run_capture
 from release_tracker.config import Settings, get_settings
 from release_tracker.contingency import ResolutionStatus
 from release_tracker.dates_edtf import parse_edtf, to_edtf
@@ -45,10 +45,7 @@ from release_tracker.enrich import EnrichSummary, enrich_work
 from release_tracker.logging import configure_logging
 from release_tracker.lookup import (
     RdReport,
-    capture_candidates,
     lookup,
-    report_for_candidate,
-    select_candidate,
 )
 from release_tracker.models import (
     ArtistLink,
@@ -410,19 +407,30 @@ def rd(
     if (latest or year is not None or id_pick is not None) and not track:
         raise typer.BadParameter("--latest / --year / --id only apply together with --track")
     pairs = _parse_pairs([id_pick]) if id_pick else None
-    outcome = asyncio.run(
-        _run_rd(
-            name,
-            settings,
-            kind_hint=kind_hint,
-            region=region,
-            season=season,
-            track=track,
-            latest=latest,
-            want_year=year,
-            id_pick=pairs,
+    if not track:
+        outcome = CaptureOutcome(
+            report=asyncio.run(
+                lookup(name, settings, kind_hint=kind_hint, region=region, season=season)
+            )
         )
-    )
+    else:
+        db = _db()
+        try:
+            outcome = asyncio.run(
+                run_capture(
+                    db,
+                    settings,
+                    name,
+                    kind_hint=kind_hint,
+                    region=region,
+                    season=season,
+                    latest=latest,
+                    want_year=year,
+                    id_pick=pairs,
+                )
+            )
+        finally:
+            db.close()
     if as_json:
         if outcome.ambiguous:
             print(
@@ -468,68 +476,6 @@ def rd(
             )
 
 
-@dataclass(slots=True)
-class _RdOutcome:
-    """What one `rd` invocation resolved to: a report (rendered), whether it was captured, and —
-    on the capture path — an ambiguous candidate set to surface instead of auto-adding."""
-
-    report: RdReport | None
-    tracked: bool
-    ambiguous: tuple[tuple[MediaKind, Candidate], ...] = ()
-
-
-async def _run_rd(
-    name: str,
-    settings: Settings,
-    *,
-    kind_hint: MediaKind | None,
-    region: str | None,
-    season: int | None,
-    track: bool,
-    latest: bool,
-    want_year: int | None,
-    id_pick: dict[str, str] | None,
-) -> _RdOutcome:
-    """Drive a lookup and, on --track, the disambiguation gate before persisting.
-
-    Plain lookups and tech captures keep the old single-best-match behaviour; only a resolvable
-    --track goes through ``select_candidate`` so a name collision surfaces the list rather than
-    silently adding the wrong (or a duplicate) title.
-    """
-    if not track:
-        report = await lookup(name, settings, kind_hint=kind_hint, region=region, season=season)
-        return _RdOutcome(report=report, tracked=False)
-    # tech has no Tier-0 candidate list to disambiguate — capture it via the plain path.
-    if kind_hint is MediaKind.TECH:
-        report = await lookup(name, settings, kind_hint=kind_hint, region=region, season=season)
-        tracked = await _track_from_report(settings, name, report, season=season)
-        return _RdOutcome(report=report, tracked=tracked)
-
-    async with make_client() as client:
-        kinded = await capture_candidates(client, name, settings, kind_hint=kind_hint)
-        kind_of = {id(c): k for k, c in kinded}
-        pick = select_candidate(
-            [c for _, c in kinded], latest=latest, want_year=want_year, id_pick=id_pick
-        )
-        if pick.outcome == "ambiguous":
-            # too close to call — surface the list, persist nothing (force an explicit pick).
-            return _RdOutcome(
-                report=None,
-                tracked=False,
-                ambiguous=tuple((kind_of[id(c)], c) for c in pick.candidates),
-            )
-        if pick.outcome == "no_match" or pick.cand is None:
-            # nothing solid — same web-fallback report as a plain miss, not tracked.
-            report = await lookup(name, settings, kind_hint=kind_hint, region=region, season=season)
-            return _RdOutcome(report=report, tracked=False)
-        chosen = pick.cand
-        report = await report_for_candidate(
-            client, name, kind_of[id(chosen)], chosen, settings, season=season
-        )
-    tracked = await _track_from_report(settings, name, report, season=season)
-    return _RdOutcome(report=report, tracked=tracked)
-
-
 def _candidate_json(kind: MediaKind, c: Candidate) -> dict[str, object]:
     """One ambiguous candidate as JSON for the /rd-add skill to render + re-pick from."""
     return {
@@ -540,82 +486,6 @@ def _candidate_json(kind: MediaKind, c: Candidate) -> dict[str, object]:
         "year": c.year,
         "score": c.score,
     }
-
-
-async def _track_from_report(
-    settings: Settings, name: str, report: RdReport, *, season: int | None = None
-) -> bool:
-    """Capture a looked-up title into the tracker — always, whenever we know its kind.
-
-    This is a *tracker*, tech included, so ``/rd-add`` never refuses a capture:
-    - **Resolvable kinds** (movie/tv/game) that pinned a canonical id capture *with* it, then
-      pull dates + enrich who/where/what — *including date-less (TBA) ones* (the skill then
-      proposes a speculative window so nothing sits date-less).
-    - **Unresolvable kinds** (tech, other) have no Tier-0 source, so they capture as a bare
-      entity with no ids and no auto-pull — exactly like the manual ``rdt add`` path that
-      seeded e.g. Steam Frames. The skill follows up with a release window.
-
-    The only true skip is a total miss with no kind at all; and a *resolvable* kind we
-    couldn't pin is skipped too (a bare unpinned movie would be a bogus, un-enrichable stub
-    — better surfaced as "not tracked" so the title can be corrected).
-
-    With ``season``, the entry is canonical-titled ``"Show: Season N"`` and carries the
-    structured coord so enrichment auto-wires the series link + subtitle (full-auto path).
-    """
-    if report.kind is None:
-        return False
-    if matching.is_resolvable(report.kind) and not report.canonical:
-        return False
-    db = _db()
-    entity = _capture_entity(db, name, report, season)
-    db.upsert_entity(entity)
-    db.upsert_node(
-        Node(id=entity.id, node_kind=NodeKind.WORK, name=entity.title, owned=True, external_ids={})
-    )
-    if report.canonical:  # only a pinned, resolvable entity has ids to pull dates / enrich from
-        async with make_client() as client:
-            await pull_entity(db, settings, entity, client=client)  # dates via the pinned ids
-            await enrich_work(client, db, settings, entity)  # who/where/what
-    db.close()
-    return True
-
-
-def _capture_entity(db: Database, name: str, report: RdReport, season: int | None) -> Entity:
-    """The entity to upsert for a capture — reusing an existing one keyed by canonical id.
-
-    Dedup by the pinned id (not the title slug) so re-capturing the same work under a different
-    typed title ("Odyssey" vs "The Odyssey") updates the one row instead of forking a duplicate.
-    Season captures keep the title-slug id ("Show: Season N" is already unique per season, and one
-    show id spans every season), so they only fold in via the slug path. A brand-new capture is
-    titled from the *canonical* ``matched_title`` for a deterministic, collision-free slug.
-    """
-    assert report.kind is not None  # guaranteed by the caller's kind-None guard
-    base_title = report.matched_title or name
-    if season is None:
-        for id_key, value in report.canonical.items():
-            existing = db.find_entity_by_external_id(id_key, value)
-            if existing is not None:
-                state = (
-                    ConsumptionState.WANT
-                    if existing.consumption_state is ConsumptionState.UNSET
-                    else existing.consumption_state
-                )
-                return existing.model_copy(
-                    update={
-                        "external_ids": {**existing.external_ids, **report.canonical},
-                        "consumption_state": state,
-                    }
-                )
-        title = base_title
-    else:
-        title = season_label(base_title, season)
-    return Entity.create(
-        title,
-        report.kind,
-        external_ids=dict(report.canonical),
-        consumption_state=ConsumptionState.WANT,
-        season=season,
-    )
 
 
 def _render_report(r: RdReport) -> None:

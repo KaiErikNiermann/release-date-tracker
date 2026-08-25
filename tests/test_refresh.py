@@ -12,6 +12,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 from release_tracker import cli, views
+from release_tracker.capture import entity_for
 from release_tracker.config import Settings, get_settings
 from release_tracker.db import Database
 from release_tracker.lookup import RdReport
@@ -93,7 +94,7 @@ def test_capture_entity_dedupes_by_external_id(tmp_path: Path) -> None:
         matched_title="The Odyssey",
         canonical={"tmdb": "1368337"},
     )
-    ent = cli._capture_entity(db, "The Odyssey", report, None)  # pyright: ignore[reportPrivateUsage]
+    ent = entity_for(db, "The Odyssey", report, None)
     assert ent.id == existing.id  # same entity — no duplicate slug minted
     assert ent.external_ids["tmdb"] == "1368337"
     assert ent.consumption_state is ConsumptionState.WATCHED  # existing state preserved
@@ -108,7 +109,7 @@ def test_capture_entity_new_uses_canonical_title(tmp_path: Path) -> None:
         matched_title="The End of Oak Street",
         canonical={"tmdb": "1101383"},
     )
-    ent = cli._capture_entity(db, "the end of oak street", report, None)  # pyright: ignore[reportPrivateUsage]
+    ent = entity_for(db, "the end of oak street", report, None)
     assert ent.title == "The End of Oak Street"  # canonical title, not the typed one
     assert ent.consumption_state is ConsumptionState.WANT
 
