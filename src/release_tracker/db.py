@@ -499,6 +499,23 @@ class Database:
             for row in self._conn.execute(sql, (node_kind.value,))
         ]
 
+    def credited_names(self) -> list[tuple[str, str, int]]:
+        """Every credited ``(role, name, uses)``, most-credited first.
+
+        Roles are what makes credit completion useful: `director:` should offer people
+        who have actually directed something, not all 868 names in the graph.
+        """
+        sql = (
+            "SELECT e.role AS role, n.name AS name, COUNT(*) AS uses "
+            "FROM edges e JOIN nodes n ON n.id = e.src_id "
+            "WHERE e.relation = ? AND e.role IS NOT NULL "
+            "GROUP BY e.role, n.id ORDER BY uses DESC, n.name"
+        )
+        return [
+            (row["role"], row["name"], int(row["uses"]))
+            for row in self._conn.execute(sql, (RelationKind.CREDITED_ON.value,))
+        ]
+
     # -- artist radar (followed creators + their links) --------------------
     def set_followed(self, node_id: str, followed: bool) -> bool:
         with self._tx() as conn:

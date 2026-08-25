@@ -423,7 +423,16 @@ def build_vocabulary(db: Database) -> Vocabulary:
     def entries(node_kind: NodeKind) -> tuple[VocabEntry, ...]:
         return tuple(VocabEntry(value=n.name, uses=u) for n, u in db.nodes_by_kind(node_kind))
 
+    credits: dict[CreditRole, list[VocabEntry]] = {}
+    for raw_role, name, uses in db.credited_names():
+        try:
+            role = CreditRole(raw_role)
+        except ValueError:  # a role the enum has since dropped — ignore, don't crash
+            continue
+        credits.setdefault(role, []).append(VocabEntry(value=name, uses=uses))
+
     return Vocabulary(
+        credits={role: tuple(entries) for role, entries in credits.items()},
         descriptors=tuple(
             VocabEntry(value=n.name, uses=u, descriptor_kind=n.descriptor_kind)
             for n, u in db.nodes_by_kind(NodeKind.DESCRIPTOR)

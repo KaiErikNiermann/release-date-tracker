@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from dataclasses import field as dc_field
 from typing import TYPE_CHECKING
 
 from release_tracker.models import (
@@ -143,16 +144,6 @@ _IS_FLAGS: frozenset[str] = frozenset(
 _IS_VALUES: frozenset[str] = _IS_BUCKETS | _IS_FLAGS
 
 _NUMERIC_FIELDS: frozenset[str] = frozenset({"year", "season", "part"})
-
-_ORG_ROLES: frozenset[CreditRole] = frozenset(
-    {
-        CreditRole.STUDIO,
-        CreditRole.ANIMATION_STUDIO,
-        CreditRole.NETWORK,
-        CreditRole.PUBLISHER,
-        CreditRole.DEVELOPER,
-    }
-)
 
 
 # --- lexing -------------------------------------------------------------------------------
@@ -491,6 +482,12 @@ class Vocabulary:
     platforms: tuple[VocabEntry, ...] = ()
     series: tuple[VocabEntry, ...] = ()
     titles: tuple[VocabEntry, ...] = ()
+    # keyed by role, because `director:` completing against every person in the graph
+    # offers names that provably cannot match — the query is role-scoped, so the
+    # completion has to be too.
+    credits: dict[CreditRole, tuple[VocabEntry, ...]] = dc_field(
+        default_factory=dict[CreditRole, tuple[VocabEntry, ...]]
+    )
 
 
 def _static(values: Iterable[str], detail: str) -> list[tuple[VocabEntry, str]]:
@@ -527,8 +524,7 @@ def _values_for(field: str, vocab: Vocabulary) -> list[tuple[VocabEntry, str]]:
         return _dynamic(vocab.people, "person")
     if field in _ROLE_FIELDS:
         role = _ROLE_FIELDS[field]
-        pool = vocab.orgs if role in _ORG_ROLES else vocab.people
-        return _dynamic(pool, role.value)
+        return _dynamic(vocab.credits.get(role, ()), role.value)
     if field == BARE_FIELD:
         return _dynamic(vocab.titles, "title")
     return []

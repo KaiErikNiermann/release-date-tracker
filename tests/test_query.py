@@ -331,6 +331,14 @@ _VOCAB = query.Vocabulary(
     ),
     orgs=(query.VocabEntry(value="A24", uses=4),),
     platforms=(query.VocabEntry(value="Netflix", uses=12),),
+    credits={
+        CreditRole.DIRECTOR: (query.VocabEntry(value="Denis Villeneuve", uses=7),),
+        CreditRole.CAST: (
+            query.VocabEntry(value="Alan Ritchson", uses=3),
+            query.VocabEntry(value="Timothee Chalamet", uses=2),
+        ),
+        CreditRole.STUDIO: (query.VocabEntry(value="A24", uses=4),),
+    },
 )
 
 
@@ -345,6 +353,20 @@ def test_suggests_values_after_a_colon() -> None:
     assert out[0].label == "Alan Ritchson"
 
 
+def test_credit_completion_is_scoped_to_the_role() -> None:
+    """`director:` offering an actor suggests a name that provably cannot match."""
+    assert [s.label for s in query.suggest("director:", 9, _VOCAB)] == ["Denis Villeneuve"]
+    assert [s.label for s in query.suggest("cast:", 5, _VOCAB)] == [
+        "Alan Ritchson",
+        "Timothee Chalamet",
+    ]
+    # ...while person: still spans everyone, whatever they are credited as
+    assert set(s.label for s in query.suggest("person:", 7, _VOCAB)) == {
+        "Denis Villeneuve",
+        "Alan Ritchson",
+    }
+
+
 def test_value_suggestions_are_ranked_by_usage() -> None:
     out = query.suggest("person:", 7, _VOCAB)
     assert [s.label for s in out] == ["Denis Villeneuve", "Alan Ritchson"]
@@ -352,6 +374,10 @@ def test_value_suggestions_are_ranked_by_usage() -> None:
 
 def test_org_roles_complete_against_orgs_not_people() -> None:
     assert [s.label for s in query.suggest("studio:", 7, _VOCAB)] == ["A24"]
+
+
+def test_a_role_nobody_holds_offers_nothing_rather_than_everyone() -> None:
+    assert query.suggest("composer:", 9, _VOCAB) == ()
 
 
 def test_enum_fields_complete_without_a_vocabulary() -> None:
