@@ -22,7 +22,7 @@ import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dc_field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from release_tracker.models import (
     Bucket,
@@ -46,6 +46,7 @@ __all__ = [
     "VocabEntry",
     "Vocabulary",
     "active_span",
+    "apply",
     "filter_rows",
     "lex",
     "matches",
@@ -455,13 +456,25 @@ def filter_rows(q: Query, rows: Sequence[TrackRow]) -> list[TrackRow]:
 # --- completion ---------------------------------------------------------------------------
 @dataclass(frozen=True, slots=True)
 class Suggestion:
-    """One completion. Splice with ``source[:start] + insert + source[end:]``."""
+    """One completion. Splice with :func:`apply`.
+
+    ``kind`` says which half of the grammar it completes: a ``field`` suggestion turns a
+    bare word into ``field:``, a ``value`` suggestion fills in what follows the colon.
+    The widget treats them differently — only a value completion is worth previewing,
+    because only it narrows the result set rather than emptying it.
+    """
 
     insert: str
     label: str
     detail: str
     start: int
     end: int
+    kind: Literal["field", "value"] = "value"
+
+
+def apply(source: str, suggestion: Suggestion) -> str:
+    """``source`` with ``suggestion`` spliced over the token it was derived from."""
+    return source[: suggestion.start] + suggestion.insert + source[suggestion.end :]
 
 
 @dataclass(frozen=True, slots=True)
@@ -569,7 +582,12 @@ def suggest(
         names = sorted(f for f in FIELDS if f.startswith(needle) and f != BARE_FIELD)
         return tuple(
             Suggestion(
-                insert=f"{prefix}{name}:", label=f"{name}:", detail="field", start=start, end=end
+                insert=f"{prefix}{name}:",
+                label=f"{name}:",
+                detail="field",
+                start=start,
+                end=end,
+                kind="field",
             )
             for name in names[:limit]
         )

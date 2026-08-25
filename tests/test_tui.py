@@ -334,18 +334,110 @@ async def test_typing_continues_the_prefilled_query(
         assert bar.value == "is:available genre:horror"
 
 
+async def _type(pilot: object, app: RdtApp, text: str) -> BrowseScreen:
+    """Clear the prefilled bucket query and type `text` into the bar, key by key."""
+    screen = _browse(app)
+    screen.set_query("")
+    screen.bar.focus()
+    await pilot.press(*text)  # pyright: ignore[reportAttributeAccessIssue]
+    await pilot.pause()  # pyright: ignore[reportAttributeAccessIssue]
+    return screen
+
+
+async def test_a_half_typed_value_previews_instead_of_showing_nothing(
+    app_db: tuple[Path, dict[str, Entity]],
+) -> None:
+    """`is:u` is not a filter anyone means — it matches no flag, so it emptied the table.
+
+    It now stands for the `is:upcoming` it is one keystroke away from: the completion is
+    painted as the bar's dim tail and the table shows what accepting it would give.
+    """
+    path, _ = app_db
+    app = _app(path)
+    async with app.run_test(size=(140, 24)) as pilot:
+        screen = await _type(pilot, app, "is:u")
+        assert screen.bar.value == "is:u"  # nothing was written into the bar
+        assert screen.bar.ghost == "is:upcoming"
+        assert screen.effective_query == "is:upcoming"
+        assert _titles(app) == ["Dune: Part Three"]
+        # ...and the tail is on screen, painted apart from the typed text (the cursor
+        # sits on its first character, so it lands in a span of its own)
+        painted = _painted(app)
+        assert "is:u" in painted and "coming" in painted
+
+
+async def test_tab_walks_the_preview_through_the_candidates(
+    app_db: tuple[Path, dict[str, Entity]],
+) -> None:
+    path, _ = app_db
+    app = _app(path)
+    async with app.run_test(size=(140, 24)) as pilot:
+        screen = await _type(pilot, app, "is:a")
+        assert screen.effective_query == "is:aging"  # first of the two `a` flags
+        await pilot.press("tab")
+        await pilot.pause()
+        assert screen.bar.value == "is:a"  # still a preview, not a commitment
+        assert screen.effective_query == "is:available"
+        assert sorted(_titles(app)) == ["Sinners", "Weapons"]
+
+
+async def test_the_preview_is_scoped_to_what_was_typed(
+    app_db: tuple[Path, dict[str, Entity]],
+) -> None:
+    """`is:a` must not walk through `dated` — the typed `a` has ruled it out already."""
+    path, _ = app_db
+    app = _app(path)
+    async with app.run_test(size=(140, 24)) as pilot:
+        screen = await _type(pilot, app, "is:a")
+        walk = screen._walk  # pyright: ignore[reportPrivateUsage]
+        assert walk is not None
+        assert [p.label for p in walk.picks] == ["aging", "available"]
+
+
+async def test_space_takes_the_previewed_completion(
+    app_db: tuple[Path, dict[str, Entity]],
+) -> None:
+    """Space ends the token, so it has to mean "keep what I can see"."""
+    path, _ = app_db
+    app = _app(path)
+    async with app.run_test(size=(140, 24)) as pilot:
+        screen = await _type(pilot, app, "is:u ")
+        assert screen.bar.value == "is:upcoming "
+        assert _titles(app) == ["Dune: Part Three"]
+
+
+async def test_leaving_the_bar_commits_the_preview(
+    app_db: tuple[Path, dict[str, Entity]],
+) -> None:
+    """The tail stops being painted on blur, so the filter must stop being invisible."""
+    path, _ = app_db
+    app = _app(path)
+    async with app.run_test(size=(140, 24)) as pilot:
+        screen = await _type(pilot, app, "is:u")
+        await pilot.press("enter")  # focus moves to the table
+        await pilot.pause()
+        assert screen.bar.value == "is:upcoming"
+        assert _titles(app) == ["Dune: Part Three"]
+
+
 async def _tab_walk(pilot: object, app: RdtApp, start: str, presses: int) -> list[str]:
+    """Tab `presses` times from `start`, collecting the query each press leaves in force.
+
+    The *effective* query, not the bar's value: a completion that merely extends what was
+    typed is previewed as the bar's dim tail rather than spliced in, and the tail is what
+    the table is filtered by.
+    """
     screen = _browse(app)
     bar = screen.query_one("#query", Input)
     bar.focus()
     bar.value = start
     bar.cursor_position = len(start)
-    screen._cycle = None  # pyright: ignore[reportPrivateUsage]
+    screen._walk = None  # pyright: ignore[reportPrivateUsage]
     seen: list[str] = []
     for _ in range(presses):
         await pilot.press("tab")  # pyright: ignore[reportAttributeAccessIssue]
         await pilot.pause()  # pyright: ignore[reportAttributeAccessIssue]
-        seen.append(bar.value)
+        seen.append(screen.effective_query)
     return seen
 
 
@@ -369,16 +461,16 @@ async def test_tab_cycle_wraps_and_shift_tab_walks_back(
     app = _app(path)
     async with app.run_test(size=(140, 24)) as pilot:
         await pilot.pause()
-        bar = app.screen.query_one("#query", Input)
+        screen = _browse(app)
         first = (await _tab_walk(pilot, app, "is:", 1))[0]
         total = len(query.suggest("is:", 3, app.snapshot.vocab, limit=40))
         for _ in range(total):  # all the way round
             await pilot.press("tab")
             await pilot.pause()
-        assert bar.value == first  # wrapped back to the start
+        assert screen.effective_query == first  # wrapped back to the start
         await pilot.press("shift+tab")
         await pilot.pause()
-        assert bar.value != first  # and steps back off it
+        assert screen.effective_query != first  # and steps back off it
 
 
 async def test_typing_ends_the_walk(app_db: tuple[Path, dict[str, Entity]]) -> None:
@@ -391,6 +483,7 @@ async def test_typing_ends_the_walk(app_db: tuple[Path, dict[str, Entity]]) -> N
         await pilot.press("space", *"gen")
         await pilot.pause()
         before = bar.value
+        assert before.endswith(" gen")  # space took the previewed completion with it
         await pilot.press("tab")
         await pilot.pause()
         assert bar.value == f"{before}re:"  # a fresh walk on the new token, not the old one
@@ -399,14 +492,19 @@ async def test_typing_ends_the_walk(app_db: tuple[Path, dict[str, Entity]]) -> N
 async def test_a_sole_completion_hands_off_to_the_next_stage(
     app_db: tuple[Path, dict[str, Entity]],
 ) -> None:
-    """`gen` -> `genre:` has nowhere to cycle, so the next tab must complete values."""
+    """`gen` -> `genre:` has nowhere to cycle, so it must hand off to the values.
+
+    The field name is spliced in outright (a lone candidate is not worth previewing) and
+    the preview moves straight on to what can follow the colon, so the first tab already
+    lands on a value and the second walks to the next one.
+    """
     path, _ = app_db
     app = _app(path)
     async with app.run_test(size=(140, 24)) as pilot:
         await pilot.pause()
         seen = await _tab_walk(pilot, app, "gen", 2)
-        assert seen[0] == "genre:"
-        assert seen[1].startswith("genre:") and seen[1] != "genre:"
+        assert all(s.startswith("genre:") and s != "genre:" for s in seen), seen
+        assert seen[0] != seen[1]
 
 
 async def test_state_cell_restyles_when_the_state_changes(

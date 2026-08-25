@@ -406,6 +406,19 @@ def test_a_mid_word_fragment_still_finds_something_rather_than_nothing() -> None
     assert query.suggest("cast:itch", 9, _VOCAB)[0].label == "Alan Ritchson"
 
 
+def test_field_and_value_suggestions_are_told_apart() -> None:
+    """The widget previews a value completion and splices a field one — hence the tag."""
+    assert all(s.kind == "field" for s in query.suggest("ca", 2, _VOCAB))
+    assert all(s.kind == "value" for s in query.suggest("cast:", 5, _VOCAB))
+
+
+def test_apply_is_the_splice_the_widget_relies_on() -> None:
+    source = "kind:tv cast:rit year:2026"
+    assert query.apply(source, query.suggest(source, 16, _VOCAB)[0]) == (
+        'kind:tv cast:"Alan Ritchson" year:2026'
+    )
+
+
 def test_suggestion_splices_back_into_the_source() -> None:
     """The contract the widget relies on: source[:start] + insert + source[end:]."""
     source = "kind:tv cast:rit year:2026"
