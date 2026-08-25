@@ -6,6 +6,7 @@ expensive part (building the rows) already happened once at startup.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, cast
 
 from rich.text import Text
@@ -24,7 +25,27 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from release_tracker.tui.app import RdtApp
 
 _COLUMNS = ("Date", "⟳", "Title", "Kind", "State", "Who", "Where", "What")
+_CYCLE_LIMIT = 40  # how many completions tab will walk through
+_HINT_WIDTH = 6  # how many of them the hint line shows at once
 _BUCKET_KEYS = {"1": Bucket.AVAILABLE, "2": Bucket.UPCOMING, "3": Bucket.WATCHED}
+
+
+@dataclass(slots=True)
+class _Cycle:
+    """An in-progress tab walk through the completions for one token.
+
+    The list has to be remembered rather than recomputed: once tab has filled `is:` in
+    as `is:available`, re-running suggest() on the new text matches only "available", so
+    a fresh lookup would collapse the list to a single entry and cycling would stall.
+    ``value``/``caret`` are what the bar looked like after the last insert — if either
+    has changed, the user typed something and the walk is over.
+    """
+
+    picks: tuple[query.Suggestion, ...]
+    index: int
+    start: int
+    value: str
+    caret: int
 
 
 class BrowseScreen(Screen[None]):
@@ -43,12 +64,14 @@ class BrowseScreen(Screen[None]):
         Binding("r", "reload", "Reload"),
         Binding("q", "quit", "Quit"),
         Binding("escape", "back", "Back", show=False),
-        Binding("tab", "complete", "Complete", show=False),
+        Binding("tab", "complete(1)", "Complete", show=False),
+        Binding("shift+tab", "complete(-1)", "Complete back", show=False),
     ]
 
     def __init__(self) -> None:
         super().__init__()
         self._visible: list[TrackRow] = []
+        self._cycle: _Cycle | None = None
 
     @property
     def table(self) -> DataTable[Text]:
@@ -113,12 +136,24 @@ class BrowseScreen(Screen[None]):
         if not self.screen.focused or self.screen.focused.id != "query":
             hint.update("")
             return
-        picks = query.suggest(source, bar.cursor_position, self.rdt.snapshot.vocab, limit=5)
+        if (cycle := self._active_cycle()) is not None:
+            picks, active = cycle.picks, cycle.index
+        else:
+            picks = query.suggest(
+                source, bar.cursor_position, self.rdt.snapshot.vocab, limit=_CYCLE_LIMIT
+            )
+            active = 0
         if not picks:
             hint.update("")
             return
-        rest = "  ".join(f"[dim]{p.label}[/]" for p in picks[1:])
-        hint.update(Text.from_markup(f"[dim]↹[/] [bold]{picks[0].label}[/]  {rest}"))
+        # scroll the window with the selection so a long list stays walkable
+        first = max(0, min(active - _HINT_WIDTH // 2, len(picks) - _HINT_WIDTH))
+        shown = [
+            f"[reverse]{p.label}[/]" if i + first == active else f"[dim]{p.label}[/]"
+            for i, p in enumerate(picks[first : first + _HINT_WIDTH])
+        ]
+        count = f"[dim]{active + 1}/{len(picks)}[/]" if len(picks) > 1 else ""
+        hint.update(Text.from_markup(f"[dim]↹[/] {'  '.join(shown)}  {count}"))
 
     def _update_status(self, parsed: query.Query) -> None:
         bucket = bucket_of_query(self.query_one("#query", Input).value)
@@ -156,17 +191,48 @@ class BrowseScreen(Screen[None]):
         elif bar.value:
             self.set_query("")
 
-    def action_complete(self) -> None:
-        """Accept the top completion, splicing it into the token under the caret."""
+    def _active_cycle(self) -> _Cycle | None:
+        """The current tab walk, if the user has not typed since the last insert."""
+        bar = self.query_one("#query", Input)
+        cycle = self._cycle
+        if cycle is None or bar.value != cycle.value or bar.cursor_position != cycle.caret:
+            return None
+        return cycle
+
+    def action_complete(self, delta: int = 1) -> None:
+        """Walk the completions for the token under the caret; tab again for the next.
+
+        Repeated tab steps through the list and wraps; shift+tab steps back. Typing
+        anything ends the walk and the next tab starts a fresh one.
+        """
         bar = self.query_one("#query", Input)
         if self.screen.focused is not bar:
             return
-        picks = query.suggest(bar.value, bar.cursor_position, self.rdt.snapshot.vocab, limit=1)
-        if not picks:
-            return
-        top = picks[0]
-        bar.value = bar.value[: top.start] + top.insert + bar.value[top.end :]
-        bar.cursor_position = top.start + len(top.insert)
+        if (cycle := self._active_cycle()) is not None:
+            picks, start = cycle.picks, cycle.start
+            end = start + len(picks[cycle.index].insert)
+            index = (cycle.index + delta) % len(picks)
+        else:
+            picks = query.suggest(
+                bar.value, bar.cursor_position, self.rdt.snapshot.vocab, limit=_CYCLE_LIMIT
+            )
+            if not picks:
+                self._cycle = None
+                return
+            index, start, end = 0, picks[0].start, picks[0].end
+        insert = picks[index].insert
+        value = bar.value[:start] + insert + bar.value[end:]
+        caret = start + len(insert)
+        bar.value = value
+        bar.cursor_position = caret
+        # A sole completion has nowhere to cycle, so end the walk: the next tab then
+        # re-derives and moves on to the next stage — `gen` -> `genre:` -> its values.
+        self._cycle = (
+            None
+            if len(picks) == 1
+            else _Cycle(picks=picks, index=index, start=start, value=value, caret=caret)
+        )
+        self._update_hint(value)
 
     @on(Input.Submitted, "#query")
     def _on_submit(self) -> None:

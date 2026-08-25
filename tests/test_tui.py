@@ -330,3 +330,81 @@ async def test_typing_continues_the_prefilled_query(
         await pilot.press(*"genre:horror")
         await pilot.pause()
         assert bar.value == "is:available genre:horror"
+
+
+async def _tab_walk(pilot: object, app: RdtApp, start: str, presses: int) -> list[str]:
+    from release_tracker.tui.browse import BrowseScreen
+
+    screen = app.screen
+    assert isinstance(screen, BrowseScreen)
+    bar = screen.query_one("#query", Input)
+    bar.focus()
+    bar.value = start
+    bar.cursor_position = len(start)
+    screen._cycle = None  # pyright: ignore[reportPrivateUsage]
+    seen: list[str] = []
+    for _ in range(presses):
+        await pilot.press("tab")  # pyright: ignore[reportAttributeAccessIssue]
+        await pilot.pause()  # pyright: ignore[reportAttributeAccessIssue]
+        seen.append(bar.value)
+    return seen
+
+
+async def test_tab_cycles_through_the_completions(
+    app_db: tuple[Path, dict[str, Entity]],
+) -> None:
+    """Tab used to fill the first match and then stall — the list has to be walkable."""
+    path, _ = app_db
+    app = _app(path)
+    async with app.run_test(size=(140, 24)) as pilot:
+        await pilot.pause()
+        seen = await _tab_walk(pilot, app, "is:", 4)
+        assert len(set(seen)) == 4, seen  # four presses, four distinct completions
+        assert all(v.startswith("is:") for v in seen)
+
+
+async def test_tab_cycle_wraps_and_shift_tab_walks_back(
+    app_db: tuple[Path, dict[str, Entity]],
+) -> None:
+    path, _ = app_db
+    app = _app(path)
+    async with app.run_test(size=(140, 24)) as pilot:
+        await pilot.pause()
+        bar = app.screen.query_one("#query", Input)
+        first = (await _tab_walk(pilot, app, "is:", 1))[0]
+        total = len(query.suggest("is:", 3, app.snapshot.vocab, limit=40))
+        for _ in range(total):  # all the way round
+            await pilot.press("tab")
+            await pilot.pause()
+        assert bar.value == first  # wrapped back to the start
+        await pilot.press("shift+tab")
+        await pilot.pause()
+        assert bar.value != first  # and steps back off it
+
+
+async def test_typing_ends_the_walk(app_db: tuple[Path, dict[str, Entity]]) -> None:
+    path, _ = app_db
+    app = _app(path)
+    async with app.run_test(size=(140, 24)) as pilot:
+        await pilot.pause()
+        bar = app.screen.query_one("#query", Input)
+        await _tab_walk(pilot, app, "is:", 2)
+        await pilot.press("space", *"gen")
+        await pilot.pause()
+        before = bar.value
+        await pilot.press("tab")
+        await pilot.pause()
+        assert bar.value == f"{before}re:"  # a fresh walk on the new token, not the old one
+
+
+async def test_a_sole_completion_hands_off_to_the_next_stage(
+    app_db: tuple[Path, dict[str, Entity]],
+) -> None:
+    """`gen` -> `genre:` has nowhere to cycle, so the next tab must complete values."""
+    path, _ = app_db
+    app = _app(path)
+    async with app.run_test(size=(140, 24)) as pilot:
+        await pilot.pause()
+        seen = await _tab_walk(pilot, app, "gen", 2)
+        assert seen[0] == "genre:"
+        assert seen[1].startswith("genre:") and seen[1] != "genre:"
