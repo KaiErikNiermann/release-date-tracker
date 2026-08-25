@@ -424,3 +424,14 @@ def test_external_carries_the_hints_and_drops_local_only_filters() -> None:
 
 def test_external_of_a_bare_query_is_just_the_text() -> None:
     assert query.parse("the odyssey").external == "the odyssey"
+
+
+def test_every_consumption_state_has_a_label() -> None:
+    """A state with no case would silently render as the bare enum value."""
+    from release_tracker import render
+
+    labels = {s: render.state_label(s) for s in ConsumptionState}
+    assert len(set(labels.values())) == len(ConsumptionState)
+    # the two the watched view has always coloured must keep their hues
+    assert labels[ConsumptionState.DROPPED] == "[red]dropped[/]"
+    assert labels[ConsumptionState.SKIPPED] == "[yellow]skipped[/]"

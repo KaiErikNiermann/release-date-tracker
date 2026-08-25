@@ -75,6 +75,7 @@ from release_tracker.render import (
     fresh_dot,
     legend_dots,
     stance_color,
+    state_label,
     title_cell,
     wcw_cells,
 )
@@ -2108,17 +2109,6 @@ def _render_upcoming(rows: list[views.TrackRow], days: int | None) -> None:
         console.print("[dim]No upcoming releases. `rdt add` then `rdt enrich`.[/]")
 
 
-def _watched_state_label(state: ConsumptionState) -> str:
-    """Color-code the finished states in the watched view."""
-    match state:
-        case ConsumptionState.DROPPED:
-            return "[red]dropped[/]"
-        case ConsumptionState.SKIPPED:
-            return "[yellow]skipped[/]"
-        case _:
-            return state.value
-
-
 def _apply_filter(rows: list[views.TrackRow], expr: str | None) -> list[views.TrackRow]:
     """Narrow rows with the shared query language (see `release_tracker.query`)."""
     if not expr:
@@ -2157,7 +2147,7 @@ def _render_find(rows: list[views.TrackRow], expr: str) -> None:
             title_cell(r),
             r.kind.value,
             _bucket_label(r.bucket),
-            r.state.value,
+            state_label(r.state),
             *wcw_cells(r),
         )
     console.print(table)
@@ -2176,7 +2166,7 @@ def _render_watched(rows: list[views.TrackRow]) -> None:
     table.add_column("State", min_width=8, no_wrap=True)
     _wcw(table)
     for r in rows:
-        state = _watched_state_label(r.state)
+        state = state_label(r.state)
         table.add_row(
             r.pivot_when.isoformat() if r.pivot_when else "[dim]—[/]",
             title_cell(r),
@@ -2203,7 +2193,7 @@ def _render_available(rows: list[views.TrackRow]) -> None:
             fresh_dot(r.freshness),
             title_cell(r),
             r.kind.value,
-            r.state.value,
+            state_label(r.state),
             *wcw_cells(r),
         )
     console.print(table)

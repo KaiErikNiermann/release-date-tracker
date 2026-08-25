@@ -24,7 +24,7 @@ from release_tracker.views import TrackRow
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from release_tracker.tui.app import RdtApp
 
-_COLUMNS = ("Date", "⟳", "Title", "Kind", "State", "Who", "Where", "What")
+COLUMNS = ("Date", "⟳", "Title", "Kind", "State", "Who", "Where", "What")
 _CYCLE_LIMIT = 40  # how many completions tab will walk through
 _HINT_WIDTH = 6  # how many of them the hint line shows at once
 _BUCKET_KEYS = {"1": Bucket.AVAILABLE, "2": Bucket.UPCOMING, "3": Bucket.WATCHED}
@@ -95,7 +95,7 @@ class BrowseScreen(Screen[None]):
         table = self.table
         table.cursor_type = "row"
         table.zebra_stripes = True
-        table.add_columns(*_COLUMNS)
+        table.add_columns(*COLUMNS)
         self.set_query(f"{with_bucket('', Bucket.AVAILABLE)} ")
         self.query_one("#query", Input).focus()
         self.refresh_rows()
@@ -121,7 +121,7 @@ class BrowseScreen(Screen[None]):
                 Text.from_markup(render.fresh_dot(row.freshness)),
                 Text.from_markup(render.title_cell(row)),
                 Text(row.kind.value),
-                Text(row.state.value),
+                Text.from_markup(render.state_label(row.state)),
                 Text.from_markup(who),
                 Text.from_markup(where),
                 Text.from_markup(what),

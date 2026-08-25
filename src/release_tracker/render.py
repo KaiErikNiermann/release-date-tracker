@@ -15,7 +15,7 @@ from datetime import date
 
 from release_tracker import views
 from release_tracker.config import get_settings
-from release_tracker.models import DatePrecision
+from release_tracker.models import ConsumptionState, DatePrecision
 
 __all__ = [
     "fmt_cell",
@@ -25,6 +25,7 @@ __all__ = [
     "fresh_dot",
     "legend_dots",
     "stance_color",
+    "state_label",
     "title_cell",
     "wcw_cells",
 ]
@@ -82,6 +83,27 @@ def fmt_cell(cell: views.DateCell | None) -> str:
 
 def fresh_dot(freshness: views.Freshness | None) -> str:
     return f"[{fresh_color(freshness)}]●[/]" if freshness else "[dim]·[/]"
+
+
+def state_label(state: ConsumptionState) -> str:
+    """Style a consumption state so a change to it reads at a glance, not just textually.
+
+    Only ``dropped``/``skipped`` carry a hue (unchanged from what the watched view has
+    always shown); the rest lean on dim/bold, which stays legible under any colour vision.
+    """
+    match state:
+        case ConsumptionState.UNSET:
+            return "[dim]unset[/]"
+        case ConsumptionState.WATCHING:
+            return "[bold]watching[/]"
+        case ConsumptionState.WATCHED:
+            return "[dim]watched[/]"
+        case ConsumptionState.DROPPED:
+            return "[red]dropped[/]"
+        case ConsumptionState.SKIPPED:
+            return "[yellow]skipped[/]"
+        case _:
+            return state.value
 
 
 def title_cell(row: views.TrackRow) -> str:

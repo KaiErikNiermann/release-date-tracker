@@ -36,10 +36,13 @@ from release_tracker.models import (
     SourceTier,
 )
 from release_tracker.tui.app import RdtApp
+from release_tracker.tui.browse import COLUMNS, BrowseScreen
 from release_tracker.tui.card import CardScreen, StateToggle
 from release_tracker.tui.state import with_bucket
+from release_tracker.views import TrackRow
 
 TODAY = date(2026, 6, 1)
+_COLUMN_INDEX = {name: i for i, name in enumerate(COLUMNS)}
 
 
 def _seed(db: Database) -> dict[str, Entity]:
@@ -113,12 +116,14 @@ def _app(path: Path) -> RdtApp:
     return RdtApp(settings=settings, db=Database(path), today=TODAY)
 
 
-def _titles(app: RdtApp) -> list[str]:
-    from release_tracker.tui.browse import BrowseScreen
-
+def _browse(app: RdtApp) -> BrowseScreen:
     screen = app.screen
     assert isinstance(screen, BrowseScreen)
-    return [r.title for r in screen._visible]  # pyright: ignore[reportPrivateUsage]
+    return screen
+
+
+def _titles(app: RdtApp) -> list[str]:
+    return [r.title for r in _browse(app)._visible]  # pyright: ignore[reportPrivateUsage]
 
 
 async def test_boots_on_available_and_shows_only_that_bucket(
@@ -146,11 +151,8 @@ async def test_typing_filters_live_and_agrees_with_the_library(
         expected = {
             r.entity_id for r in query.filter_rows(query.parse("genre:horror"), app.snapshot.rows)
         }
-        from release_tracker.tui.browse import BrowseScreen
-
-        screen = app.screen
-        assert isinstance(screen, BrowseScreen)
-        assert {r.entity_id for r in screen._visible} == expected  # pyright: ignore[reportPrivateUsage]
+        rows: list[TrackRow] = _browse(app)._visible  # pyright: ignore[reportPrivateUsage]
+        assert {r.entity_id for r in rows} == expected
         assert app.screen.query_one("#rows", DataTable).row_count == len(expected)
 
 
@@ -333,10 +335,7 @@ async def test_typing_continues_the_prefilled_query(
 
 
 async def _tab_walk(pilot: object, app: RdtApp, start: str, presses: int) -> list[str]:
-    from release_tracker.tui.browse import BrowseScreen
-
-    screen = app.screen
-    assert isinstance(screen, BrowseScreen)
+    screen = _browse(app)
     bar = screen.query_one("#query", Input)
     bar.focus()
     bar.value = start
@@ -408,3 +407,42 @@ async def test_a_sole_completion_hands_off_to_the_next_stage(
         seen = await _tab_walk(pilot, app, "gen", 2)
         assert seen[0] == "genre:"
         assert seen[1].startswith("genre:") and seen[1] != "genre:"
+
+
+async def test_state_cell_restyles_when_the_state_changes(
+    app_db: tuple[Path, dict[str, Entity]],
+) -> None:
+    """The TUI rendered the state as a bare string, so it never picked up any colour.
+
+    The CLI styled it via a helper that stayed private in cli.py — exactly the drift
+    render.py exists to prevent, so both now go through render.state_label.
+    """
+    from textual.coordinate import Coordinate
+
+    path, made = app_db
+    app = _app(path)
+    async with app.run_test(size=(150, 30)) as pilot:
+        await pilot.pause()
+        screen = _browse(app)
+        bar = screen.query_one("#query", Input)
+        table = screen.table
+        state_col = _COLUMN_INDEX["State"]
+        target = made["Sinners"]
+
+        seen: dict[ConsumptionState, tuple[str, tuple[str, ...]]] = {}
+        for state in (
+            ConsumptionState.WATCHING,
+            ConsumptionState.DROPPED,
+            ConsumptionState.SKIPPED,
+        ):
+            app.set_state(app.db.get_entity(target.id) or target, state)
+            bar.value = ""  # every bucket, so the row stays on screen as it moves
+            await pilot.pause()
+            visible: list[TrackRow] = screen._visible  # pyright: ignore[reportPrivateUsage]
+            row_index = next(i for i, r in enumerate(visible) if r.entity_id == target.id)
+            cell = table.get_cell_at(Coordinate(row_index, state_col))
+            seen[state] = (str(cell), tuple(str(s.style) for s in cell.spans))
+
+        assert seen[ConsumptionState.WATCHING] == ("watching", ("bold",))
+        assert seen[ConsumptionState.DROPPED] == ("dropped", ("red",))
+        assert seen[ConsumptionState.SKIPPED] == ("skipped", ("yellow",))
