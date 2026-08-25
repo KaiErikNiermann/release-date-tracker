@@ -50,7 +50,55 @@ poetry run rdt pull
 
 # show ranked best estimates
 poetry run rdt show
+
+# browse it interactively
+poetry run rdt tui
 ```
+
+## Querying
+
+One query language, shared by the CLI and the TUI — `query.py` owns the parser and the
+predicates, so the two frontends cannot disagree about what a query means.
+
+A bare (or quoted) word matches the title and its aliases; everything else is
+`field:value`. Terms are AND-ed, comma-separated values within a term are OR-ed, and a
+leading `-` (or `!`) negates.
+
+```bash
+rdt find 'kind:movie is:available'
+rdt find 'cast:"Alan Ritchson" year:2026'
+rdt find 'genre:horror -is:watched'
+rdt upcoming 'tag:"body horror" year:2026..2028'
+```
+
+| field | matches |
+|---|---|
+| *(bare)* / `name:` | title + aliases |
+| `kind:` | `movie tv game tech book …` (`tv-show`, `film`, `show` alias; `kind:anime` becomes `origin:anime`) |
+| `state:` | `unset want watching watched dropped skipped` |
+| `is:` | `available upcoming watched` · `blocked notes dated tba confirmed speculative predicted fresh aging stale` |
+| `tag:` | any descriptor; `genre:` `theme:` `mood:` `style:` `origin:` narrow it |
+| `director:` `cast:` `writer:` `studio:` `network:` … | one credit role each (derived from `CreditRole`, so a new role is a new field) |
+| `person:` | any credit, any role |
+| `platform:` / `on:`, `series:` | consumption platform, series |
+| `year:` | any release year — `2026`, `2020..2026`, `>=2026`, `<2030` |
+| `season:` `part:` | season / mid-season coords |
+
+`is:` is a different axis from `state:`: the *bucket* `watched` spans
+`watched|dropped|skipped`, while the *state* `watched` is only one of them.
+
+## TUI
+
+`rdt tui` puts the same language in a live query bar over the same views.
+
+- **type** to filter (instant — it filters an in-memory snapshot, not the database)
+- **tab** accept the completion hint · **1/2/3** available / upcoming / watched
+- **enter** open the work card · **←/→** change state (auto-saves) · **esc** back
+- **a** add a title — same syntax, pointed at TMDB/IGDB/Steam, with candidate selection
+- **/** back to the query bar · **r** reload · **q** quit
+
+The bucket keys rewrite the `is:` term in the query rather than keeping separate view
+state, so what you see is always explained by the string in the bar.
 
 ## Privacy
 
