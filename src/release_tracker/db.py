@@ -481,6 +481,24 @@ class Database:
         sql += " ORDER BY owned DESC, name"
         return [_row_to_node(r) for r in self._conn.execute(sql, params)]
 
+    def nodes_by_kind(self, node_kind: NodeKind) -> list[tuple[Node, int]]:
+        """Every node of a kind, with how many works reference it (inbound edge count).
+
+        Powers query completion: the count ranks a frequently-credited director above a
+        one-off crew credit, which is the difference between a useful suggestion list and
+        an alphabetical dump.
+        """
+        sql = (
+            "SELECT n.*, COUNT(e.id) AS uses FROM nodes n "
+            "LEFT JOIN edges e ON e.dst_id = n.id "
+            "WHERE n.node_kind = ? "
+            "GROUP BY n.id ORDER BY uses DESC, n.name"
+        )
+        return [
+            (_row_to_node(row), int(row["uses"]))
+            for row in self._conn.execute(sql, (node_kind.value,))
+        ]
+
     # -- artist radar (followed creators + their links) --------------------
     def set_followed(self, node_id: str, followed: bool) -> bool:
         with self._tx() as conn:

@@ -42,6 +42,7 @@ from release_tracker.models import (
     SourceTier,
     WorkRelation,
 )
+from release_tracker.query import VocabEntry, Vocabulary
 from release_tracker.resolve import PRECISION_RANK, best_estimates
 
 Freshness = Literal["fresh", "aging", "stale"]
@@ -399,6 +400,29 @@ def track_rows(
         for e in db.iter_entities()
         if kind is None or e.kind is kind
     ]
+
+
+def build_vocabulary(db: Database) -> Vocabulary:
+    """Snapshot the graph's completable names, ranked by how many works use each.
+
+    The DB-touching half of query completion; ``query.suggest`` itself stays pure. ~1.8k
+    strings at present, so it is held in memory and substring-scanned per keystroke.
+    """
+
+    def entries(node_kind: NodeKind) -> tuple[VocabEntry, ...]:
+        return tuple(VocabEntry(value=n.name, uses=u) for n, u in db.nodes_by_kind(node_kind))
+
+    return Vocabulary(
+        descriptors=tuple(
+            VocabEntry(value=n.name, uses=u, descriptor_kind=n.descriptor_kind)
+            for n, u in db.nodes_by_kind(NodeKind.DESCRIPTOR)
+        ),
+        people=entries(NodeKind.PERSON),
+        orgs=entries(NodeKind.ORG),
+        platforms=entries(NodeKind.PLATFORM),
+        series=entries(NodeKind.SERIES),
+        titles=tuple(VocabEntry(value=e.title) for e in db.iter_entities()),
+    )
 
 
 def _collapse_estimates(estimates: Iterable[BestEstimate]) -> tuple[BestEstimate, ...]:
