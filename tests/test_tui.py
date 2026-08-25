@@ -366,19 +366,49 @@ async def test_a_half_typed_value_previews_instead_of_showing_nothing(
         assert "is:u" in painted and "coming" in painted
 
 
-async def test_tab_walks_the_preview_through_the_candidates(
+async def test_tab_takes_the_offered_completion_then_walks_on(
     app_db: tuple[Path, dict[str, Entity]],
 ) -> None:
+    """The tail is a hint, and a hint you cannot pick up leaves the term to be typed out.
+
+    So the first tab writes what is on offer into the bar and the next steps on to the
+    following candidate, rewriting the term in place — with the caret left at the end of
+    it, so a space carries straight on into the next filter.
+    """
     path, _ = app_db
     app = _app(path)
     async with app.run_test(size=(140, 24)) as pilot:
         screen = await _type(pilot, app, "is:a")
+        assert screen.bar.value == "is:a"  # typing alone still writes nothing
         assert screen.effective_query == "is:aging"  # first of the two `a` flags
         await pilot.press("tab")
         await pilot.pause()
-        assert screen.bar.value == "is:a"  # still a preview, not a commitment
-        assert screen.effective_query == "is:available"
+        assert screen.bar.value == "is:aging"  # ...and tab takes it
+        assert screen.bar.ghost == ""  # nothing left to offer in grey
+        await pilot.press("tab")
+        await pilot.pause()
+        assert screen.bar.value == "is:available"
         assert sorted(_titles(app)) == ["Sinners", "Weapons"]
+        await pilot.press("shift+tab")  # and back
+        await pilot.pause()
+        assert screen.bar.value == "is:aging"
+        await pilot.press(*" kind:movie")  # the term is finished, so typing continues
+        await pilot.pause()
+        assert screen.bar.value == "is:aging kind:movie"
+
+
+async def test_shift_tab_takes_the_candidate_before_the_offered_one(
+    app_db: tuple[Path, dict[str, Entity]],
+) -> None:
+    """Nothing has been taken yet, so stepping back means the one behind the offer."""
+    path, _ = app_db
+    app = _app(path)
+    async with app.run_test(size=(140, 24)) as pilot:
+        screen = await _type(pilot, app, "is:a")
+        assert screen.effective_query == "is:aging"
+        await pilot.press("shift+tab")
+        await pilot.pause()
+        assert screen.bar.value == "is:available"  # the other `a` flag, wrapping backwards
 
 
 async def test_the_preview_is_scoped_to_what_was_typed(
@@ -527,17 +557,26 @@ async def test_a_sole_completion_hands_off_to_the_next_stage(
 ) -> None:
     """`gen` -> `genre:` has nowhere to cycle, so it must hand off to the values.
 
-    The field name is spliced in outright (a lone candidate is not worth previewing) and
-    the preview moves straight on to what can follow the colon, so the first tab already
-    lands on a value and the second walks to the next one.
+    The field name goes in on the first tab and the offer moves straight on to what can
+    follow the colon, so the second tab takes a value and the third walks to the next one
+    — three presses, no dead one among them.
     """
     path, _ = app_db
     app = _app(path)
     async with app.run_test(size=(140, 24)) as pilot:
         await pilot.pause()
-        seen = await _tab_walk(pilot, app, "gen", 2)
-        assert all(s.startswith("genre:") and s != "genre:" for s in seen), seen
-        assert seen[0] != seen[1]
+        screen = await _type(pilot, app, "gen")
+        await pilot.press("tab")
+        await pilot.pause()
+        assert screen.bar.value == "genre:"  # the field name, taken outright
+        offered = screen.effective_query
+        assert offered.startswith("genre:") and offered != "genre:"  # a value, offered
+        await pilot.press("tab")
+        await pilot.pause()
+        assert screen.bar.value == offered  # ...which the next tab takes
+        await pilot.press("tab")
+        await pilot.pause()
+        assert screen.bar.value != offered  # ...and the one after walks on
 
 
 async def test_state_cell_restyles_when_the_state_changes(

@@ -107,9 +107,9 @@ class _Walk:
     only "available", which would collapse the list and stall the walk.
 
     ``value``/``caret`` are what the bar looked like after the last apply; if either has
-    drifted, the user typed something and the walk is over. ``shown`` says whether
-    ``picks[index]`` is currently on screen, which is what decides whether the next tab
-    advances or applies where it stands.
+    drifted, the user typed something and the walk is over. ``chosen`` separates a pick
+    the user has taken from one merely being offered as a dim tail, which is what decides
+    whether the next tab steps on or takes what is on screen.
     """
 
     picks: tuple[query.Suggestion, ...]
@@ -118,7 +118,7 @@ class _Walk:
     origin_caret: int
     value: str
     caret: int
-    shown: bool = False
+    chosen: bool = False
 
 
 class BrowseScreen(Screen[None]):
@@ -275,8 +275,10 @@ class BrowseScreen(Screen[None]):
     def _sync_completion(self) -> None:
         """Derive (or keep) the walk for the token under the caret and paint its tail.
 
-        Typing never commits — a completion the user has not asked for stays a preview,
-        so the only thing that changes under them is the table, which is the point.
+        Typing never writes into the bar — a completion the user has not asked for stays
+        an offer, so the only thing that changes under them is the table, which is the
+        point. Once tab has taken a pick there is nothing left to offer: the term is in
+        the bar in full, and the tail would only repeat it in grey.
         """
         bar = self.bar
         if not bar.has_focus:
@@ -291,8 +293,7 @@ class BrowseScreen(Screen[None]):
             if walk is None:
                 bar.ghost = ""
                 return
-            walk.shown = self._ghost(walk) is not None
-        bar.ghost = (self._ghost(walk) or "") if walk.shown else ""
+        bar.ghost = "" if walk.chosen else (self._ghost(walk) or "")
 
     def _update_hint(self) -> None:
         hint = self.query_one("#hint", Static)
@@ -348,12 +349,14 @@ class BrowseScreen(Screen[None]):
             self.set_query("")
 
     def action_complete(self, delta: int = 1) -> None:
-        """Walk the completions for the token under the caret; tab again for the next.
+        """Take the offered completion, then walk: tab again for the next candidate.
 
-        A candidate that merely extends what was typed rides along as the bar's dim tail
-        and the table follows it, so each tab shows what the next candidate *means*
-        before anything is committed. One that has to rewrite the token is spliced in
-        outright — there is nothing to preview and nothing gained by withholding it.
+        Tab writes the pick into the bar rather than only re-pointing the dim tail — the
+        tail is a hint about what is being typed, and a hint you cannot pick up leaves the
+        term to be finished by hand. So the first tab takes what is on screen (shift+tab
+        takes the one before it) and each tab after that steps to the next candidate,
+        rewriting the term in place. The caret lands at the end of it, ready for a space
+        and the next filter.
 
         Away from the bar there is nothing to complete, so the key goes back to meaning
         what it means in every other Textual app and every browser: move focus. With only
@@ -369,23 +372,22 @@ class BrowseScreen(Screen[None]):
         if (walk := self._live_walk() or self._fresh_walk()) is None:
             self._walk = None
             return
-        if walk.shown:  # what is on screen is a candidate, so move off it
+        # An already-taken pick is stepped off; one merely offered is taken as it stands,
+        # unless the walk is going backwards, which has nothing to step back onto yet.
+        if walk.chosen or delta < 0:
             walk.index = (walk.index + delta) % len(walk.picks)
-        walk.shown = True
+        walk.chosen = True
         self._walk = walk
 
-        if (ghost := self._ghost(walk)) is not None:
-            bar.ghost = ghost
-        else:
-            pick = walk.picks[walk.index]
-            bar.ghost = ""
-            bar.value = query.apply(walk.origin, pick)
-            bar.cursor_position = pick.start + len(pick.insert)
-            walk.value, walk.caret = bar.value, bar.cursor_position
-            # A sole completion has nowhere to cycle, so end the walk: the next tab then
-            # re-derives and moves on to the next stage — `gen` -> `genre:` -> its values.
-            if len(walk.picks) == 1:
-                self._walk = None
+        pick = walk.picks[walk.index]
+        bar.ghost = ""
+        bar.value = query.apply(walk.origin, pick)
+        bar.cursor_position = pick.start + len(pick.insert)
+        walk.value, walk.caret = bar.value, bar.cursor_position
+        # A sole completion has nowhere to cycle, so end the walk: the next tab then
+        # re-derives and moves on to the next stage — `gen` -> `genre:` -> its values.
+        if len(walk.picks) == 1:
+            self._walk = None
         self._sync_view()
 
     @on(Input.Submitted, "#query")

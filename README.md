@@ -98,9 +98,11 @@ rdt upcoming 'tag:"body horror" year:2026..2028'
 - **/** or **shift+tab** back to the query bar · **ctrl+backspace** delete a word · **r** reload · **q** quit
 
 A half-typed value is shown as what it is about to mean: `is:a` greys `ging` in after the
-caret and the table already shows `is:aging`, tab walks that preview through the rest of
-the candidates (`available`, …), and **→**, **space** or **enter** takes the one on
-screen. Completions are scoped to what you typed, so `is:a` never offers `dated`.
+caret and the table already shows `is:aging`. Tab takes that offer into the bar and walks
+on through the rest of the candidates (`available`, …), rewriting the term in place and
+leaving the caret at the end of it, so a space carries straight on into the next filter;
+**→**, **space** and **enter** also take what is on screen. Completions are scoped to what
+you typed, so `is:a` never offers `dated`.
 
 The bucket keys rewrite the `is:` term in the query rather than keeping separate view
 state, so what you see is always explained by the string in the bar.
