@@ -436,6 +436,23 @@ async def test_ctrl_backspace_deletes_the_word_to_the_left(
         assert screen.bar.value == "kind:"  # `:` is a word boundary, so `genre:` was two
 
 
+async def test_tab_is_focus_movement_once_there_is_nothing_to_complete(
+    app_db: tuple[Path, dict[str, Entity]],
+) -> None:
+    """Taking tab for completion left it dead on the table — it has to mean *something*."""
+    path, _ = app_db
+    app = _app(path)
+    async with app.run_test(size=(140, 24)) as pilot:
+        await pilot.pause()
+        screen = _browse(app)
+        for key in ("shift+tab", "tab"):
+            screen.table.focus()
+            await pilot.pause()
+            await pilot.press(key)
+            await pilot.pause()
+            assert app.screen.focused is screen.bar, key
+
+
 async def _tab_walk(pilot: object, app: RdtApp, start: str, presses: int) -> list[str]:
     """Tab `presses` times from `start`, collecting the query each press leaves in force.
 

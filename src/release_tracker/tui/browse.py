@@ -354,9 +354,17 @@ class BrowseScreen(Screen[None]):
         and the table follows it, so each tab shows what the next candidate *means*
         before anything is committed. One that has to rewrite the token is spliced in
         outright — there is nothing to preview and nothing gained by withholding it.
+
+        Away from the bar there is nothing to complete, so the key goes back to meaning
+        what it means in every other Textual app and every browser: move focus. With only
+        the bar and the table to move between, that is the way back to the query.
         """
         bar = self.bar
         if not bar.has_focus:
+            if delta > 0:
+                self.focus_next()
+            else:
+                self.focus_previous()
             return
         if (walk := self._live_walk() or self._fresh_walk()) is None:
             self._walk = None
