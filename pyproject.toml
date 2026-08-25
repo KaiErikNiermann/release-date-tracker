@@ -16,6 +16,7 @@ dependencies = [
     "openai>=1.60",
     "dateparser>=1.2",
     "feedparser (>=6.0)",
+    "textual (>=8.2,<9.0)",
 ]
 
 [project.scripts]
@@ -28,6 +29,8 @@ packages = [{ include = "release_tracker", from = "src" }]
 ruff = ">=0.9"
 pyright = ">=1.1.390"
 pytest = ">=8.3"
+textual-dev = "^1.8.0"
+pytest-asyncio = "^1.4.0"
 
 [build-system]
 requires = ["poetry-core>=2.0"]
@@ -78,3 +81,7 @@ reportUnknownArgumentType = false
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+# Textual's Pilot harness drives the app through async tests; auto mode keeps them
+# looking like every other test in here (no per-test decorator).
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

@@ -1,0 +1,87 @@
+Screen {
+    background: $surface;
+}
+
+#query {
+    dock: top;
+    border: none;
+    background: $panel;
+    padding: 0 1;
+}
+
+#hint {
+    dock: top;
+    height: 1;
+    padding: 0 1;
+    color: $text-muted;
+    background: $panel;
+}
+
+#rows {
+    height: 1fr;
+    scrollbar-size-vertical: 1;
+}
+
+#status {
+    dock: bottom;
+    height: 1;
+    padding: 0 1;
+    color: $text-muted;
+}
+
+CardScreen {
+    align: center middle;
+}
+
+#card {
+    width: 84;
+    max-width: 90%;
+    height: auto;
+    max-height: 90%;
+    border: round $primary;
+    background: $surface;
+    padding: 1 2;
+}
+
+#card-title {
+    text-style: bold;
+    padding-bottom: 1;
+}
+
+StateToggle {
+    height: 3;
+    padding: 1 0;
+}
+
+StateToggle:focus {
+    border-left: thick $accent;
+}
+
+#card-body {
+    height: auto;
+    max-height: 20;
+    overflow-y: auto;
+}
+
+AddScreen {
+    align: center middle;
+}
+
+#add {
+    width: 96;
+    max-width: 95%;
+    height: 24;
+    border: round $accent;
+    background: $surface;
+    padding: 1 2;
+}
+
+#add-status {
+    height: 1;
+    color: $text-muted;
+}
+
+#candidates {
+    height: 1fr;
+    border: none;
+}

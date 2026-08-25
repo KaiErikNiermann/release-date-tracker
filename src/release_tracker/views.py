@@ -385,6 +385,17 @@ def _track_row(
     )
 
 
+def track_row(
+    db: Database, entity: Entity, today: date, settings: Settings, has_notes: bool = False
+) -> TrackRow:
+    """Rebuild one row (~0.3 ms).
+
+    After a write, patching the single affected row beats rebuilding the whole snapshot
+    by ~two orders of magnitude, which is what lets a long-running view stay live.
+    """
+    return _track_row(db, entity, today, settings, has_notes)
+
+
 def track_rows(
     db: Database, today: date, settings: Settings, *, kind: MediaKind | None = None
 ) -> list[TrackRow]:

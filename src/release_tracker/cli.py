@@ -736,6 +736,18 @@ def enrich(
     db.close()
 
 
+@app.command()
+def tui() -> None:
+    """Browse and query the tracker interactively (Textual).
+
+    The same query language as `rdt find`, live as you type, plus a card modal for
+    changing state and a palette for adding titles.
+    """
+    from release_tracker.tui import run
+
+    run()
+
+
 @app.command(
     context_settings={"ignore_unknown_options": True},  # so `-tag:horror` is a query, not `-t`
 )
