@@ -70,6 +70,14 @@ from release_tracker.models import (
     WorkRelation,
 )
 from release_tracker.pipeline import RefreshResult, pull_all, pull_entity, refresh_entities
+from release_tracker.render import (
+    fmt_cell,
+    fresh_dot,
+    legend_dots,
+    stance_color,
+    title_cell,
+    wcw_cells,
+)
 from release_tracker.resolve import best_estimates
 from release_tracker.seed import LocalSeed, NotionSeed, SeedProvider
 from release_tracker.sources.base import Candidate, make_client
@@ -508,7 +516,7 @@ def _render_report(r: RdReport) -> None:
         table.add_column(col)
     for c in r.claims:
         label = "confirmed" if c.stance == "confirmed" else "speculative"
-        stance = f"[{_stance_color(c.stance == 'confirmed')}]{label}[/]"
+        stance = f"[{stance_color(c.stance == 'confirmed')}]{label}[/]"
         table.add_row(
             c.label,
             c.when.isoformat() if c.when else "—",
@@ -628,7 +636,7 @@ def _render(rows: list[tuple[str, MediaKind, object]]) -> None:
                 end=est.date_end,
                 end_precision=est.precision,
             ),
-            f"[{_stance_color(est.certainty in (Certainty.CONFIRMED, Certainty.DELAYED))}]"
+            f"[{stance_color(est.certainty in (Certainty.CONFIRMED, Certainty.DELAYED))}]"
             f"{est.certainty.value}[/]",
             str(est.price) if est.price else "—",
             f"{est.confidence:.2f}",
@@ -1071,7 +1079,7 @@ def _render_artists(rows: list[views.ArtistRow]) -> None:
         else:
             last = "[dim]—[/]"
         table.add_row(
-            _fresh_dot(r.freshness),
+            fresh_dot(r.freshness),
             _linked(r.name, r.profile_url),  # click the name -> straight to their profile
             r.kind.value,
             last,  # click the last post -> the drop itself, no recommender feed
@@ -2039,80 +2047,11 @@ def _print_enrich(entity: Entity, s: EnrichSummary) -> None:
     )
 
 
-def _fmt_tag(tag: views.TagLine) -> str:
-    return f"[dim]~{tag.name}[/]" if tag.predicted else tag.name
-
-
-def _fmt_when(when: date | None, precision: DatePrecision) -> str:
-    """Render a date at its own precision, so the string conveys how firm it is."""
-    if when is None:
-        return "—"
-    match precision:
-        case DatePrecision.YEAR:
-            return str(when.year)
-        case DatePrecision.QUARTER:
-            return f"{when.year} Q{(when.month - 1) // 3 + 1}"
-        case DatePrecision.MONTH:
-            return when.strftime("%Y-%m")
-        case _:
-            return when.isoformat()
-
-
-def _stance_color(confirmed: bool) -> str:
-    """Configurable confirmed/speculative color (color-blind-safe cyan/orange by default)."""
-    s = get_settings()
-    return s.confirmed_color if confirmed else s.speculative_color
-
-
-def _fresh_color(freshness: views.Freshness) -> str:
-    """Configurable freshness-dot color for the fresh/aging/stale ramp."""
-    s = get_settings()
-    return {"fresh": s.fresh_color, "aging": s.aging_color, "stale": s.stale_color}[freshness]
-
-
-def _legend_dots() -> str:
-    """The fresh/aging/stale legend swatch, using the configured colors."""
-    s = get_settings()
-    return f"[{s.fresh_color}]●[/]fresh [{s.aging_color}]●[/]aging [{s.stale_color}]●[/]stale"
-
-
-def _fmt_cell(cell: views.DateCell | None) -> str:
-    """A date colored by stance (confirmed vs speculative); colors are configurable.
-
-    A window renders as ``start-end`` (e.g. 2027-2029), preserving the ambiguity.
-    """
-    if cell is None or cell.when is None:
-        return "[dim]—[/]"
-    text = _fmt_when(cell.when, cell.precision)
-    if cell.end is not None:
-        text = f"{text}–{_fmt_when(cell.end, cell.precision)}"  # noqa: RUF001
-    return f"[{_stance_color(cell.confirmed)}]{text}[/]"
-
-
-def _fresh_dot(freshness: views.Freshness | None) -> str:
-    return f"[{_fresh_color(freshness)}]●[/]" if freshness else "[dim]·[/]"
-
-
-def _title_cell(row: views.TrackRow) -> str:
-    title = f"{row.title} [yellow]*[/]" if row.has_notes else row.title
-    if row.blockers:  # an unsatisfied profile / unresolved blocker — flagged, never hidden
-        title += f" [red]⛔[/] [dim]{row.blockers[0]}[/]"
-    return title
-
-
 def _wcw(table: Table) -> None:
     """The shared who/where/what columns."""
     table.add_column("Who", max_width=16, no_wrap=True, overflow="ellipsis")
     table.add_column("Where", max_width=12, no_wrap=True, overflow="ellipsis")
     table.add_column("What", max_width=40, no_wrap=True, overflow="ellipsis")
-
-
-def _wcw_cells(r: views.TrackRow) -> tuple[str, str, str]:
-    return (
-        ", ".join(r.who[:2]) or "[dim]—[/]",
-        ", ".join(r.where[:2]) or "[dim]—[/]",
-        ", ".join(_fmt_tag(t) for t in r.what[:4]) or "[dim]—[/]",
-    )
 
 
 def _render_upcoming(rows: list[views.TrackRow], days: int | None) -> None:
@@ -2138,20 +2077,20 @@ def _render_upcoming(rows: list[views.TrackRow], days: int | None) -> None:
         # shows its real (past) date — it sorts to the tail but isn't pretending to be undated.
         no_date = r.pivot_when is None
         table.add_row(
-            "[dim]no date[/]" if no_date else _fmt_cell(r.theatrical),
-            "[dim]yet[/]" if no_date else _fmt_cell(r.digital),
-            _fresh_dot(r.freshness),
-            _title_cell(r),
+            "[dim]no date[/]" if no_date else fmt_cell(r.theatrical),
+            "[dim]yet[/]" if no_date else fmt_cell(r.digital),
+            fresh_dot(r.freshness),
+            title_cell(r),
             r.kind.value,
-            *_wcw_cells(r),
+            *wcw_cells(r),
         )
     console.print(table)
     if rows:
         console.print(
-            f"[dim]dates: [{_stance_color(True)}]confirmed[/] / "
-            f"[{_stance_color(False)}]speculative[/]   "
+            f"[dim]dates: [{stance_color(True)}]confirmed[/] / "
+            f"[{stance_color(False)}]speculative[/]   "
             "[dim]no date yet[/] = announced but not datable   "
-            f"⟳ {_legend_dots()}   [yellow]*[/]=notes[/]"
+            f"⟳ {legend_dots()}   [yellow]*[/]=notes[/]"
         )
     else:
         console.print("[dim]No upcoming releases. `rdt add` then `rdt enrich`.[/]")
@@ -2202,12 +2141,12 @@ def _render_find(rows: list[views.TrackRow], expr: str) -> None:
     for r in rows:
         table.add_row(
             r.pivot_when.isoformat() if r.pivot_when else "[dim]—[/]",
-            _fresh_dot(r.freshness),
-            _title_cell(r),
+            fresh_dot(r.freshness),
+            title_cell(r),
             r.kind.value,
             _bucket_label(r.bucket),
             r.state.value,
-            *_wcw_cells(r),
+            *wcw_cells(r),
         )
     console.print(table)
     console.print(
@@ -2228,10 +2167,10 @@ def _render_watched(rows: list[views.TrackRow]) -> None:
         state = _watched_state_label(r.state)
         table.add_row(
             r.pivot_when.isoformat() if r.pivot_when else "[dim]—[/]",
-            _title_cell(r),
+            title_cell(r),
             r.kind.value,
             state,
-            *_wcw_cells(r),
+            *wcw_cells(r),
         )
     console.print(table)
     if rows:
@@ -2249,11 +2188,11 @@ def _render_available(rows: list[views.TrackRow]) -> None:
     _wcw(table)
     for r in rows:
         table.add_row(
-            _fresh_dot(r.freshness),
-            _title_cell(r),
+            fresh_dot(r.freshness),
+            title_cell(r),
             r.kind.value,
             r.state.value,
-            *_wcw_cells(r),
+            *wcw_cells(r),
         )
     console.print(table)
     if rows:
@@ -2308,13 +2247,11 @@ def _render_card(card: views.WorkCard) -> None:
         console.print("[bold]Blocked by[/]")
         for b in card.blockers:
             if b.status == "resolved":
-                state = (
-                    f"[{_stance_color(True)}]✓ {b.when.isoformat() if b.when else 'resolved'}[/]"
-                )
+                state = f"[{stance_color(True)}]✓ {b.when.isoformat() if b.when else 'resolved'}[/]"
             elif b.status == "never":
                 state = "[red]✗ never[/]"
             else:
-                state = f"[{_stance_color(False)}]⏳ pending[/]"
+                state = f"[{stance_color(False)}]⏳ pending[/]"
             console.print(f"  {state} {b.name}")
 
 
