@@ -460,10 +460,15 @@ async def capture_candidates(
     from release_tracker.matching import candidates_for
 
     kinds = (kind_hint,) if kind_hint is not None else _DETECT_KINDS
-    out: list[tuple[MediaKind, Candidate]] = []
-    for kind in kinds:
+
+    async def for_kind(kind: MediaKind) -> list[tuple[MediaKind, Candidate]]:
         found = await candidates_for(client, Entity.create(query, kind), settings, limit=limit)
-        out.extend((kind, c) for c in found)
+        return [(kind, c) for c in found]
+
+    # An unhinted sweep is three independent kind searches; running them concurrently turns
+    # what was a chain of round trips into roughly one, which is what makes type-ahead viable.
+    batches = await asyncio.gather(*(for_kind(k) for k in kinds))
+    out = [pair for batch in batches for pair in batch]
     out.sort(key=lambda kc: kc[1].score, reverse=True)
     return out
 

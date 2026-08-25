@@ -11,6 +11,7 @@ they stay easy to test.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date
 
 import httpx
@@ -20,7 +21,7 @@ from release_tracker.db import Database
 from release_tracker.logging import get_logger
 from release_tracker.models import Entity, MediaKind
 from release_tracker.sources import sources_for
-from release_tracker.sources.base import Candidate
+from release_tracker.sources.base import Candidate, Source
 from release_tracker.titles import search_title, title_similarity
 
 log = get_logger("matching")
@@ -99,17 +100,23 @@ async def candidates_for(
 ) -> list[Candidate]:
     """Query every Tier-0 source supporting this kind, score and rank candidates."""
     query = search_title(entity.title)
-    ranked: list[Candidate] = []
-    for src in sources_for(entity.kind):
+
+    async def search(src: Source) -> list[Candidate]:
+        """One source's hits, or none — a dead provider degrades the search, never fails it."""
         try:
-            found = await src.search_candidates(client, query, entity.kind, settings, limit=limit)
+            return await src.search_candidates(client, query, entity.kind, settings, limit=limit)
         except Exception as exc:
             log.warning(
                 "matching.source_error", source=src.name, entity=entity.title, error=str(exc)
             )
-            continue
-        for cand in found:
-            cand.score = score_candidate(entity.title, hint_year, cand, entity.kind)
-            ranked.append(cand)
+            return []
+
+    # Fanned out rather than awaited in turn: the sources are independent HTTP calls, so a
+    # serial loop cost the sum of their latencies for no reason. Per-source isolation stays
+    # inside `search`, so this cannot turn one flaky provider into a total failure.
+    batches = await asyncio.gather(*(search(src) for src in sources_for(entity.kind)))
+    ranked = [cand for found in batches for cand in found]
+    for cand in ranked:
+        cand.score = score_candidate(entity.title, hint_year, cand, entity.kind)
     ranked.sort(key=lambda c: c.score, reverse=True)
     return ranked
