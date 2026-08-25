@@ -64,9 +64,9 @@ class AddScreen(ModalScreen[Entity | None]):
 
     def on_mount(self) -> None:
         bar = self.query_one("#add-query", Input)
-        # Carry over only the free text — the browse query's filters (is:, tag:, state:)
-        # narrow what you already track and mean nothing to an external search.
-        bar.value = query.parse(self._initial).text
+        # Carry over the terms an external search can act on (text + kind/year/season);
+        # the browse query's local-only filters (is:, tag:, state:) drop out.
+        bar.value = query.parse(self._initial).external
         bar.focus()
         if bar.value:
             self._schedule()

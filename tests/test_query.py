@@ -388,3 +388,13 @@ def test_completes_only_the_segment_under_the_caret_in_a_comma_list() -> None:
 
 def test_negation_is_preserved_through_completion() -> None:
     assert query.suggest("-genre:hor", 10, _VOCAB)[0].insert == "-genre:horror"
+
+
+def test_external_carries_the_hints_and_drops_local_only_filters() -> None:
+    """Refining in the browse bar then pressing `a` should not mean retyping the kind."""
+    q = query.parse('dune kind:movie year:2026 is:available tag:horror cast:"Timothee Chalamet"')
+    assert q.external == "dune kind:movie year:2026"
+
+
+def test_external_of_a_bare_query_is_just_the_text() -> None:
+    assert query.parse("the odyssey").external == "the odyssey"

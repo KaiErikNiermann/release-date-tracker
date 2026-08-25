@@ -252,6 +252,24 @@ class Query:
         return " ".join(v for t in self.terms if t.field == BARE_FIELD for v in t.values)
 
     @property
+    def external(self) -> str:
+        """The sub-query an external source search understands: free text plus the hints.
+
+        Filters that only mean something locally (``is:``, ``tag:``, ``cast:``, ``state:``)
+        drop out — they narrow what you already track, not what TMDB returns. Carrying the
+        rest over is what lets you refine a search in the browse bar and hand it straight
+        to the add palette without retyping.
+        """
+        parts = [self.text]
+        if (kind := self.kind_hint) is not None:
+            parts.append(f"kind:{kind.value}")
+        if (year := self.year_hint) is not None:
+            parts.append(f"year:{year}")
+        if (season := self.season_hint) is not None:
+            parts.append(f"season:{season}")
+        return " ".join(p for p in parts if p)
+
+    @property
     def kind_hint(self) -> MediaKind | None:
         """``kind:`` as a :class:`MediaKind`, for ``capture_candidates(kind_hint=...)``."""
         term = self._first("kind")
