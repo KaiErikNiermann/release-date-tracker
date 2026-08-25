@@ -95,7 +95,7 @@ rdt upcoming 'tag:"body horror" year:2026..2028'
 - **tab** / **shift+tab** walk the completions · **1/2/3** available / upcoming / watched
 - **enter** open the work card · **←/→** change state (auto-saves) · **esc** back
 - **a** add a title — same syntax, pointed at TMDB/IGDB/Steam, with candidate selection
-- **/** back to the query bar · **r** reload · **q** quit
+- **/** back to the query bar · **ctrl+backspace** delete a word · **r** reload · **q** quit
 
 A half-typed value is shown as what it is about to mean: `is:a` greys `ging` in after the
 caret and the table already shows `is:aging`, tab walks that preview through the rest of

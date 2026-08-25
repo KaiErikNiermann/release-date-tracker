@@ -420,6 +420,22 @@ async def test_leaving_the_bar_commits_the_preview(
         assert _titles(app) == ["Dune: Part Three"]
 
 
+async def test_ctrl_backspace_deletes_the_word_to_the_left(
+    app_db: tuple[Path, dict[str, Entity]],
+) -> None:
+    """Textual binds ctrl+backspace to delete_right_word; nobody means that."""
+    path, _ = app_db
+    app = _app(path)
+    async with app.run_test(size=(140, 24)) as pilot:
+        screen = await _type(pilot, app, "kind:movie genre:horror")
+        await pilot.press("ctrl+backspace")
+        await pilot.pause()
+        assert screen.bar.value == "kind:movie genre:"
+        await pilot.press("ctrl+backspace", "ctrl+backspace")
+        await pilot.pause()
+        assert screen.bar.value == "kind:"  # `:` is a word boundary, so `genre:` was two
+
+
 async def _tab_walk(pilot: object, app: RdtApp, start: str, presses: int) -> list[str]:
     """Tab `presses` times from `start`, collecting the query each press leaves in force.
 

@@ -38,11 +38,25 @@ _BUCKET_KEYS = {"1": Bucket.AVAILABLE, "2": Bucket.UPCOMING, "3": Bucket.WATCHED
 class QueryInput(Input):
     """The query bar.
 
-    Adds the one thing the browse screen needs that a plain ``Input`` will not give it:
-    a settable completion tail. Textual fills one in only from a ``Suggester``, which is
-    handed the whole value and nothing else; ours depends on the caret and on how far the
-    tab walk has got, so the screen drives it directly.
+    Two things the browse screen needs that a plain ``Input`` will not give it:
+
+    * a settable completion tail. Textual fills one in only from a ``Suggester``, which is
+      handed the whole value and nothing else; ours depends on the caret and on how far
+      the tab walk has got, so the screen drives it directly.
+    * ctrl+backspace deleting the word to the *left*. Textual binds it to
+      ``delete_right_word``, which no terminal user expects. (In a terminal without the
+      kitty keyboard protocol, ctrl+backspace is indistinguishable from backspace and
+      only alt+backspace / ctrl+w get through — nothing can be done about that here.)
     """
+
+    BINDINGS: ClassVar[list[BindingType]] = [
+        Binding(
+            "ctrl+backspace,ctrl+h,alt+backspace",
+            "delete_left_word",
+            "Delete word left",
+            show=False,
+        ),
+    ]
 
     @property
     def ghost(self) -> str:
