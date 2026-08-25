@@ -390,6 +390,22 @@ def test_narrow_descriptor_field_only_offers_its_own_kind() -> None:
     assert [s.label for s in query.suggest("theme:", 6, _VOCAB)] == ["body horror"]
 
 
+def test_value_completion_is_scoped_to_the_typed_prefix() -> None:
+    """A typed character has to narrow the list, or tab walks through what it ruled out."""
+    labels = [s.label for s in query.suggest("is:a", 4, _VOCAB, limit=20)]
+    assert labels == ["aging", "available"]  # not `dated`, `stale`, `speculative`, ...
+
+
+def test_a_word_start_counts_as_a_prefix() -> None:
+    """Names are looked up by whichever part of them comes to mind."""
+    assert query.suggest("cast:rit", 8, _VOCAB)[0].label == "Alan Ritchson"
+
+
+def test_a_mid_word_fragment_still_finds_something_rather_than_nothing() -> None:
+    """Nothing starts with `itch`, so the substring fallback takes over."""
+    assert query.suggest("cast:itch", 9, _VOCAB)[0].label == "Alan Ritchson"
+
+
 def test_suggestion_splices_back_into_the_source() -> None:
     """The contract the widget relies on: source[:start] + insert + source[end:]."""
     source = "kind:tv cast:rit year:2026"

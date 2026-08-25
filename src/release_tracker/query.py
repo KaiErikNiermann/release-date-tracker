@@ -18,6 +18,7 @@ kind grows the language with no edit here.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dc_field
@@ -530,6 +531,21 @@ def _values_for(field: str, vocab: Vocabulary) -> list[tuple[VocabEntry, str]]:
     return []
 
 
+_WORDS = re.compile(r"[^0-9a-z]+")
+
+
+def _word_prefixed(value: str, needle: str) -> bool:
+    """Does ``value`` begin with ``needle``, at the start of the value or of one of its words?
+
+    Prefix rather than substring, so that typing narrows monotonically: ``is:a`` offers
+    *aging* and *available* but not *dated*, which the typed ``a`` has already ruled out
+    as far as the reader is concerned. Word starts still count, because a name is looked
+    up by whichever part of it comes to mind — ``cast:rit`` must find *Alan Ritchson*.
+    """
+    low = value.lower()
+    return low.startswith(needle) or any(w.startswith(needle) for w in _WORDS.split(low) if w)
+
+
 def _quote(value: str) -> str:
     return f"{QUOTE}{value}{QUOTE}" if any(c.isspace() or c == "," for c in value) else value
 
@@ -564,7 +580,10 @@ def suggest(
     needle = segment.strip().strip(QUOTE).lower()
     kept = f"{lead}," if lead else ""
 
-    hits = [(e, d) for e, d in _values_for(field, vocab) if needle in e.value.lower()]
+    pool = _values_for(field, vocab)
+    hits = [(e, d) for e, d in pool if _word_prefixed(e.value, needle)]
+    if not hits:  # nothing *starts* with it, so fall back to anywhere-in-the-value
+        hits = [(e, d) for e, d in pool if needle in e.value.lower()]
     hits.sort(key=lambda ed: (not ed[0].value.lower().startswith(needle), -ed[0].uses, ed[0].value))
     return tuple(
         Suggestion(
