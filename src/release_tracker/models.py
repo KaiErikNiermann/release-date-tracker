@@ -125,6 +125,19 @@ class ConsumptionState(enum.StrEnum):
     SKIPPED = "skipped"  # consciously passed on (not for me) — preserved, not deleted
 
 
+class Bucket(enum.StrEnum):
+    """Which of the three consumption surfaces a tracked work lands on.
+
+    Exhaustive and disjoint: every work is in exactly one, so there is no limbo. Derived
+    from ``ConsumptionState`` + the resolved availability date (see ``views.bucket_of``),
+    which is the single classifier both the CLI views and the query language use.
+    """
+
+    AVAILABLE = "available"  # out, confirmed, and you haven't finished it
+    UPCOMING = "upcoming"  # not out yet (or out but not available to you), incl. the TBA tail
+    WATCHED = "watched"  # finished with: watched / dropped / skipped
+
+
 class SocialPlatform(enum.StrEnum):
     """A creator's content/social platform, for the artist-radar."""
 

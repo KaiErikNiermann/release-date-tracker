@@ -25,6 +25,7 @@ from release_tracker.contingency import (
 from release_tracker.db import Database
 from release_tracker.models import (
     BestEstimate,
+    Bucket,
     Certainty,
     ConsumptionState,
     CreditRole,
@@ -131,12 +132,30 @@ class TrackRow:
     pivot_confirmed: bool
     available_resolution: Resolution  # "available to me": max over my contingencies + blockers
     blockers: tuple[str, ...]  # human labels for an unsatisfied profile / pending|never condition
-    who: tuple[str, ...]
-    where: tuple[str, ...]
+    # The who/where/what graph, carried in full and role-qualified. Display limits belong to
+    # the renderer, not the model: truncating here would make `cast:` silently miss a
+    # third-billed actor, and flattening the role would make `director:` and `cast:` the
+    # same query. See `who`/`where` below for the flat display forms.
+    credits: tuple[CreditLine, ...]
+    platforms: tuple[PlatformLine, ...]
     what: tuple[TagLine, ...]
+    series: tuple[str, ...]
+    aliases: tuple[str, ...]
+    season: int | None
+    part: int | None
+    bucket: Bucket  # which consumption surface this lands on — the one partition rule
     freshness: Freshness | None
     has_notes: bool
     state: ConsumptionState
+
+    @property
+    def who(self) -> tuple[str, ...]:
+        """Credited names, de-duplicated, in credit order (the flat display form)."""
+        return tuple(dict.fromkeys(c.name for c in self.credits))
+
+    @property
+    def where(self) -> tuple[str, ...]:
+        return tuple(p.name for p in self.platforms)
 
     @property
     def available_when(self) -> date | None:
@@ -146,6 +165,19 @@ class TrackRow:
     @property
     def available_confirmed(self) -> bool:
         return self.available_resolution.status is ResolutionStatus.RESOLVED
+
+    @property
+    def years(self) -> frozenset[int]:
+        """Every year this work can reasonably be said to belong to.
+
+        A film with a December theatrical and a February digital spans two years, and a
+        `year:` query means either — matching only the pivot would drop half of them.
+        """
+        cells = (self.theatrical, self.digital)
+        return frozenset(
+            {c.when.year for c in cells if c is not None and c.when is not None}
+            | ({self.pivot_when.year} if self.pivot_when is not None else set())
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -328,7 +360,6 @@ def _track_row(
     blockers += tuple(
         c.blocker for c in conditions if c.status is not ResolutionStatus.RESOLVED and c.blocker
     )
-    credits = _credit_lines(db, entity.id)
     return TrackRow(
         entity_id=entity.id,
         title=entity.title,
@@ -339,18 +370,29 @@ def _track_row(
         pivot_confirmed=pivot is not None and pivot.certainty is Certainty.CONFIRMED,
         available_resolution=available_to_me,
         blockers=blockers,
-        who=tuple(dict.fromkeys(c.name for c in credits))[:2],
-        where=tuple(p.name for p in _platform_lines(db, entity.id)[:2]),
-        what=tuple(_tag_lines(db, entity.id)[:4]),
+        credits=tuple(_credit_lines(db, entity.id)),
+        platforms=tuple(_platform_lines(db, entity.id)),
+        what=tuple(_tag_lines(db, entity.id)),
+        series=_series_names(db, entity.id),
+        aliases=tuple(entity.aliases),
+        season=entity.season,
+        part=entity.part,
+        bucket=bucket_of(entity.consumption_state, available_to_me, today),
         freshness=freshness(pivot.fetched_at if pivot else None, today, settings),
         has_notes=has_notes,
         state=entity.consumption_state,
     )
 
 
-def _track_rows(
-    db: Database, today: date, settings: Settings, *, kind: MediaKind | None
+def track_rows(
+    db: Database, today: date, settings: Settings, *, kind: MediaKind | None = None
 ) -> list[TrackRow]:
+    """Every tracked work as a fully-built row, unfiltered and unsorted.
+
+    The one expensive read (~8-10 queries per entity). Callers that need more than one
+    bucket — the TUI, which filters in memory per keystroke — should build this **once**
+    rather than calling ``upcoming``/``available``/``watched``, which each rebuild it.
+    """
     notes = db.note_counts()
     return [
         _track_row(db, e, today, settings, notes.get(e.id, 0) > 0)
@@ -425,18 +467,33 @@ _FINISHED = (ConsumptionState.WATCHED, ConsumptionState.DROPPED, ConsumptionStat
 _ACTIVE = (ConsumptionState.WANT, ConsumptionState.WATCHING)
 
 
-def _is_available(r: TrackRow, today: date) -> bool:
-    """Out and unfinished: a *confirmed* consumption-channel date has elapsed, still active.
+def bucket_of(state: ConsumptionState, available: Resolution, today: date) -> Bucket:
+    """Classify a work into exactly one consumption bucket.
 
-    A speculative past date does not count (we don't know it released), and neither does a
-    theatrical release under a digital preference — only the strict ``available_when`` governs.
+    The single partition rule, shared by the CLI views, the query language's ``is:`` field
+    and the TUI — so none of them can disagree about what "available" means. Out and
+    unfinished requires a *confirmed* consumption-channel date that has elapsed: a
+    speculative past date does not count (we don't know it released), and neither does a
+    theatrical release under a digital preference — only the strict ``available`` governs.
+
+    Note ``UNSET`` is in neither ``_FINISHED`` nor ``_ACTIVE``, so an unset work is never
+    *available*; it falls to ``upcoming`` regardless of its date, until you state an intent.
     """
-    return (
-        r.available_when is not None
-        and r.available_when < today
-        and r.available_confirmed
-        and r.state in _ACTIVE
-    )
+    if state in _FINISHED:
+        return Bucket.WATCHED
+    if (
+        available.when is not None
+        and available.when < today
+        and available.status is ResolutionStatus.RESOLVED
+        and state in _ACTIVE
+    ):
+        return Bucket.AVAILABLE
+    return Bucket.UPCOMING
+
+
+def _is_available(r: TrackRow, today: date) -> bool:
+    """Out and unfinished — now just a read of the bucket decided in :func:`bucket_of`."""
+    return r.bucket is Bucket.AVAILABLE
 
 
 def _has_firm_upcoming_date(r: TrackRow, today: date) -> bool:
@@ -467,7 +524,7 @@ def upcoming(
     The ``days`` window only applies to firm-dated rows; the no-date tail is dropped when set.
     """
     rows: list[TrackRow] = []
-    for r in _track_rows(db, today, settings, kind=kind):
+    for r in track_rows(db, today, settings, kind=kind):
         if r.state in _FINISHED or _is_available(r, today):
             continue
         if _has_firm_upcoming_date(r, today):
@@ -487,7 +544,7 @@ def available(
     kind: MediaKind | None = None,
 ) -> list[TrackRow]:
     """Works that are out and unfinished (want/watching), newest first."""
-    rows = [r for r in _track_rows(db, today, settings, kind=kind) if _is_available(r, today)]
+    rows = [r for r in track_rows(db, today, settings, kind=kind) if _is_available(r, today)]
     rows.sort(key=lambda r: r.available_when or date.min, reverse=True)
     return rows
 
@@ -500,7 +557,7 @@ def watched(
     kind: MediaKind | None = None,
 ) -> list[TrackRow]:
     """Works you're done with (watched/dropped/skipped), most recently released first."""
-    rows = [r for r in _track_rows(db, today, settings, kind=kind) if r.state in _FINISHED]
+    rows = [r for r in track_rows(db, today, settings, kind=kind) if r.state in _FINISHED]
     rows.sort(key=lambda r: r.pivot_when or date.min, reverse=True)
     return rows
 

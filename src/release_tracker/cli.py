@@ -2196,9 +2196,9 @@ def _wcw(table: Table) -> None:
 
 def _wcw_cells(r: views.TrackRow) -> tuple[str, str, str]:
     return (
-        ", ".join(r.who) or "[dim]—[/]",
-        ", ".join(r.where) or "[dim]—[/]",
-        ", ".join(_fmt_tag(t) for t in r.what) or "[dim]—[/]",
+        ", ".join(r.who[:2]) or "[dim]—[/]",
+        ", ".join(r.where[:2]) or "[dim]—[/]",
+        ", ".join(_fmt_tag(t) for t in r.what[:4]) or "[dim]—[/]",
     )
 
 
