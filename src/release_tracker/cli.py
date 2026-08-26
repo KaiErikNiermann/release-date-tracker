@@ -1711,8 +1711,8 @@ def edit_date(
     edtf: Annotated[
         str,
         typer.Argument(
-            help="EDTF date: 2026 (year), 2026-09 (month), 2026-34 (Q2), 2026-09-18 (day); "
-            "trailing ? = uncertain, ~ = approximate (e.g. 2026-09~)"
+            help="EDTF date: 2026 (year), 2026-09 (month), 2026-Q2 (quarter), 2026-09-18 "
+            "(day), 2027..2029 (window); trailing ? = uncertain, ~ = approximate (2026-09~)"
         ),
     ],
     channel: Annotated[

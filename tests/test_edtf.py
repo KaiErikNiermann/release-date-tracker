@@ -54,6 +54,36 @@ def test_parse_edtf(
     assert (parsed.when, parsed.precision, parsed.certainty) == (when, precision, certainty)
 
 
+@pytest.mark.parametrize(
+    ("text", "canonical"),
+    [
+        ("2026-Q3", "2026-35"),
+        ("2026 Q3", "2026-35"),
+        ("2026q3", "2026-35"),
+        ("2026-q1", "2026-33"),
+        ("2026-Q4~", "2026-36~"),
+        ("xxxx", "XXXX"),
+    ],
+)
+def test_human_spellings_normalize_onto_canonical_edtf(text: str, canonical: str) -> None:
+    """`2026-35` for Q3 is the one bit of EDTF with no mnemonic — accept the obvious form."""
+    parsed = parse_edtf(text)
+    assert to_edtf(parsed.when, parsed.precision, parsed.certainty) == canonical
+
+
+def test_a_double_dot_range_is_an_interval() -> None:
+    """`..` is the range separator every other tool uses; EDTF's is `/`."""
+    parsed = parse_edtf("2026-06..2026-08")
+    assert (parsed.when, parsed.end) == (date(2026, 6, 1), date(2026, 8, 1))
+    assert parse_edtf("2026-06..2026-08") == parse_edtf("2026-06/2026-08")
+
+
+def test_normalizing_does_not_widen_what_is_rejected() -> None:
+    for bad in ["2026-Q5", "2026-Q", "Q3", "2026-13", "2026 Q3 Q4"]:
+        with pytest.raises(ValueError, match=r"EDTF|empty|interval"):
+            parse_edtf(bad)
+
+
 def test_round_trip_is_stable_on_precision_and_date() -> None:
     # certainty is intentionally lossy (6 stances -> 3 qualifiers); date + precision are not.
     for when, precision in [

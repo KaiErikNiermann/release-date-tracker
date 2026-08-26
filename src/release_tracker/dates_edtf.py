@@ -21,6 +21,7 @@ Also supports an EDTF *interval* (``2027/2029`` — a release window) via the ob
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import date
 
@@ -44,6 +45,8 @@ _CERTAINTY: dict[str, Certainty] = {
 }
 _QUALIFIER_CHARS = "?~%"
 _UNKNOWN = "XXXX"
+# `2026-Q3`, `2026 Q3`, `2026q3` — the spelling everyone reaches for first
+_QUARTER_ALIAS = re.compile(r"^(\d{4})[-\s]?[Qq]([1-4])$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,13 +107,36 @@ def to_edtf(
     return f"{start}/{_single_edtf(end, end_precision or precision, certainty)}"
 
 
+def _normalize(text: str) -> str:
+    """Widen a few human spellings onto canonical EDTF before parsing.
+
+    Nobody types ``2026-35`` for Q3 unprompted — the level-2 sub-year codes are the one
+    part of EDTF with no mnemonic — and ``..`` is the range separator every other tool
+    uses. Accepting them here rather than in the widget keeps every frontend equally
+    forgiving, while :func:`to_edtf` keeps emitting the canonical form, so what is stored
+    and round-tripped is still EDTF proper.
+    """
+    body = text.strip().replace("..", "/")
+    if "/" in body:  # an interval — each side is normalized by the recursive parse
+        return body
+    qualifier = ""
+    if body and body[-1] in _QUALIFIER_CHARS:
+        qualifier, body = body[-1], body[:-1]
+    if body.upper() == _UNKNOWN:
+        return _UNKNOWN + qualifier
+    if (alias := _QUARTER_ALIAS.match(body)) is not None:
+        year, quarter = alias.group(1), int(alias.group(2))
+        return f"{year}-{_quarter_of((quarter - 1) * 3 + 1)}{qualifier}"
+    return body + qualifier
+
+
 def parse_edtf(text: str) -> EdtfDate:
     """Decode an EDTF level-1 single-date literal into the internal model.
 
     Raises :class:`ValueError` on anything outside the supported subset (so callers at
     a boundary can surface a clean message).
     """
-    body = text.strip()
+    body = _normalize(text)
     if not body:
         raise ValueError("empty date")
     if "/" in body:  # an interval: start/end (each side a valid single-date literal)
