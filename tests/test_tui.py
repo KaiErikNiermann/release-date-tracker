@@ -8,9 +8,11 @@ do (the state-toggle flush in particular).
 
 from __future__ import annotations
 
+import sys
 from datetime import UTC, date, datetime
 from itertools import pairwise
 from pathlib import Path
+from typing import TextIO
 
 import pytest
 from textual.widgets import DataTable, Input, Static
@@ -960,3 +962,51 @@ async def test_an_edit_reaches_the_table_behind_the_card(
         await pilot.press("escape")  # out of the card, back to the table
         await pilot.pause()
         assert "Sinners: Redux" in _titles(app)
+
+
+def test_the_tui_never_logs_to_the_terminal_it_is_drawing_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A capture is chatty at INFO, and structlog binds its sink when configured.
+
+    Pointed at stderr, those lines escape the ``redirect_stderr`` Textual runs the app in
+    and smear across the frame until the next full repaint — the add flow's rendering bug.
+    """
+    from release_tracker.tui import app as tui_app
+
+    seen: dict[str, TextIO | None] = {}
+
+    def _spy(*, stream: TextIO | None = None, **_: object) -> None:
+        seen["stream"] = stream
+
+    def _no_run(self: tui_app.RdtApp) -> None:
+        """The screen is not the point here — only what the sink was bound to."""
+
+    monkeypatch.setattr(tui_app, "configure_logging", _spy)
+    monkeypatch.setattr(tui_app.RdtApp, "run", _no_run)
+    monkeypatch.setattr(
+        tui_app, "get_settings", lambda: Settings(RDT_DB_PATH=tmp_path / "d" / "releases.db")
+    )
+
+    tui_app.run()
+
+    sink = seen["stream"]
+    assert sink is not None, "the TUI must pass its own sink, not inherit stderr"
+    assert sink not in (sys.stderr, sys.__stderr__)
+    assert (tmp_path / "d" / "rdt-tui.log").exists()
+
+
+def test_a_configured_sink_takes_the_logs(tmp_path: Path) -> None:
+    """`stream=` is the whole seam the TUI leans on, so pin that it actually diverts."""
+    import structlog
+
+    from release_tracker.logging import configure_logging, get_logger
+
+    path = tmp_path / "rdt-tui.log"
+    try:
+        with path.open("w", encoding="utf-8") as sink:
+            configure_logging(stream=sink)
+            get_logger("test").info("tmdb.movie", entity="Dune")
+    finally:
+        structlog.reset_defaults()
+    assert "tmdb.movie" in path.read_text(encoding="utf-8")

@@ -133,5 +133,18 @@ class RdtApp(App[None]):
 
 
 def run() -> None:
-    configure_logging()
-    RdtApp().run()
+    """Own the terminal for the session, so the log has to go somewhere else.
+
+    structlog binds its sink when configured, so a logger pointed at stderr keeps writing
+    to the *real* terminal even inside the ``redirect_stderr`` Textual runs the app in.
+    The source layer is chatty at INFO (``tmdb.movie``, ``steam.game``, ``enrich.done``),
+    so a capture used to smear those lines across the frame and leave them there until
+    the next full repaint. A file keeps them readable without touching the screen.
+    """
+    settings = get_settings()
+    log_path = settings.db_path.parent / "rdt-tui.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    # Truncated per session: this is a "what did that capture do" log, not an archive.
+    with log_path.open("w", encoding="utf-8") as sink:
+        configure_logging(stream=sink)
+        RdtApp(settings=settings).run()
