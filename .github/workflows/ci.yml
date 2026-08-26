@@ -36,6 +36,11 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: poetry
 
+      # pipx installed Poetry against the runner's own interpreter; without this Poetry
+      # builds the project venv with that one and rejects it as < 3.13.
+      - name: Point Poetry at the selected interpreter
+        run: poetry env use "$(which python)"
+
       - name: Install dependencies
         run: poetry install --with dev
 
@@ -66,6 +71,9 @@ jobs:
         with:
           python-version: "3.13"
           cache: poetry
+
+      - name: Point Poetry at the selected interpreter
+        run: poetry env use "$(which python)"
 
       - name: Build
         run: poetry build

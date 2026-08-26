@@ -29,6 +29,9 @@ jobs:
           python-version: "3.13"
           cache: poetry
 
+      - name: Point Poetry at the selected interpreter
+        run: poetry env use "$(which python)"
+
       - name: Resolve version
         id: version
         run: |
