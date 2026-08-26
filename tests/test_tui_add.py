@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from textual.widgets import Input, OptionList
+from textual.widgets import Input, OptionList, Static
 
 from release_tracker.config import Settings, get_settings
 from release_tracker.db import Database
@@ -70,6 +70,10 @@ async def _open_add(app: RdtApp, pilot: Any) -> AddScreen:
     screen = app.screen
     assert isinstance(screen, AddScreen)
     return screen
+
+
+def _status_text(screen: AddScreen) -> str:
+    return str(screen.query_one("#add-status", Static).content)
 
 
 async def _search_for(pilot: Any, screen: AddScreen, text: str) -> None:
@@ -192,3 +196,74 @@ async def test_a_keystroke_mid_capture_does_not_cancel_the_write(
             await pilot.pause()
 
         assert slow_capture["finished"], "the capture was cancelled by the search"
+
+
+async def test_a_running_capture_is_visible_and_the_bar_is_dead(
+    app: RdtApp,
+    offer: list[tuple[MediaKind, Candidate]],
+    slow_capture: dict[str, Any],
+) -> None:
+    """Several seconds of network used to look exactly like the idle screen."""
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _open_add(app, pilot)
+        await _search_for(pilot, screen, "dune")
+        options = screen.query_one("#candidates", OptionList)
+        bar = screen.query_one("#add-query", Input)
+        assert not options.loading and not bar.disabled
+
+        kind, cand = screen._hits[0]  # pyright: ignore[reportPrivateUsage]
+        screen.capture(kind, cand)
+        await pilot.pause()
+        await asyncio.sleep(0.05)
+        await pilot.pause()
+
+        assert options.loading, "no sign that the capture is running"
+        assert bar.disabled, "the bar still takes keys that will not be read"
+        assert "adding" in _status_text(screen)
+
+
+async def test_a_failed_capture_gives_the_screen_back(
+    app: RdtApp, offer: list[tuple[MediaKind, Candidate]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dead provider must leave a usable palette, not a permanent spinner."""
+
+    async def _boom(*_a: object, **_k: object) -> object:
+        raise RuntimeError("tmdb is down")
+
+    monkeypatch.setattr(add_module, "report_for_candidate", _boom)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _open_add(app, pilot)
+        await _search_for(pilot, screen, "dune")
+
+        kind, cand = screen._hits[0]  # pyright: ignore[reportPrivateUsage]
+        screen.capture(kind, cand)
+        await pilot.pause()
+        await asyncio.sleep(0.05)
+        await pilot.pause()
+
+        options = screen.query_one("#candidates", OptionList)
+        assert not options.loading
+        assert not screen.query_one("#add-query", Input).disabled
+        assert "tmdb is down" in _status_text(screen)
+
+
+async def test_a_search_that_fails_clears_its_own_spinner(
+    app: RdtApp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _boom(*_a: object, **_k: object) -> list[tuple[MediaKind, Candidate]]:
+        raise RuntimeError("no provider")
+
+    monkeypatch.setattr(add_module, "capture_candidates", _boom)
+
+    async def _no_client(_self: RdtApp) -> None:
+        """The failing search never gets as far as using a client."""
+
+    monkeypatch.setattr(RdtApp, "http", _no_client)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _open_add(app, pilot)
+        await _search_for(pilot, screen, "dune")
+
+        assert not screen.query_one("#candidates", OptionList).loading
+        assert "no provider" in _status_text(screen)

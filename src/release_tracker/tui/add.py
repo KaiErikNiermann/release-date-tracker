@@ -139,11 +139,16 @@ class AddScreen(ModalScreen[Entity | None]):
             self._show(cached[1], key)
             return
         self._status(f"[dim]searching “{text}”…[/]")
+        # Cleared by whoever finishes: `_show` on success, the handler below on failure.
+        # Deliberately not a `finally` — a cancelled search must leave the spinner alone,
+        # because the newer keystroke that cancelled it has already raised its own.
+        self._candidates.loading = True
         try:
             hits = await capture_candidates(
                 await self.app.http(), text, self.app.settings, kind_hint=kind_hint
             )
         except Exception as exc:  # a dead provider must not kill the palette
+            self._candidates.loading = False
             self._status(f"[red]search failed:[/] {exc}")
             return
         self._memo[key] = (time.monotonic(), hits)
@@ -152,7 +157,8 @@ class AddScreen(ModalScreen[Entity | None]):
     def _show(self, hits: list[tuple[MediaKind, Candidate]], key: KeyT) -> None:
         self._hits = hits
         self._shown_key = key
-        options = self.query_one("#candidates", OptionList)
+        options = self._candidates
+        options.loading = False
         options.clear_options()
         for kind, cand in hits:
             year = f" [dim]({cand.year})[/]" if cand.year else ""
@@ -190,7 +196,7 @@ class AddScreen(ModalScreen[Entity | None]):
 
         assert isinstance(self.app, RdtApp)
         parsed = query.parse(self.query_one("#add-query", Input).value)
-        self._status(f"[dim]adding “{cand.title}” — pulling dates and credits…[/]")
+        self._busy(True, f"[dim]adding “{cand.title}” — pulling dates and credits…[/]")
         client = await self.app.http()
         try:
             report = await report_for_candidate(
@@ -205,12 +211,25 @@ class AddScreen(ModalScreen[Entity | None]):
                 client=client,
             )
         except Exception as exc:
-            self._status(f"[red]add failed:[/] {exc}")
+            self._busy(False, f"[red]add failed:[/] {exc}")
             return
         if entity is None:
-            self._status("[yellow]not tracked[/] — unknown kind, or no canonical id to pin")
+            self._busy(False, "[yellow]not tracked[/] — unknown kind, or no canonical id to pin")
             return
         self.dismiss(entity)
+
+    def _busy(self, flag: bool, markup: str) -> None:
+        """Show a capture as running: a spinner where the result will land, and a dead bar.
+
+        A capture is several seconds of network — a pull, then enrichment — and the only
+        sign of it was a line of grey text that read much like the search line above it.
+        The spinner is the widget's own `loading`, and disabling the Input says the
+        keystroke would not be read anyway (it no longer cancels the write, but it would
+        queue a search behind it and land on a screen that is about to close).
+        """
+        self._candidates.loading = flag
+        self.query_one("#add-query", Input).disabled = flag
+        self._status(markup)
 
     # --- movement -------------------------------------------------------------------
     @property
