@@ -72,6 +72,23 @@ async def _open_add(app: RdtApp, pilot: Any) -> AddScreen:
     return screen
 
 
+async def _until(pilot: Any, predicate: Any, what: str, timeout: float = 5.0) -> None:
+    """Poll for a condition instead of sleeping a guessed interval.
+
+    The Windows runners are several times slower than a local run, so any fixed sleep long
+    enough to be reliable there is dead time everywhere else — and any shorter one is a
+    flake waiting to happen.
+    """
+    waited = 0.0
+    while waited < timeout:
+        await pilot.pause()
+        if predicate():
+            return
+        await asyncio.sleep(0.02)
+        waited += 0.02
+    raise AssertionError(f"timed out waiting for {what}")
+
+
 def _status_text(screen: AddScreen) -> str:
     return str(screen.query_one("#add-status", Static).content)
 
@@ -80,9 +97,11 @@ async def _search_for(pilot: Any, screen: AddScreen, text: str) -> None:
     screen.query_one("#add-query", Input).focus()
     await pilot.press(*text)
     screen.search(text, None)  # skip the debounce timer; the worker is what we exercise
-    await pilot.pause()
-    await asyncio.sleep(0.05)
-    await pilot.pause()
+    await _until(
+        pilot,
+        lambda: not screen.query_one("#candidates", OptionList).loading,
+        f"the search for {text!r} to settle",
+    )
 
 
 # --- moving between the bar and the candidates --------------------------------------
@@ -189,13 +208,11 @@ async def test_a_keystroke_mid_capture_does_not_cancel_the_write(
         screen.search("dune part", None)  # what a keystroke's debounce would fire
         await pilot.pause()
 
-        for _ in range(40):
-            if slow_capture["finished"]:
-                break
-            await asyncio.sleep(0.02)
-            await pilot.pause()
-
-        assert slow_capture["finished"], "the capture was cancelled by the search"
+        await _until(
+            pilot,
+            lambda: slow_capture["finished"],
+            "the capture to finish — a search cancelled it",
+        )
 
 
 async def test_a_running_capture_is_visible_and_the_bar_is_dead(
@@ -213,11 +230,8 @@ async def test_a_running_capture_is_visible_and_the_bar_is_dead(
 
         kind, cand = screen._hits[0]  # pyright: ignore[reportPrivateUsage]
         screen.capture(kind, cand)
-        await pilot.pause()
-        await asyncio.sleep(0.05)
-        await pilot.pause()
+        await _until(pilot, lambda: options.loading, "the capture to show as running")
 
-        assert options.loading, "no sign that the capture is running"
         assert bar.disabled, "the bar still takes keys that will not be read"
         assert "adding" in _status_text(screen)
 
@@ -238,14 +252,14 @@ async def test_a_failed_capture_gives_the_screen_back(
 
         kind, cand = screen._hits[0]  # pyright: ignore[reportPrivateUsage]
         screen.capture(kind, cand)
-        await pilot.pause()
-        await asyncio.sleep(0.05)
-        await pilot.pause()
+        await _until(
+            pilot,
+            lambda: "tmdb is down" in _status_text(screen),
+            "the failure to reach the status line",
+        )
 
-        options = screen.query_one("#candidates", OptionList)
-        assert not options.loading
+        assert not screen.query_one("#candidates", OptionList).loading
         assert not screen.query_one("#add-query", Input).disabled
-        assert "tmdb is down" in _status_text(screen)
 
 
 async def test_a_search_that_fails_clears_its_own_spinner(
