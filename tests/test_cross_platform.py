@@ -150,3 +150,32 @@ def test_the_cli_entry_point_runs_on_this_platform(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "upcoming" in result.stdout
+
+
+@pytest.mark.parametrize("hostile", ["cp1252", "ascii"])
+def test_the_tables_print_on_a_stdout_that_cannot_encode_their_glyphs(
+    tmp_path: Path, hostile: str
+) -> None:
+    """The Windows crash, reproduced everywhere: a pipe inheriting a non-UTF-8 code page.
+
+    `rdt upcoming` draws ⟳, ● and ⛔, none of which exist in cp1252 — the code page a
+    Windows pipe or legacy console inherits — so the command used to die with
+    UnicodeEncodeError *partway through the table*, after emitting half of it. Forcing
+    the encoding here means the regression is caught on Linux and macOS too, rather than
+    only when the Windows job happens to run.
+    """
+    for command in ("upcoming", "show"):
+        # S603: the argv is this interpreter and two literals from the loop above.
+        result = subprocess.run(  # noqa: S603
+            [sys.executable, "-m", "release_tracker.cli", command],
+            cwd=tmp_path,
+            env={**os.environ, "PYTHONIOENCODING": hostile, "RDT_DB_PATH": str(tmp_path / "r.db")},
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+            check=False,
+        )
+        assert result.returncode == 0, f"rdt {command} under {hostile}:\n{result.stderr}"
+        assert "UnicodeEncodeError" not in result.stderr

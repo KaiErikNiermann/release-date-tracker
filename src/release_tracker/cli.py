@@ -18,7 +18,9 @@ Plumbing:
 from __future__ import annotations
 
 import asyncio
+import io
 import json
+import sys
 from datetime import UTC, date, datetime
 from typing import Annotated
 
@@ -96,6 +98,26 @@ app.add_typer(seed_app, name="seed")
 app.add_typer(resolve_app, name="resolve")
 app.add_typer(artist_app, name="artist")
 app.add_typer(edit_app, name="edit")
+
+
+def _make_output_encodable() -> None:
+    """Keep the tables printable on a stdout that cannot encode their glyphs.
+
+    The renderers draw with ⟳, →, ✓, ⛔ and friends, none of which exist in the Windows
+    ANSI code page that a pipe or a legacy console inherits — so `rdt upcoming > out.txt`
+    died with UnicodeEncodeError partway through the table, having already emitted half
+    of it. UTF-8 is what modern terminals and every file consumer want; `errors="replace"`
+    means a console that still cannot represent a glyph loses that character rather than
+    the whole command.
+
+    Not needed by the TUI, which owns its own output through Textual.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if isinstance(stream, io.TextIOWrapper):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
+_make_output_encodable()
 console = Console()
 
 
