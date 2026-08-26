@@ -133,6 +133,9 @@ class BrowseScreen(Screen[None]):
         Binding("j", "cursor(1)", "Down", show=False),
         Binding("k", "cursor(-1)", "Up", show=False),
         Binding("slash", "focus_query", "Search", show=False),
+        # The bar is one line, so `down` is dead in it; the table binds its own, and a
+        # widget's bindings beat the screen's, so this only ever fires from the bar.
+        Binding("down", "focus_rows", "Into the list", show=False),
         Binding("a", "add", "Add"),
         Binding("r", "reload", "Reload"),
         Binding("q", "quit", "Quit"),
@@ -339,6 +342,16 @@ class BrowseScreen(Screen[None]):
 
     def action_focus_query(self) -> None:
         self.bar.focus()
+
+    def action_focus_rows(self) -> None:
+        """Down out of the query bar lands on the list, as it does out of any search box.
+
+        Focus alone is the whole move: the cursor is already on the first row (filtering
+        rebuilds the table), so this reads as bar -> row 1, and the next down -> row 2.
+        An empty result set has nowhere to land, so the bar keeps focus.
+        """
+        if self.table.row_count:
+            self.table.focus()
 
     def action_back(self) -> None:
         """Escape walks out: table -> query bar, then clears a non-empty query."""

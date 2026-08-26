@@ -93,7 +93,7 @@ rdt upcoming 'tag:"body horror" year:2026..2028'
 
 - **type** to filter (instant — it filters an in-memory snapshot, not the database)
 - **tab** / **shift+tab** walk the completions · **1/2/3** available / upcoming / watched
-- **enter** open the work card · **←/→** change state (auto-saves) · **esc** back
+- **↓** into the list · **enter** open the work card · **←/→** change state (auto-saves) · **esc** back
 - **a** add a title — same syntax, pointed at TMDB/IGDB/Steam, with candidate selection
 - **/** or **shift+tab** back to the query bar · **ctrl+backspace** delete a word · **r** reload · **q** quit
 

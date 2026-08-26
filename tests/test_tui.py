@@ -483,6 +483,39 @@ async def test_tab_is_focus_movement_once_there_is_nothing_to_complete(
             assert app.screen.focused is screen.bar, key
 
 
+async def test_down_out_of_the_query_bar_lands_on_the_list(
+    app_db: tuple[Path, dict[str, Entity]],
+) -> None:
+    """bar -> row 1 -> row 2, the way down works out of any search box."""
+    path, _ = app_db
+    app = _app(path)
+    async with app.run_test(size=(140, 24)) as pilot:
+        await pilot.pause()
+        screen = _browse(app)
+        screen.bar.focus()
+        await pilot.pause()
+        await pilot.press("down")
+        await pilot.pause()
+        assert app.screen.focused is screen.table
+        assert screen.table.cursor_row == 0
+        await pilot.press("down")  # the table's own binding takes over from here
+        await pilot.pause()
+        assert screen.table.cursor_row == 1
+
+
+async def test_down_stays_put_when_there_is_nothing_to_land_on(
+    app_db: tuple[Path, dict[str, Entity]],
+) -> None:
+    path, _ = app_db
+    app = _app(path)
+    async with app.run_test(size=(140, 24)) as pilot:
+        screen = await _type(pilot, app, "kind:game")  # nothing seeded is a game
+        assert not _titles(app)
+        await pilot.press("down")
+        await pilot.pause()
+        assert app.screen.focused is screen.bar
+
+
 async def _tab_walk(pilot: object, app: RdtApp, start: str, presses: int) -> list[str]:
     """Tab `presses` times from `start`, collecting the query each press leaves in force.
 
