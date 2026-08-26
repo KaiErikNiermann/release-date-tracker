@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # A new push to a PR makes the in-flight run irrelevant; main is never cancelled.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  POETRY_VERSION: "2.1.3"
+
+jobs:
+  check:
+    name: lint · types · tests (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Poetry
+        run: pipx install "poetry==${POETRY_VERSION}"
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+          cache: poetry
+
+      - name: Install dependencies
+        run: poetry install --with dev
+
+      - name: Lint
+        run: poetry run ruff check src tests
+
+      - name: Format check
+        run: poetry run ruff format --check src tests
+
+      - name: Type-check (strict)
+        run: poetry run pyright src tests
+
+      # No .env and no API keys here on purpose: every test must pass keyless, which is
+      # also the promise the README makes to anyone installing this.
+      - name: Tests
+        run: poetry run pytest
+
+  build:
+    name: build wheel + sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Poetry
+        run: pipx install "poetry==${POETRY_VERSION}"
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: poetry
+
+      - name: Build
+        run: poetry build
+
+      # Proves the artifact is installable and the console script is wired up — the
+      # failure mode a test suite run from a checkout can never catch.
+      - name: Install the wheel into a clean venv and smoke-test it
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install --quiet dist/*.whl
+          /tmp/smoke/bin/rdt --help
+          cd /tmp && /tmp/smoke/bin/rdt upcoming
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  shellcheck:
+    name: shellcheck install.sh
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: shellcheck install.sh

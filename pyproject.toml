@@ -4,7 +4,17 @@ version = "0.1.0"
 description = "Aggregate and resolve concrete release dates (theatrical, digital, store, retail), locations and prices for movies/TV/games/tech from structured APIs first, scraped rumors second."
 authors = [{ name = "Kai Niermann", email = "kai.niermann@googlemail.com" }]
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.13,<4.0"
+keywords = ["release-dates", "tracker", "cli", "tui", "movies", "tv", "games"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia",
+    "Typing :: Typed",
+]
 dependencies = [
     "httpx>=0.28",
     "pydantic>=2.10",
@@ -20,6 +30,10 @@ dependencies = [
     "platformdirs (>=4.0)",
 ]
 
+[project.urls]
+Homepage = "https://github.com/KaiErikNiermann/release-date-tracker"
+Issues = "https://github.com/KaiErikNiermann/release-date-tracker/issues"
+
 [project.scripts]
 rdt = "release_tracker.cli:app"
 
@@ -32,6 +46,7 @@ pyright = ">=1.1.390"
 pytest = ">=8.3"
 textual-dev = "^1.8.0"
 pytest-asyncio = "^1.4.0"
+radon = "^6.0.1"
 
 [build-system]
 requires = ["poetry-core>=2.0"]

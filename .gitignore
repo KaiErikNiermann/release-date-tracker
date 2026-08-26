@@ -30,3 +30,6 @@ build/
 .idea/
 .vscode/
 .DS_Store
+
+# --- personal design notes (kept locally, never published) ---
+expansion-notes/

@@ -1,5 +1,9 @@
 # Release Date Tracker
 
+[![CI](https://github.com/KaiErikNiermann/release-date-tracker/actions/workflows/ci.yml/badge.svg)](https://github.com/KaiErikNiermann/release-date-tracker/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/downloads/)
+
 Free-first aggregation of **concrete** release dates — theatrical, **digital/VOD**,
 physical, per-storefront and per-retailer — plus **locations** and **prices**, for
 movies, TV, games and tech. Built to kill the "google a release date → ten clickbait
@@ -36,23 +40,76 @@ corroboration, recency and stance to produce a ranked **best estimate** per
 
 Stored in SQLite with idempotent, resume-safe upserts.
 
+## Install
+
+Requires **Python 3.13+**. Nothing is published to PyPI yet — install from the repo:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/KaiErikNiermann/release-date-tracker/main/install.sh | bash
+```
+
+The script prefers `uv`, falls back to `pipx`, and otherwise builds a private venv and
+links a shim into `~/.local/bin` — so `rdt` never lands in your system site-packages.
+Equivalent one-liners if you already have a preference:
+
+```bash
+uv tool install   git+https://github.com/KaiErikNiermann/release-date-tracker.git
+pipx install      git+https://github.com/KaiErikNiermann/release-date-tracker.git
+```
+
+Or from a checkout:
+
+```bash
+git clone https://github.com/KaiErikNiermann/release-date-tracker.git
+cd release-date-tracker
+just dev          # poetry install + git hooks
+just tui
+```
+
+### API keys
+
+Every source that can work without a key does. Keys only widen coverage, and each is
+optional and independent:
+
+| variable | unlocks | free? |
+|---|---|---|
+| `TMDB_API_KEY` | movies / TV — dates, credits, watch providers | yes |
+| `TWITCH_CLIENT_ID` + `TWITCH_CLIENT_SECRET` | games, via IGDB | yes |
+| `OPENAI_API_KEY` | the Tier-1 gap-filler for what Tier 0 leaves as TBA | paid |
+
+Put them in `~/.config/rdt/.env` (or a `.env` beside a checkout, which takes precedence).
+`.env.example` lists every variable with a comment.
+
+### Where your data lives
+
+Paths follow the XDG base directories, so `rdt` finds the same tracker no matter which
+directory you run it from. Every one is overridable:
+
+| what | default (Linux) | override |
+|---|---|---|
+| tracker database | `~/.local/share/rdt/releases.db` | `RDT_DB_PATH` |
+| learned platform map | `~/.local/share/rdt/platforms.db` | `RDT_PLATFORM_DB_PATH` |
+| mined trend cache | `~/.cache/rdt/trends_cache.db` | `RDT_TREND_CACHE_PATH` |
+| seeds | `~/.config/rdt/seeds.json` | `RDT_SEEDS_PATH` |
+
+macOS and Windows get their platform equivalents. A checkout that already has a
+`data/releases.db` beside it keeps using it, so upgrading in place never strands an
+existing tracker. `just paths` prints what this machine resolved.
+
 ## Usage
 
 ```bash
-poetry install
-cp .env.example .env   # fill in TMDB_API_KEY, TWITCH_CLIENT_ID/SECRET, OPENAI_API_KEY
+# seed from a local file or live Notion
+rdt seed sync
 
-# seed from a local file (local/seeds.json, gitignored) or live Notion
-poetry run rdt seed sync
-
-# resolve Tier-0 dates for watched entities
-poetry run rdt pull
+# resolve Tier-0 dates for tracked entities
+rdt pull
 
 # show ranked best estimates
-poetry run rdt show
+rdt show
 
 # browse it interactively
-poetry run rdt tui
+rdt tui
 ```
 
 ## Querying
@@ -132,6 +189,28 @@ stance the EDTF qualifier already stated.
 
 ## Privacy
 
-Personal data stays out of git: `.env`, `local/` and the `*.db` are gitignored. The
-committed Notion adapter is generic; your watchlist lives only in `local/seeds.json`
-or behind your own `NOTION_TOKEN`.
+Nothing leaves your machine except the API calls that resolve a date. There is no
+account, no telemetry and no sync: the tracker is a SQLite file in your XDG data dir,
+and `.env`, `local/` and every `*.db` are gitignored so a checkout cannot commit them by
+accident. The Notion adapter is generic — your watchlist lives only in your own seeds
+file or behind your own `NOTION_TOKEN`.
+
+## Development
+
+`just` drives everything; `just` on its own lists the recipes.
+
+```bash
+just dev        # install deps, wire up the pre-push hook
+just check      # lint + format check + strict pyright + tests — exactly what CI runs
+just test -k tui
+just complexity # radon, flags anything below grade B
+```
+
+CI runs `check` on 3.13 and 3.14, and separately builds the wheel and installs it into a
+clean venv — the packaging failure a test run from a checkout cannot catch. Releases are
+cut by tag: `just release patch` bumps, tags and pushes, and the workflow builds the
+artifacts and writes the notes.
+
+## License
+
+[MIT](LICENSE) © Kai Niermann
