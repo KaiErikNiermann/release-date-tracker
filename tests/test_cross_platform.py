@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from importlib.metadata import version
 from pathlib import Path
 
 import pytest
@@ -179,3 +180,20 @@ def test_the_tables_print_on_a_stdout_that_cannot_encode_their_glyphs(
         )
         assert result.returncode == 0, f"rdt {command} under {hostile}:\n{result.stderr}"
         assert "UnicodeEncodeError" not in result.stderr
+
+
+def test_version_reports_the_installed_distribution(tmp_path: Path) -> None:
+    """`--version` is what a bug report quotes, so it must not be a second hardcoded copy."""
+    result = subprocess.run(
+        [sys.executable, "-m", "release_tracker.cli", "--version"],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == version("release-date-tracker")

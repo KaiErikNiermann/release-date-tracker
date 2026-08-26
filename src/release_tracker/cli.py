@@ -22,6 +22,7 @@ import io
 import json
 import sys
 from datetime import UTC, date, datetime
+from importlib.metadata import PackageNotFoundError, version
 from typing import Annotated
 
 import typer
@@ -98,6 +99,41 @@ app.add_typer(seed_app, name="seed")
 app.add_typer(resolve_app, name="resolve")
 app.add_typer(artist_app, name="artist")
 app.add_typer(edit_app, name="edit")
+
+
+def _version() -> str:
+    """The installed distribution's version, not a second copy of it in the source.
+
+    A hardcoded string drifts from pyproject the moment a release is cut, and the release
+    workflow already refuses a tag that disagrees with pyproject — so read the metadata
+    the wheel was built with. Absent when running from a source tree that was never
+    installed, which is worth saying rather than crashing on.
+    """
+    try:
+        return version("release-date-tracker")
+    except PackageNotFoundError:
+        return "unknown (not installed)"
+
+
+def _version_callback(show: bool) -> None:
+    if show:
+        console.print(_version())
+        raise typer.Exit
+
+
+@app.callback()
+def main(
+    _version_flag: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            callback=_version_callback,
+            is_eager=True,
+            help="Show the installed version and exit.",
+        ),
+    ] = False,
+) -> None:
+    """Free-first release date tracker."""
 
 
 def _make_output_encodable() -> None:

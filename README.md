@@ -102,6 +102,8 @@ existing tracker. `just paths` prints what this machine resolved.
 ## Usage
 
 ```bash
+rdt --version
+
 # seed from a local file or live Notion
 rdt seed sync
 
