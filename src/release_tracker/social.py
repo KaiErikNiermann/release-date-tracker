@@ -67,7 +67,10 @@ def _struct_to_date(parsed: Any) -> date | None:
 
 def latest_from_feed(content: str) -> Activity | None:
     """Newest entry of an RSS/Atom feed (YouTube, Reddit) -> Activity."""
-    parsed = feedparser.parse(content)
+    # feedparser ships no annotations, so `parse` is Unknown under a newer pyright rather
+    # than merely untyped. Naming the boundary Any keeps the cast below the only place
+    # that claims to know the shape.
+    parsed: Any = feedparser.parse(content)
     entries = cast("list[Any]", parsed.entries)
     if not entries:
         return None
