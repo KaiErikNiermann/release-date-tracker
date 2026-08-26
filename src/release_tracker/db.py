@@ -15,6 +15,7 @@ import json
 import sqlite3
 from collections.abc import Generator, Iterable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -153,6 +154,15 @@ CREATE TABLE IF NOT EXISTS conditions (
 """
 
 
+@dataclass(frozen=True, slots=True)
+class NoteLine:
+    """One entry in a work's freeform note log."""
+
+    id: int
+    created: date
+    body: str
+
+
 class Database:
     """Thin typed wrapper over a SQLite connection."""
 
@@ -283,13 +293,25 @@ class Database:
                 (entity_id, body, datetime.now(UTC).isoformat()),
             )
 
-    def iter_notes(self, entity_id: str) -> list[tuple[date, str]]:
-        """All notes for an entity, newest first, as (created_date, body)."""
+    def iter_notes(self, entity_id: str) -> tuple[NoteLine, ...]:
+        """All notes for an entity, newest first.
+
+        Carries the row id, because a note you cannot point at is a note you cannot
+        delete — the log is append-only by habit, not by constraint.
+        """
         rows = self._conn.execute(
-            "SELECT created_at, body FROM media_notes WHERE entity_id = ? ORDER BY created_at DESC",
+            "SELECT id, created_at, body FROM media_notes "
+            "WHERE entity_id = ? ORDER BY created_at DESC, id DESC",
             (entity_id,),
         )
-        return [(datetime.fromisoformat(r[0]).date(), r[1]) for r in rows]
+        return tuple(
+            NoteLine(id=r[0], created=datetime.fromisoformat(r[1]).date(), body=r[2]) for r in rows
+        )
+
+    def delete_note(self, note_id: int) -> bool:
+        """Drop one note from the log. False if it was already gone."""
+        with self._tx() as conn:
+            return conn.execute("DELETE FROM media_notes WHERE id = ?", (note_id,)).rowcount > 0
 
     def note_counts(self) -> dict[str, int]:
         """entity_id -> number of notes, for cheaply flagging which works have notes."""

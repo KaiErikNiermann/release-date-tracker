@@ -26,7 +26,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from release_tracker import matching, query, views
+from release_tracker import edits, matching, query, views
 from release_tracker.artists import (
     ArtistReport,
     add_artist,
@@ -849,8 +849,8 @@ def card(ref: Annotated[str, typer.Argument(help="entity id or title substring")
     _render_card(work)
     if media_notes:
         console.print("[bold]Notes[/]")
-        for when, body in media_notes:
-            console.print(f"  [dim]{when.isoformat()}[/]  {body}")
+        for line in media_notes:
+            console.print(f"  [dim]{line.created.isoformat()}[/]  {line.body}")
 
 
 @app.command()
@@ -1363,8 +1363,8 @@ def notes(ref: Annotated[str, typer.Argument(help="entity id or title substring"
         console.print(f"[dim]No notes for {entity.title}.[/]")
         return
     console.print(f"[bold]{entity.title}[/] — notes")
-    for when, body in items:
-        console.print(f"  [dim]{when.isoformat()}[/]  {body}")
+    for line in items:
+        console.print(f"  [dim]{line.created.isoformat()}[/]  {line.body}")
 
 
 # --- freeform edit surface (the deterministic backing for /rd-edit + a future
@@ -1410,10 +1410,7 @@ def edit_rename(
     if entity is None:
         raise typer.Exit(1)
     old = entity.title
-    aliases = entity.aliases if old in entity.aliases else (*entity.aliases, old)
-    db.upsert_entity(entity.model_copy(update={"title": title, "aliases": aliases}))
-    if (node := db.get_node(entity.id)) is not None:  # keep the WORK node label in sync
-        db.upsert_node(node.model_copy(update={"name": title}))
+    edits.rename(db, entity, title)
     db.close()
     console.print(f"[green]Renamed[/] [dim]{old}[/] → [bold]{title}[/] [dim]({entity.id})[/]")
 
@@ -1498,29 +1495,12 @@ def edit_credit(
         credit_role = CreditRole(role.lower())
     except ValueError:
         raise typer.BadParameter(f"role must be one of: {_CREDIT_ROLES}") from None
-    kind = NodeKind.ORG if org else NodeKind.PERSON
-    if pin is not None:
-        source, source_id = _parse_pin(pin)
-        node = Node.create(kind, name, source=source, source_id=source_id, owned=True)
-    else:
-        node = Node.create(kind, name, owned=True)
+    key = _parse_pin(pin) if pin is not None else None
     db = _db()
     entity = _edit_entity(db, ref)
     if entity is None:
         raise typer.Exit(1)
-    db.upsert_node(node)
-    db.upsert_edge(
-        Edge(
-            src_id=node.id,
-            dst_id=entity.id,
-            relation=RelationKind.CREDITED_ON,
-            role=credit_role,
-            source_provider="user",
-            source_tier=SourceTier.OFFICIAL,
-            confidence=1.0,
-            owned=True,
-        )
-    )
+    node = edits.add_credit(db, entity, name, credit_role, org=org, pin=key)
     db.close()
     pinned = f" [dim]→ {node.id}[/]" if pin is not None else ""
     console.print(
@@ -1540,19 +1520,15 @@ def edit_uncredit(
     entity = _edit_entity(db, ref)
     if entity is None:
         raise typer.Exit(1)
-    nodes = db.find_nodes(name)
-    targets = {n.id for n in nodes}
-    removed = [
-        e
-        for e in db.edges_to(entity.id, RelationKind.CREDITED_ON)
-        if e.src_id in targets and db.delete_edge(e.id)
-    ]
+    # widen the typed name to every node it could mean; the picker in the TUI, which
+    # already knows which row it is on, passes a single id to the same function.
+    removed = edits.remove_credits(db, entity, [n.id for n in db.find_nodes(name)])
     db.close()
     if not removed:
         console.print(f"[yellow]No credit[/] for '{name}' on {entity.title}.")
         raise typer.Exit(1)
     console.print(
-        f"[green]Removed[/] {len(removed)} credit(s) for {name} from [bold]{entity.title}[/]"
+        f"[green]Removed[/] {removed} credit(s) for {name} from [bold]{entity.title}[/]"
     )
 
 
@@ -1576,19 +1552,7 @@ def edit_tag(
     kind = (
         DescriptorKind.ORIGIN if origin else DescriptorKind.THEME if theme else DescriptorKind.GENRE
     )
-    node = Node.create(NodeKind.DESCRIPTOR, descriptor, descriptor_kind=kind, owned=True)
-    db.upsert_node(node)
-    db.upsert_edge(
-        Edge(
-            src_id=entity.id,
-            dst_id=node.id,
-            relation=RelationKind.EXHIBITS,
-            source_provider="user",
-            source_tier=SourceTier.OFFICIAL,
-            confidence=1.0,
-            owned=True,
-        )
-    )
+    edits.add_tag(db, entity, descriptor, kind)
     db.close()
     console.print(f"[green]Tagged[/] {entity.title} [dim]({kind.value})[/] [bold]{descriptor}[/]")
 
@@ -1607,20 +1571,7 @@ def edit_platform(
     entity = _edit_entity(db, ref)
     if entity is None:
         raise typer.Exit(1)
-    node = Node.create(NodeKind.PLATFORM, name, owned=not predicted)
-    db.upsert_node(node)
-    db.upsert_edge(
-        Edge(
-            src_id=entity.id,
-            dst_id=node.id,
-            relation=RelationKind.AVAILABLE_ON,
-            # predicted -> model-tier (renders as "~name"); hand-stated -> user-authoritative
-            source_provider="model" if predicted else "user",
-            source_tier=SourceTier.MODEL if predicted else SourceTier.OFFICIAL,
-            confidence=0.4 if predicted else 1.0,
-            owned=not predicted,
-        )
-    )
+    edits.add_platform(db, entity, name, predicted=predicted)
     db.close()
     tag = " [dim](likely)[/]" if predicted else ""
     console.print(f"[green]Where[/] {entity.title} → [bold]{name}[/]{tag}")
@@ -1637,17 +1588,33 @@ def edit_untag(
     entity = _edit_entity(db, ref)
     if entity is None:
         raise typer.Exit(1)
-    targets = {n.id for n in db.find_nodes(descriptor, node_kind=NodeKind.DESCRIPTOR)}
-    removed = [
-        e
-        for e in db.edges_from(entity.id, RelationKind.EXHIBITS)
-        if e.dst_id in targets and db.delete_edge(e.id)
-    ]
+    targets = [n.id for n in db.find_nodes(descriptor, node_kind=NodeKind.DESCRIPTOR)]
+    removed = edits.remove_tags(db, entity, targets)
     db.close()
     if not removed:
         console.print(f"[yellow]No tag[/] '{descriptor}' on {entity.title}.")
         raise typer.Exit(1)
     console.print(f"[green]Untagged[/] {descriptor} from [bold]{entity.title}[/]")
+
+
+@edit_app.command("unplatform")
+def edit_unplatform(
+    ref: Annotated[str, typer.Argument(help="the work (id or title)")],
+    name: Annotated[str, typer.Argument(help="the platform to remove")],
+) -> None:
+    """Remove a where-edge: drop a platform from a work."""
+    configure_logging()
+    db = _db()
+    entity = _edit_entity(db, ref)
+    if entity is None:
+        raise typer.Exit(1)
+    targets = [n.id for n in db.find_nodes(name, node_kind=NodeKind.PLATFORM)]
+    removed = edits.remove_platforms(db, entity, targets)
+    db.close()
+    if not removed:
+        console.print(f"[yellow]No platform[/] '{name}' on {entity.title}.")
+        raise typer.Exit(1)
+    console.print(f"[green]Removed[/] {name} from [bold]{entity.title}[/]")
 
 
 @edit_app.command("part")
@@ -1732,45 +1699,19 @@ def edit_date(
     if entity is None:
         raise typer.Exit(1)
     try:
-        parsed = parse_edtf(edtf)
-    except ValueError as exc:
-        db.close()
-        raise typer.BadParameter(str(exc)) from None
-    try:
         chan = ReleaseChannel(channel.lower())
     except ValueError:
         db.close()
         raise typer.BadParameter(f"unknown channel {channel!r}") from None
-    confirmed = parsed.certainty is Certainty.CONFIRMED
-    canonical = to_edtf(
-        parsed.when,
-        parsed.precision,
-        parsed.certainty,
-        end=parsed.end,
-        end_precision=parsed.end_precision,
-    )
-    db.delete_channel_observations(entity.id, "manual", chan)
-    db.upsert_observation(
-        ReleaseObservation(
-            entity_id=entity.id,
-            channel=chan,
-            region="WW",
-            release_date=parsed.when,
-            date_end=parsed.end,  # set for an EDTF interval (a release window), else None
-            precision=parsed.precision,
-            certainty=parsed.certainty,
-            source_tier=SourceTier.OFFICIAL if confirmed else SourceTier.RUMOR,
-            provider="manual",
-            source_name="Manual (EDTF)",
-            source_quote=canonical,
-            confidence=1.0 if confirmed else 0.5,
-            fetched_at=datetime.now(UTC),
-        )
-    )
+    try:
+        written = edits.set_date(db, entity, chan, edtf)
+    except ValueError as exc:
+        db.close()
+        raise typer.BadParameter(str(exc)) from None
     db.close()
     console.print(
-        f"[green]Dated[/] {entity.title} [{chan.value}] → [bold]{canonical}[/] "
-        f"({parsed.certainty.value})"
+        f"[green]Dated[/] {entity.title} [{chan.value}] → [bold]{written.edtf}[/] "
+        f"({written.certainty.value})"
     )
 
 

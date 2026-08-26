@@ -7,13 +7,14 @@ mutation lands the right entity/node/edge state.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
-from release_tracker import cli
+from release_tracker import cli, edits
 from release_tracker.db import Database
 from release_tracker.lookup import RdReport
 from release_tracker.models import (
@@ -492,3 +493,123 @@ def test_cleardate_whole_channel_when_no_flag(edit_db: Path) -> None:
     db.close()
     assert ReleaseChannel.DIGITAL not in channels  # both digital rows cleared
     assert ReleaseChannel.THEATRICAL in channels  # theatrical preserved
+
+
+# --- the library seam --------------------------------------------------------------------
+# `edits.*` is what both `rdt edit …` and the TUI's card editor call, so it is tested
+# directly rather than only through the CLI that wraps it.
+
+
+@pytest.fixture
+def work(tmp_path: Path) -> Iterator[tuple[Database, Entity]]:
+    db = Database(tmp_path / "w.db")
+    ent = Entity.create("Untitled Project", MediaKind.MOVIE)
+    db.upsert_entity(ent)
+    db.upsert_node(Node(id=ent.id, node_kind=NodeKind.WORK, name=ent.title, owned=True))
+    yield db, ent
+    db.close()
+
+
+def test_set_date_rewrites_a_window_in_place(work: tuple[Database, Entity]) -> None:
+    """The upsert trap: an observation's id hashes its *start*, and the conflict clause
+    refreshes neither date, so moving only the end of a window silently did nothing."""
+    db, ent = work
+    edits.set_date(db, ent, ReleaseChannel.PRIMARY, "2027/2029")
+    edits.set_date(db, ent, ReleaseChannel.PRIMARY, "2027/2030")
+    obs = _manual_obs(db, ent.id)
+    assert len(obs) == 1  # replaced, not duplicated
+    assert (obs[0].release_date, obs[0].date_end) == (date(2027, 1, 1), date(2030, 1, 1))
+
+
+def test_set_date_returns_the_canonical_literal(work: tuple[Database, Entity]) -> None:
+    db, ent = work
+    written = edits.set_date(db, ent, ReleaseChannel.DIGITAL, "2026 Q3~")
+    assert written.edtf == "2026-35~"  # normalized on the way in, canonical on the way out
+    assert written.certainty is Certainty.ESTIMATED
+    assert written.when == date(2026, 7, 1)
+
+
+def test_manual_dates_reads_back_what_was_authored(work: tuple[Database, Entity]) -> None:
+    db, ent = work
+    edits.set_date(db, ent, ReleaseChannel.THEATRICAL, "2026-09-18")
+    edits.set_date(db, ent, ReleaseChannel.DIGITAL, "2027..2029")
+    assert edits.manual_dates(db, ent.id) == {
+        ReleaseChannel.THEATRICAL: "2026-09-18",
+        ReleaseChannel.DIGITAL: "2027/2029",
+    }
+
+
+def test_a_bad_literal_raises_and_writes_nothing(work: tuple[Database, Entity]) -> None:
+    db, ent = work
+    with pytest.raises(ValueError, match="EDTF"):
+        edits.set_date(db, ent, ReleaseChannel.PRIMARY, "2026-13")
+    assert _manual_obs(db, ent.id) == []
+
+
+def test_clear_date_spares_the_pulled_observation(work: tuple[Database, Entity]) -> None:
+    """Clearing a hand-authored date should surface the puller's again, not erase it."""
+    db, ent = work
+    db.upsert_observation(
+        ReleaseObservation(
+            entity_id=ent.id,
+            channel=ReleaseChannel.DIGITAL,
+            release_date=date(2026, 5, 1),
+            precision=DatePrecision.EXACT,
+            certainty=Certainty.CONFIRMED,
+            source_tier=SourceTier.AGGREGATOR,
+            provider="tmdb",
+            fetched_at=datetime.now(UTC),
+        )
+    )
+    edits.set_date(db, ent, ReleaseChannel.DIGITAL, "2027")
+    assert edits.clear_date(db, ent, ReleaseChannel.DIGITAL) == 1
+    remaining = list(db.iter_observations(ent.id))
+    assert [o.provider for o in remaining] == ["tmdb"]
+
+
+def test_credits_are_removed_by_id_so_one_row_goes_at_a_time(
+    work: tuple[Database, Entity],
+) -> None:
+    db, ent = work
+    keep = edits.add_credit(db, ent, "Denis Villeneuve", CreditRole.DIRECTOR)
+    drop = edits.add_credit(db, ent, "Hans Zimmer", CreditRole.COMPOSER)
+    assert edits.remove_credits(db, ent, [drop.id]) == 1
+    left = db.edges_to(ent.id, RelationKind.CREDITED_ON)
+    assert [e.src_id for e in left] == [keep.id]
+
+
+def test_a_hand_authored_credit_is_marked_as_one(work: tuple[Database, Entity]) -> None:
+    db, ent = work
+    node = edits.add_credit(db, ent, "A24", CreditRole.STUDIO, org=True)
+    (edge,) = db.edges_to(ent.id, RelationKind.CREDITED_ON)
+    assert node.node_kind is NodeKind.ORG and node.owned
+    assert edge.source_provider == edits.USER_PROVIDER
+    assert edge.source_tier is SourceTier.OFFICIAL and edge.owned
+
+
+def test_a_pinned_credit_lands_on_the_canonical_node(work: tuple[Database, Entity]) -> None:
+    """Pinning is what stops a hand-added credit forking off the resolved one."""
+    db, ent = work
+    node = edits.add_credit(db, ent, "Denis Villeneuve", CreditRole.DIRECTOR, pin=("tmdb", "287"))
+    assert node.id == "person:tmdb:287"
+
+
+def test_tags_and_platforms_round_trip(work: tuple[Database, Entity]) -> None:
+    db, ent = work
+    genre = edits.add_tag(db, ent, "sci-fi", DescriptorKind.GENRE)
+    theme = edits.add_tag(db, ent, "grief", DescriptorKind.THEME)
+    where = edits.add_platform(db, ent, "Max")
+    assert genre.descriptor_kind is DescriptorKind.GENRE
+    assert theme.descriptor_kind is DescriptorKind.THEME
+    assert edits.remove_tags(db, ent, [theme.id]) == 1
+    assert [e.dst_id for e in db.edges_from(ent.id, RelationKind.EXHIBITS)] == [genre.id]
+    assert edits.remove_platforms(db, ent, [where.id]) == 1
+    assert db.edges_from(ent.id, RelationKind.AVAILABLE_ON) == []
+
+
+def test_removing_something_that_is_not_there_is_not_an_error(
+    work: tuple[Database, Entity],
+) -> None:
+    db, ent = work
+    assert edits.remove_credits(db, ent, ["person:nobody"]) == 0
+    assert edits.remove_tags(db, ent, []) == 0

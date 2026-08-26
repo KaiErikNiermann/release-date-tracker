@@ -48,8 +48,11 @@ def test_notes_log_roundtrip(tmp_path: Path) -> None:
     db.add_note(ent.id, "production halted")
     db.add_note(ent.id, "resumed, target 2027")
     notes = db.iter_notes(ent.id)
-    assert [body for _, body in notes] == [
+    assert [n.body for n in notes] == [
         "resumed, target 2027",
         "production halted",
     ]  # newest first
     assert db.note_counts()[ent.id] == 2
+    assert db.delete_note(notes[0].id)
+    assert [n.body for n in db.iter_notes(ent.id)] == ["production halted"]
+    assert not db.delete_note(notes[0].id)  # already gone
