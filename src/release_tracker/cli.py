@@ -1474,7 +1474,12 @@ def edit_credit(
     ref: Annotated[str, typer.Argument(help="the work (id or title)")],
     name: Annotated[str, typer.Argument(help="the person/studio to credit")],
     role: Annotated[str, typer.Argument(help=f"one of: {_CREDIT_ROLES}")],
-    org: Annotated[bool, typer.Option("--org", help="credit a studio/org, not a person")] = False,
+    org: Annotated[
+        bool,
+        typer.Option(
+            "--org", help="force a studio/org node (studio, network, publisher… infer it)"
+        ),
+    ] = False,
     pin: Annotated[
         str | None,
         typer.Option(
@@ -1500,7 +1505,7 @@ def edit_credit(
     entity = _edit_entity(db, ref)
     if entity is None:
         raise typer.Exit(1)
-    node = edits.add_credit(db, entity, name, credit_role, org=org, pin=key)
+    node = edits.add_credit(db, entity, name, credit_role, org=org or None, pin=key)
     db.close()
     pinned = f" [dim]→ {node.id}[/]" if pin is not None else ""
     console.print(

@@ -199,6 +199,7 @@ def best_estimates(observations: Iterable[ReleaseObservation]) -> list[BestEstim
                 certainty=winner.certainty,
                 price=winner.price,
                 confidence=winner.confidence,
+                provider=winner.provider,
                 supporting_observation_ids=tuple(o.id for o in ranked),
                 fetched_at=winner.fetched_at,
             )

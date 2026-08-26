@@ -7,46 +7,49 @@ and escaping before the debounce fires flushes it, so a fast decision is never l
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Vertical, VerticalScroll
-from textual.message import Message
-from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.timer import Timer
-from textual.widget import Widget
 from textual.widgets import Static
 
 from release_tracker import render, views
 from release_tracker.models import ConsumptionState, Entity
+from release_tracker.tui.cycle import Cycle
 from release_tracker.views import WorkCard
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from release_tracker.tui.app import RdtApp
 
 _STATES = tuple(ConsumptionState)
 _DEBOUNCE = 0.4
 
 
-class StateToggle(Widget):
-    """A horizontal strip of consumption states. Emits Changed; never writes anything."""
+class StateToggle(Cycle):
+    """The consumption states, all six on one line. Emits Changed; never writes anything.
 
-    can_focus = True
-    index: reactive[int] = reactive(0)
+    A :class:`Cycle` that draws itself as a strip rather than one value at a time: the
+    whole scale is short enough to show at once, and seeing where `watching` sits between
+    `want` and `watched` is most of what the toggle is for.
+    """
 
-    BINDINGS: ClassVar[list[BindingType]] = [
-        Binding("left,h", "step(-1)", "Prev", show=False),
-        Binding("right,l", "step(1)", "Next", show=False),
-    ]
+    class Changed(Cycle.Changed):
+        """The state moved. A Cycle.Changed that also carries the enum member itself."""
 
-    class Changed(Message):
-        def __init__(self, state: ConsumptionState) -> None:
-            super().__init__()
+        def __init__(self, toggle: StateToggle, state: ConsumptionState) -> None:
+            super().__init__(toggle, state.value)
             self.state = state
 
     def __init__(self, state: ConsumptionState) -> None:
-        super().__init__()
-        self.index = _STATES.index(state)
+        super().__init__([s.value for s in _STATES], index=_STATES.index(state))
+
+    @property
+    def state(self) -> ConsumptionState:
+        return _STATES[self.index]
 
     def render(self) -> Text:
         cells = [
@@ -55,18 +58,16 @@ class StateToggle(Widget):
         ]
         return Text.from_markup("".join(cells))
 
-    def action_step(self, delta: int) -> None:
-        self.index = (self.index + delta) % len(_STATES)
-
-    def watch_index(self, index: int) -> None:
+    def watch_index(self) -> None:
         self.refresh()
-        self.post_message(self.Changed(_STATES[index]))
+        self.post_message(self.Changed(self, self.state))
 
 
 class CardScreen(ModalScreen[ConsumptionState | None]):
     """One work, full detail. Dismisses with the state it settled on (or None)."""
 
     BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("e", "edit", "Edit", show=False),
         Binding("escape", "close", "Back", show=False),
         Binding("q", "close", "Back", show=False),
     ]
@@ -85,7 +86,7 @@ class CardScreen(ModalScreen[ConsumptionState | None]):
             with VerticalScroll(id="card-body"):
                 yield Static(Text.from_markup(self._body()), id="card-detail")
             yield Static(
-                Text.from_markup("[dim]←/→ change state (auto-saves) · esc back[/]"),
+                Text.from_markup("[dim]←/→ change state (auto-saves) · e edit · esc back[/]"),
                 id="card-foot",
             )
 
@@ -109,7 +110,7 @@ class CardScreen(ModalScreen[ConsumptionState | None]):
             )
             lines.append(
                 f"  [bold]{est.channel.value:<20}[/] {render.fmt_cell(cell)} "
-                f"[dim]{est.region}  conf {est.confidence:.2f}[/]"
+                f"[dim]{est.region}  {render.provenance(est)}[/]"
             )
         if not lines:
             lines.append("  [dim]no dates yet[/]")
@@ -162,12 +163,36 @@ class CardScreen(ModalScreen[ConsumptionState | None]):
         self.app.call_later(self._write, self._pending)
 
     def _write(self, state: ConsumptionState) -> None:
+        self.rdt.set_state(self.entity, state)
+        self.entity = self.entity.model_copy(update={"consumption_state": state})
+        self._pending = None
+
+    def action_edit(self) -> None:
+        """Open the same card, writable. Coming back re-reads it, so the change is there.
+
+        The card is a snapshot taken when it opened; an edit screen over it can change
+        anything on it, and a stale card is worse than no card — hence the full re-read
+        rather than patching whichever field was touched.
+        """
+        from release_tracker.tui.edit import EditScreen
+
+        def reread(_: None) -> None:
+            if (entity := self.rdt.db.get_entity(self.entity.id)) is None:
+                self.dismiss(self.entity.consumption_state)  # deleted out from under us
+                return
+            self.entity = entity
+            self.card = views.work_card(self.rdt.db, entity)
+            self.query_one("#card-title", Static).update(Text.from_markup(self._title()))
+            self.query_one("#card-detail", Static).update(Text.from_markup(self._body()))
+
+        self.app.push_screen(EditScreen(self.entity, self.card), reread)
+
+    @property
+    def rdt(self) -> RdtApp:
         from release_tracker.tui.app import RdtApp
 
         assert isinstance(self.app, RdtApp)
-        self.app.set_state(self.entity, state)
-        self.entity = self.entity.model_copy(update={"consumption_state": state})
-        self._pending = None
+        return self.app
 
     def action_close(self) -> None:
         # Flush before leaving: escaping right after a toggle must still save.

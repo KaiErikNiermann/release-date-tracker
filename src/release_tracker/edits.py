@@ -23,6 +23,7 @@ from datetime import UTC, date, datetime
 from release_tracker.dates_edtf import parse_edtf, to_edtf
 from release_tracker.db import Database
 from release_tracker.models import (
+    ORG_ROLES,
     Certainty,
     CreditRole,
     DatePrecision,
@@ -165,16 +166,20 @@ def add_credit(
     name: str,
     role: CreditRole,
     *,
-    org: bool = False,
+    org: bool | None = None,
     pin: tuple[str, str] | None = None,
 ) -> Node:
     """Credit a person or studio on a work (a who-edge).
+
+    Whether the credit is a company follows from the role unless ``org`` says otherwise:
+    a studio, network, developer or publisher is one, and getting that wrong forks a
+    second node of the wrong kind beside the one the pullers already resolved.
 
     ``pin`` is a ``(source, source_id)`` key: without it a credit-by-name makes a name-slug
     node (``person:denis-villeneuve``), with it the canonical one (``person:tmdb:287``), so
     the credit collapses onto the same node a resolved credit from that source maps to.
     """
-    kind = NodeKind.ORG if org else NodeKind.PERSON
+    kind = NodeKind.ORG if (role in ORG_ROLES if org is None else org) else NodeKind.PERSON
     node = (
         Node.create(kind, name, owned=True)
         if pin is None

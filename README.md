@@ -94,6 +94,7 @@ rdt upcoming 'tag:"body horror" year:2026..2028'
 - **type** to filter (instant — it filters an in-memory snapshot, not the database)
 - **tab** / **shift+tab** walk the completions · **1/2/3** available / upcoming / watched
 - **↓** into the list · **enter** open the work card · **←/→** change state (auto-saves) · **esc** back
+- **e** on a card edits it — title, dates, who/where/what, notes
 - **a** add a title — same syntax, pointed at TMDB/IGDB/Steam, with candidate selection
 - **/** or **shift+tab** back to the query bar · **ctrl+backspace** delete a word · **r** reload · **q** quit
 
@@ -106,6 +107,28 @@ you typed, so `is:a` never offers `dated`.
 
 The bucket keys rewrite the `is:` term in the query rather than keeping separate view
 state, so what you see is always explained by the string in the bar.
+
+### Editing a card
+
+`e` opens the card writable and `esc` puts you back on it, so a change can be looked at
+where it will be read. Nothing is staged: a field commits when you leave it, the way the
+state toggle already does. Every write goes through the same functions `rdt edit …` calls.
+
+- **↓/↑** move between fields · **tab** takes the completion offered, tab again walks on
+- **filling the empty row at the end of a section adds**; **emptying a row removes** what it
+  pointed at. No add key, no delete key — except on the note log, where **d** drops an entry
+- Names complete against the role you picked, so a `director` box offers directors and a
+  `studio` box offers studios (and stores one as a company, not a person). Anything you
+  type is accepted, and becomes a candidate itself once it is in the graph
+- Dates are EDTF, the same literal `rdt edit date` takes: `2026`, `2026-09`, `2026-Q3`,
+  `2026-09-18`, `2027..2029` for a window, trailing `~` for approximate and `?` for unsure.
+  The field holds only what *you* wrote — a pulled date shows as the placeholder, so it is
+  never frozen into a hand-authored one by accident, and emptying the field gives it back
+
+A hand-authored date carries no confidence figure, because it cannot mean anything: the
+resolver recomputes every score from certainty and tier on read, so a number typed in would
+be overwritten before it could be displayed. The card shows such a date as `manual` plus the
+stance the EDTF qualifier already stated.
 
 ## Privacy
 

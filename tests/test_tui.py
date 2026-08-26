@@ -13,7 +13,7 @@ from itertools import pairwise
 from pathlib import Path
 
 import pytest
-from textual.widgets import DataTable, Input
+from textual.widgets import DataTable, Input, Static
 
 from release_tracker import query, views
 from release_tracker.config import Settings, get_settings
@@ -39,6 +39,15 @@ from release_tracker.tui.app import RdtApp
 from release_tracker.tui.browse import COLUMNS, BrowseScreen
 from release_tracker.tui.card import CardScreen, StateToggle
 from release_tracker.tui.completing import field_suggester
+from release_tracker.tui.edit import (
+    CreditAddRow,
+    CreditRow,
+    DateRow,
+    EditScreen,
+    NoteAddRow,
+    NoteRow,
+    TitleRow,
+)
 from release_tracker.tui.state import with_bucket
 from release_tracker.views import TrackRow
 
@@ -670,3 +679,284 @@ async def test_state_cell_restyles_when_the_state_changes(
         assert seen[ConsumptionState.WATCHING] == ("watching", ("bold",))
         assert seen[ConsumptionState.DROPPED] == ("dropped", ("red",))
         assert seen[ConsumptionState.SKIPPED] == ("skipped", ("yellow",))
+
+
+# --- the card in edit mode ----------------------------------------------------------------
+# Driven the way the card tests are: press keys, then open a fresh Database and assert what
+# actually landed. Nothing is staged, so "landed" is checkable the moment a field is left.
+
+
+async def _open_edit(pilot: object, app: RdtApp, title: str) -> EditScreen:
+    """Open the named work's card and press `e`."""
+    screen = _browse(app)
+    screen.set_query(f'"{title}"')
+    await pilot.pause()  # pyright: ignore[reportAttributeAccessIssue]
+    screen.table.focus()
+    await pilot.press("enter")  # pyright: ignore[reportAttributeAccessIssue]
+    await pilot.pause()  # pyright: ignore[reportAttributeAccessIssue]
+    await pilot.press("e")  # pyright: ignore[reportAttributeAccessIssue]
+    await pilot.pause()  # pyright: ignore[reportAttributeAccessIssue]
+    edit = app.screen
+    assert isinstance(edit, EditScreen)
+    return edit
+
+
+def _status(edit: EditScreen) -> str:
+    return str(edit.query_one("#edit-status", Static).content)
+
+
+async def test_e_opens_the_card_writable_with_the_title_in_hand(
+    app_db: tuple[Path, dict[str, Entity]],
+) -> None:
+    path, _ = app_db
+    app = _app(path)
+    async with app.run_test(size=(150, 44)) as pilot:
+        await pilot.pause()
+        edit = await _open_edit(pilot, app, "Sinners")
+        assert isinstance(app.screen.focused, Input)
+        assert edit.query_one(TitleRow).field.value == "Sinners"
+
+
+async def test_leaving_a_field_is_the_save(app_db: tuple[Path, dict[str, Entity]]) -> None:
+    """No save key: the field commits on the way out, like the state toggle."""
+    path, made = app_db
+    app = _app(path)
+    async with app.run_test(size=(150, 44)) as pilot:
+        await pilot.pause()
+        edit = await _open_edit(pilot, app, "Sinners")
+        edit.query_one(TitleRow).field.focus()
+        await pilot.press("ctrl+u", *"Sinners: Redux")
+        await pilot.press("down")  # ...which is all it takes
+        await pilot.pause()
+    db = Database(path)
+    renamed = db.get_entity(made["Sinners"].id)
+    db.close()
+    assert renamed is not None
+    assert renamed.title == "Sinners: Redux"
+    assert "Sinners" in renamed.aliases  # still findable under the old name
+
+
+async def test_escape_commits_the_field_under_the_cursor_and_shows_the_card(
+    app_db: tuple[Path, dict[str, Entity]],
+) -> None:
+    """Blur would commit too, but blur is a message — it would land after the dismissal."""
+    path, made = app_db
+    app = _app(path)
+    async with app.run_test(size=(150, 44)) as pilot:
+        await pilot.pause()
+        edit = await _open_edit(pilot, app, "Weapons")
+        edit.query_one(TitleRow).field.focus()
+        await pilot.press("ctrl+u", *"Weapons II")
+        await pilot.press("escape")  # no blur first, deliberately
+        await pilot.pause()
+        assert isinstance(app.screen, CardScreen)
+        assert app.screen.entity.title == "Weapons II"  # the card re-read on the way back
+    db = Database(path)
+    after = db.get_entity(made["Weapons"].id)
+    db.close()
+    assert after is not None and after.title == "Weapons II"
+
+
+def _manual(db: Database, entity_id: str) -> list[ReleaseObservation]:
+    return [o for o in db.iter_observations(entity_id) if o.provider == "manual"]
+
+
+async def test_a_date_row_takes_a_partial_date(app_db: tuple[Path, dict[str, Entity]]) -> None:
+    path, made = app_db
+    app = _app(path)
+    async with app.run_test(size=(150, 44)) as pilot:
+        await pilot.pause()
+        edit = await _open_edit(pilot, app, "Sinners")
+        row = next(r for r in edit.query(DateRow) if r.channel is ReleaseChannel.DIGITAL)
+        row.field.focus()
+        await pilot.press(*"2027-Q2~")
+        await pilot.press("down")
+        await pilot.pause()
+        assert row.field.value == "2027-34~"  # echoed back canonical
+    db = Database(path)
+    obs = _manual(db, made["Sinners"].id)
+    db.close()
+    assert len(obs) == 1
+    assert obs[0].release_date == date(2027, 4, 1)
+    assert obs[0].precision is DatePrecision.QUARTER
+    assert obs[0].certainty is Certainty.ESTIMATED
+
+
+async def test_a_date_row_takes_a_window(app_db: tuple[Path, dict[str, Entity]]) -> None:
+    path, made = app_db
+    app = _app(path)
+    async with app.run_test(size=(150, 44)) as pilot:
+        await pilot.pause()
+        edit = await _open_edit(pilot, app, "Sinners")
+        row = next(r for r in edit.query(DateRow) if r.channel is ReleaseChannel.DIGITAL)
+        row.field.focus()
+        await pilot.press(*"2027..2029")
+        await pilot.press("down")
+        await pilot.pause()
+    db = Database(path)
+    (obs,) = _manual(db, made["Sinners"].id)
+    db.close()
+    assert (obs.release_date, obs.date_end) == (date(2027, 1, 1), date(2029, 1, 1))
+
+
+async def test_a_bad_date_says_so_and_writes_nothing(
+    app_db: tuple[Path, dict[str, Entity]],
+) -> None:
+    path, made = app_db
+    app = _app(path)
+    async with app.run_test(size=(150, 44)) as pilot:
+        await pilot.pause()
+        edit = await _open_edit(pilot, app, "Sinners")
+        row = next(r for r in edit.query(DateRow) if r.channel is ReleaseChannel.DIGITAL)
+        row.field.focus()
+        await pilot.press(*"2026-13")
+        await pilot.press("down")
+        await pilot.pause()
+        assert "EDTF" in _status(edit)
+    db = Database(path)
+    assert _manual(db, made["Sinners"].id) == []
+    db.close()
+
+
+async def test_the_date_field_holds_only_what_a_person_authored(
+    app_db: tuple[Path, dict[str, Entity]],
+) -> None:
+    """A pulled date shows as the placeholder: visible, but not frozen into a manual one."""
+    path, _ = app_db
+    app = _app(path)
+    async with app.run_test(size=(150, 44)) as pilot:
+        await pilot.pause()
+        edit = await _open_edit(pilot, app, "Sinners")
+        row = next(r for r in edit.query(DateRow) if r.channel is ReleaseChannel.DIGITAL)
+        assert row.field.value == ""
+        assert "2025-06-01" in row.field.placeholder
+
+
+async def test_filling_the_empty_row_adds_a_credit(
+    app_db: tuple[Path, dict[str, Entity]],
+) -> None:
+    path, made = app_db
+    app = _app(path)
+    async with app.run_test(size=(150, 44)) as pilot:
+        await pilot.pause()
+        edit = await _open_edit(pilot, app, "Sinners")
+        row = edit.query_one(CreditAddRow)
+        assert row.role is CreditRole.DIRECTOR  # the picker starts on the first role
+        row.field.focus()
+        await pilot.press(*"Ryan Coogler")
+        await pilot.press("down")
+        await pilot.pause()
+        assert row.field.value == ""  # the add row resets, ready for the next
+    db = Database(path)
+    edges = [e for e in db.edges_to(made["Sinners"].id, RelationKind.CREDITED_ON)]
+    node = db.get_node("person:ryan-coogler")
+    db.close()
+    assert node is not None and node.owned
+    assert any(e.src_id == node.id and e.role is CreditRole.DIRECTOR for e in edges)
+
+
+async def test_the_role_picked_decides_whether_the_node_is_a_company(
+    app_db: tuple[Path, dict[str, Entity]],
+) -> None:
+    """A studio stored as a person forks a second node beside the one TMDB resolves."""
+    path, _ = app_db
+    app = _app(path)
+    async with app.run_test(size=(150, 44)) as pilot:
+        await pilot.pause()
+        edit = await _open_edit(pilot, app, "Sinners")
+        row = edit.query_one(CreditAddRow)
+        picker = row.picker
+        assert picker is not None
+        picker.focus()
+        while picker.value != CreditRole.STUDIO.value:
+            await pilot.press("right")
+            await pilot.pause()
+        row.field.focus()
+        await pilot.press(*"A24")
+        await pilot.press("down")
+        await pilot.pause()
+    db = Database(path)
+    assert db.get_node("org:a24") is not None
+    assert db.get_node("person:a24") is None
+    db.close()
+
+
+async def test_emptying_a_row_removes_what_it_pointed_at(
+    app_db: tuple[Path, dict[str, Entity]],
+) -> None:
+    """No delete key: a row with nothing in it is a fact that is no longer claimed."""
+    path, made = app_db
+    app = _app(path)
+    async with app.run_test(size=(150, 44)) as pilot:
+        await pilot.pause()
+        edit = await _open_edit(pilot, app, "Sinners")
+        row = edit.query(CreditRow).first()
+        row.field.focus()
+        await pilot.press("ctrl+u")
+        await pilot.press("down")
+        await pilot.pause()
+        await pilot.pause()  # the commit rides on the blur, which is a message
+        assert not row.display  # and it leaves the form
+    db = Database(path)
+    edges = db.edges_to(made["Sinners"].id, RelationKind.CREDITED_ON)
+    db.close()
+    assert edges == []
+
+
+async def test_the_name_field_completes_against_the_role(
+    app_db: tuple[Path, dict[str, Entity]],
+) -> None:
+    """The seeded works each have a director, so a director box knows them and tab takes one."""
+    path, _ = app_db
+    app = _app(path)
+    async with app.run_test(size=(150, 44)) as pilot:
+        await pilot.pause()
+        edit = await _open_edit(pilot, app, "Sinners")
+        row = edit.query_one(CreditAddRow)
+        row.field.focus()
+        await pilot.press(*"Dir Wea")
+        await pilot.pause()
+        assert [p.label for p in row.completing.picks] == ["Dir Weapons"]
+        await pilot.press("tab")
+        await pilot.pause()
+        assert row.field.value == "Dir Weapons"
+
+
+async def test_notes_can_be_added_and_dropped(app_db: tuple[Path, dict[str, Entity]]) -> None:
+    path, made = app_db
+    app = _app(path)
+    async with app.run_test(size=(150, 44)) as pilot:
+        await pilot.pause()
+        edit = await _open_edit(pilot, app, "Sinners")
+        edit.query_one(NoteAddRow).field.focus()
+        await pilot.press(*"waiting on the UK date")
+        await pilot.press("enter")
+        await pilot.pause()
+        db = Database(path)
+        assert [n.body for n in db.iter_notes(made["Sinners"].id)] == ["waiting on the UK date"]
+        db.close()
+        note = edit.query(NoteRow).first()
+        note.focus()
+        await pilot.press("d")
+        await pilot.pause()
+    db = Database(path)
+    assert db.iter_notes(made["Sinners"].id) == ()
+    db.close()
+
+
+async def test_an_edit_reaches_the_table_behind_the_card(
+    app_db: tuple[Path, dict[str, Entity]],
+) -> None:
+    """The browse table is a snapshot; a rename it never heard about is a stale row."""
+    path, _ = app_db
+    app = _app(path)
+    async with app.run_test(size=(150, 44)) as pilot:
+        await pilot.pause()
+        edit = await _open_edit(pilot, app, "Sinners")
+        edit.query_one(TitleRow).field.focus()
+        await pilot.press("ctrl+u", *"Sinners: Redux")
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.press("escape")  # out of the card, back to the table
+        await pilot.pause()
+        assert "Sinners: Redux" in _titles(app)

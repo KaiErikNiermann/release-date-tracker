@@ -98,6 +98,12 @@ class _Walk:
 class CompletingInput(Input):
     """An Input that offers a completion as a dim tail; tab takes it, tab again walks.
 
+    Tab is always the explicit way to take an offer. ``implicit_accept`` adds the two
+    quiet ones — a space, and leaving the field — which are right only where the offer is
+    driving something the reader can see (the query bar filters by it, so dropping it
+    would contradict the screen). Where the field is only text, they would swallow a
+    deliberate freeform value that happens to be a prefix of a known one.
+
     Beyond the completion itself it fixes one Textual default: ctrl+backspace deletes the
     word to the *left*, where Textual binds it to ``delete_right_word``, which is not what
     the chord means anywhere else. (It only arrives at all when the terminal disambiguates
@@ -135,11 +141,29 @@ class CompletingInput(Input):
         placeholder: str = "",
         id: str | None = None,
         classes: str | None = None,
+        implicit_accept: bool = False,
     ) -> None:
         super().__init__(value=value, placeholder=placeholder, id=id, classes=classes)
         self._suggester = suggester
+        self._implicit_accept = implicit_accept
         self._walk: _Walk | None = None
         self._announced: str | None = None
+
+    @property
+    def candidates(self) -> Suggester:
+        """Where candidates come from. Re-pointing it starts the offer over.
+
+        Settable because a field's vocabulary can depend on a control beside it: a credit
+        row picking `director` should complete against directors, and picking `composer` a
+        keystroke later should complete against composers.
+        """
+        return self._suggester
+
+    @candidates.setter
+    def candidates(self, suggester: Suggester) -> None:
+        self._suggester = suggester
+        self._walk = None
+        self.refresh_offer()
 
     # --- what the field currently stands for -------------------------------------
     @property
@@ -219,6 +243,11 @@ class CompletingInput(Input):
         pick = walk.picks[walk.index]
         if pick.kind != "value" or walk.origin_caret != len(walk.origin):
             return None
+        if pick.start == pick.end:
+            # Nothing has been typed for the candidate to extend. An empty field means
+            # "nothing", not "the first name in the list", and offering one there turns
+            # leaving the field into a way to fill it in by accident.
+            return None
         candidate = query.apply(walk.origin, pick)
         extends = candidate.startswith(walk.origin) and len(candidate) > len(walk.origin)
         return candidate if extends else None
@@ -232,8 +261,10 @@ class CompletingInput(Input):
         """
         if not self.has_focus:
             # The tail stops being painted the moment focus goes, so keeping it would mean
-            # standing for something invisible. Committing keeps what was on screen.
-            if not self.accept_ghost():
+            # standing for something invisible. Where the offer is driving something —
+            # the query bar's results — taking it keeps what was on screen; where the
+            # field is just text, dropping it keeps what was actually typed.
+            if not (self._implicit_accept and self.accept_ghost()):
                 self.ghost = ""
                 self._announce()
             return
@@ -301,12 +332,14 @@ class CompletingInput(Input):
         self.call_later(self.refresh_offer)
 
     def on_blur(self) -> None:
-        self.accept_ghost()
+        if self._implicit_accept:
+            self.accept_ghost()
 
     async def _on_key(self, event: events.Key) -> None:
-        # Space ends a token, so it reads as "take what I can see": whatever the offer was
-        # driving is already on screen, and dropping it on the way to the next word would
-        # contradict what was there a keystroke ago.
-        if event.character == " " and self.cursor_at_end:
+        # Where a space ends the token — the query bar — it reads as "take what I can
+        # see". Where the field holds one value it means nothing of the sort: `Vince
+        # Gilligan` has a space in it, and accepting on the way through would leave the
+        # first candidate for `Vince` with ` Gilligan` stuck on the end.
+        if self._implicit_accept and event.character == " " and self.cursor_at_end:
             self.accept_ghost()
         await super()._on_key(event)

@@ -97,6 +97,22 @@ class RdtApp(App[None]):
             self.snapshot = self.snapshot.replace_row(row)
         self._refresh_browse()
 
+    def after_edit(self, entity: Entity, *, graph: bool = False) -> None:
+        """Catch the rest of the app up with a hand-edit to one work.
+
+        A graph edit mints nodes — a new credit, tag or platform name — and the completion
+        vocabulary is built from the graph, so the snapshot has to be rebuilt or the name
+        just typed would not be offered next time. An edit that only touches the work
+        itself patches its one row instead, at ~0.3 ms against the rebuild's ~85.
+        """
+        if graph:
+            self.reload_snapshot()
+        elif (updated := self.db.get_entity(entity.id)) is not None:
+            notes = self.db.note_counts().get(entity.id, 0) > 0
+            row = views.track_row(self.db, updated, self.today, self.settings, notes)
+            self.snapshot = self.snapshot.replace_row(row)
+        self._refresh_browse()
+
     # --- navigation ----------------------------------------------------------------
     def open_card(self, row: TrackRow) -> None:
         entity = self.db.get_entity(row.entity_id)

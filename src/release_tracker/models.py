@@ -315,6 +315,7 @@ class BestEstimate(BaseModel):
     certainty: Certainty = Certainty.ESTIMATED
     price: Money | None = None
     confidence: float = 0.5
+    provider: str = "unknown"  # who produced the winning observation (tmdb / model / manual…)
     supporting_observation_ids: tuple[str, ...] = ()
     fetched_at: datetime | None = None  # when the winning observation was last refreshed
 
@@ -423,6 +424,21 @@ class CreditRole(enum.StrEnum):
     CAST = "cast"
     VOICE = "voice"
     OTHER = "other"
+
+
+# Roles a company holds, not a person. The pullers already resolve these to ORG nodes
+# (tmdb production companies and networks, igdb developers and publishers), so a
+# hand-added credit in one of them has to be an ORG too or it forks a second node of a
+# different kind for the same company.
+ORG_ROLES: frozenset[CreditRole] = frozenset(
+    {
+        CreditRole.DEVELOPER,
+        CreditRole.PUBLISHER,
+        CreditRole.STUDIO,
+        CreditRole.ANIMATION_STUDIO,
+        CreditRole.NETWORK,
+    }
+)
 
 
 class Node(BaseModel):

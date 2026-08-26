@@ -15,7 +15,7 @@ from datetime import date
 
 from release_tracker import views
 from release_tracker.config import get_settings
-from release_tracker.models import ConsumptionState, DatePrecision
+from release_tracker.models import BestEstimate, ConsumptionState, DatePrecision
 
 __all__ = [
     "fmt_cell",
@@ -24,6 +24,7 @@ __all__ = [
     "fresh_color",
     "fresh_dot",
     "legend_dots",
+    "provenance",
     "stance_color",
     "state_label",
     "title_cell",
@@ -66,6 +67,20 @@ def legend_dots() -> str:
     """The fresh/aging/stale legend swatch, using the configured colors."""
     s = get_settings()
     return f"[{s.fresh_color}]●[/]fresh [{s.aging_color}]●[/]aging [{s.stale_color}]●[/]stale"
+
+
+def provenance(est: BestEstimate) -> str:
+    """Where a date came from, and how sure it is — as far as that means anything.
+
+    A confidence figure on a hand-authored date is noise: the resolver recomputes every
+    score from certainty and tier on read, so the number a person typed never survives to
+    be displayed. What is true of such a date is that someone asserted it, and how firmly
+    they hedged it — which the EDTF qualifier already said.
+    """
+    if est.provider == "manual":
+        return f"manual · {est.certainty.value}"
+    known = f"{est.provider}  " if est.provider != "unknown" else ""
+    return f"{known}conf {est.confidence:.2f}"
 
 
 def fmt_cell(cell: views.DateCell | None) -> str:

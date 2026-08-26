@@ -91,6 +91,9 @@ class TagLine:
     name: str
     kind: DescriptorKind
     predicted: bool  # True => model-derived (a flagged hypothesis, not a fact)
+    # the descriptor node behind it: two kinds can share a name (horror the genre, horror
+    # the theme), so an editor that unlinked by name would unlink both
+    node_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +102,7 @@ class PlatformLine:
 
     name: str
     predicted: bool
+    node_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -474,7 +478,7 @@ def _platform_lines(db: Database, entity_id: str) -> list[PlatformLine]:
     edges = db.edges_from(entity_id, RelationKind.AVAILABLE_ON)
     nodes = db.get_nodes(e.dst_id for e in edges)
     return [
-        PlatformLine(n.name, e.source_tier is SourceTier.MODEL)
+        PlatformLine(n.name, e.source_tier is SourceTier.MODEL, n.id)
         for e in edges
         if (n := nodes.get(e.dst_id))
     ]
@@ -485,7 +489,10 @@ def _tag_lines(db: Database, entity_id: str) -> list[TagLine]:
     nodes = db.get_nodes(e.dst_id for e in edges)
     lines = [
         TagLine(
-            n.name, n.descriptor_kind or DescriptorKind.GENRE, e.source_tier is SourceTier.MODEL
+            n.name,
+            n.descriptor_kind or DescriptorKind.GENRE,
+            e.source_tier is SourceTier.MODEL,
+            n.id,
         )
         for e in edges
         if (n := nodes.get(e.dst_id))

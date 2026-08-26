@@ -91,6 +91,8 @@ class BrowseScreen(Screen[None]):
             self._suggest,
             placeholder="filter — e.g. kind:movie genre:horror year:2026",
             id="query",
+            # the table is filtered by the offer, so a space or a step away takes it
+            implicit_accept=True,
         )
         yield Static("", id="hint")
         yield DataTable[Text](id="rows")

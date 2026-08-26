@@ -90,3 +90,80 @@ AddScreen {
     height: 1fr;
     border: none;
 }
+
+/* --- the card in edit mode ------------------------------------------------
+   Same box as #card, so `e` reads as the card becoming writable rather than as
+   a different screen opening over it. */
+EditScreen {
+    align: center middle;
+}
+
+#edit {
+    width: 84;
+    max-width: 90%;
+    height: auto;
+    max-height: 90%;
+    border: round $accent;
+    background: $surface;
+    padding: 1 2;
+}
+
+#edit-title {
+    padding-bottom: 1;
+}
+
+#edit-body {
+    height: auto;
+    max-height: 24;
+    overflow-y: auto;
+}
+
+.edit-head {
+    text-style: bold;
+    padding-top: 1;
+}
+
+.edit-row {
+    height: 1;
+}
+
+/* One label column across every section, so the fields line up as a form. */
+.row-label, .edit-row > Cycle {
+    width: 20;
+    padding-right: 1;
+}
+
+.edit-row > Cycle:focus {
+    background: $panel-lighten-1;
+}
+
+.edit-row > Input {
+    width: 1fr;
+    height: 1;
+    border: none;
+    background: $panel;
+    padding: 0 1;
+}
+
+.edit-row > Input:focus {
+    background: $panel-lighten-1;
+}
+
+.note-row {
+    height: auto;
+    padding: 0 1;
+}
+
+.note-row:focus {
+    background: $panel-lighten-1;
+}
+
+#edit-hint {
+    height: 1;
+    color: $text-muted;
+}
+
+#edit-foot, #edit-status {
+    height: 1;
+    color: $text-muted;
+}
