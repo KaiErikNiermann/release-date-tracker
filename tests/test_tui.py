@@ -38,6 +38,7 @@ from release_tracker.models import (
 from release_tracker.tui.app import RdtApp
 from release_tracker.tui.browse import COLUMNS, BrowseScreen
 from release_tracker.tui.card import CardScreen, StateToggle
+from release_tracker.tui.completing import field_suggester
 from release_tracker.tui.state import with_bucket
 from release_tracker.views import TrackRow
 
@@ -419,9 +420,7 @@ async def test_the_preview_is_scoped_to_what_was_typed(
     app = _app(path)
     async with app.run_test(size=(140, 24)) as pilot:
         screen = await _type(pilot, app, "is:a")
-        walk = screen._walk  # pyright: ignore[reportPrivateUsage]
-        assert walk is not None
-        assert [p.label for p in walk.picks] == ["aging", "available"]
+        assert [p.label for p in screen.bar.picks] == ["aging", "available"]
 
 
 async def test_space_takes_the_previewed_completion(
@@ -516,19 +515,41 @@ async def test_down_stays_put_when_there_is_nothing_to_land_on(
         assert app.screen.focused is screen.bar
 
 
+def test_a_field_suggester_completes_the_whole_value(
+    app_db: tuple[Path, dict[str, Entity]],
+) -> None:
+    """What a card field needs: the candidate replaces everything typed, not a token."""
+    path, _ = app_db
+    app = _app(path)
+    suggest = field_suggester("director", app.snapshot.vocab)
+    picks = suggest("dir sin", 7)
+    assert picks, "the seeded works all have a director"
+    assert all(p.start == 0 and p.end == len("dir sin") for p in picks)
+    assert all(p.insert == p.label for p in picks)  # no field: prefix, no quoting
+
+
+def test_a_field_suggester_is_scoped_to_its_field(
+    app_db: tuple[Path, dict[str, Entity]],
+) -> None:
+    """A `composer` box offering a director suggests a name that provably cannot be right."""
+    path, _ = app_db
+    app = _app(path)
+    assert field_suggester("director", app.snapshot.vocab)("", 0)
+    assert field_suggester("composer", app.snapshot.vocab)("", 0) == ()
+
+
 async def _tab_walk(pilot: object, app: RdtApp, start: str, presses: int) -> list[str]:
     """Tab `presses` times from `start`, collecting the query each press leaves in force.
 
-    The *effective* query, not the bar's value: a completion that merely extends what was
-    typed is previewed as the bar's dim tail rather than spliced in, and the tail is what
-    the table is filtered by.
+    The *effective* query, not the bar's value: until tab takes it, a completion that
+    extends what was typed is only offered as the bar's dim tail, and the tail is what the
+    table is filtered by.
     """
     screen = _browse(app)
-    bar = screen.query_one("#query", Input)
+    bar = screen.bar
     bar.focus()
     bar.value = start
     bar.cursor_position = len(start)
-    screen._walk = None  # pyright: ignore[reportPrivateUsage]
     seen: list[str] = []
     for _ in range(presses):
         await pilot.press("tab")  # pyright: ignore[reportAttributeAccessIssue]

@@ -47,10 +47,12 @@ __all__ = [
     "Vocabulary",
     "active_span",
     "apply",
+    "canonical_field",
     "filter_rows",
     "lex",
     "matches",
     "parse",
+    "rank_values",
     "suggest",
 ]
 
@@ -563,6 +565,29 @@ def _quote(value: str) -> str:
     return f"{QUOTE}{value}{QUOTE}" if any(c.isspace() or c == "," for c in value) else value
 
 
+def canonical_field(name: str) -> str:
+    """The field an alias names — ``dir`` -> ``director``. Idempotent on a real field."""
+    lowered = name.strip().lower()
+    return _FIELD_ALIASES.get(lowered, lowered)
+
+
+def rank_values(
+    field: str, vocab: Vocabulary, needle: str, *, limit: int = 8
+) -> tuple[tuple[VocabEntry, str], ...]:
+    """The completable ``(value, detail)`` pairs for one field, best match first.
+
+    The ranking half of :func:`suggest`, split out because the query bar is not the only
+    place that completes a value against the graph: a card's ``director`` field wants the
+    same candidates in the same order, and only differs in how it splices the answer back.
+    """
+    pool = _values_for(canonical_field(field), vocab)
+    hits = [(e, d) for e, d in pool if _word_prefixed(e.value, needle)]
+    if not hits:  # nothing *starts* with it, so fall back to anywhere-in-the-value
+        hits = [(e, d) for e, d in pool if needle in e.value.lower()]
+    hits.sort(key=lambda ed: (not ed[0].value.lower().startswith(needle), -ed[0].uses, ed[0].value))
+    return tuple(hits[:limit])
+
+
 def suggest(
     source: str, cursor: int, vocab: Vocabulary, *, limit: int = 8
 ) -> tuple[Suggestion, ...]:
@@ -592,17 +617,11 @@ def suggest(
             for name in names[:limit]
         )
 
-    field = _FIELD_ALIASES.get(head.strip().lower(), head.strip().lower())
+    field = canonical_field(head)
     # complete only the segment under the caret in a comma list
     lead, _, segment = value.rpartition(",")
     needle = segment.strip().strip(QUOTE).lower()
     kept = f"{lead}," if lead else ""
-
-    pool = _values_for(field, vocab)
-    hits = [(e, d) for e, d in pool if _word_prefixed(e.value, needle)]
-    if not hits:  # nothing *starts* with it, so fall back to anywhere-in-the-value
-        hits = [(e, d) for e, d in pool if needle in e.value.lower()]
-    hits.sort(key=lambda ed: (not ed[0].value.lower().startswith(needle), -ed[0].uses, ed[0].value))
     return tuple(
         Suggestion(
             insert=f"{prefix}{field}:{_quote(kept + entry.value)}",
@@ -611,5 +630,5 @@ def suggest(
             start=start,
             end=end,
         )
-        for entry, detail in hits[:limit]
+        for entry, detail in rank_values(field, vocab, needle, limit=limit)
     )

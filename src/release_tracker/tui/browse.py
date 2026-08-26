@@ -6,16 +6,17 @@ expensive part (building the rows) already happened once at startup.
 Completion is *previewed* rather than committed: a half-typed ``is:a`` shows the table
 for ``is:aging`` with ``ging`` dimmed after the caret, and tab walks that preview through
 the rest of the candidates. A partial term therefore never shows an empty table, and what
-the table is filtered by is exactly what the bar displays.
+the table is filtered by is exactly what the bar displays. The bar itself is the shared
+:class:`CompletingInput` — the card editor completes its fields against the same graph
+with the same keys.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, cast
 
 from rich.text import Text
-from textual import events, on
+from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
 from textual.screen import Screen
@@ -23,6 +24,7 @@ from textual.widgets import DataTable, Input, Static
 
 from release_tracker import query, render
 from release_tracker.models import Bucket
+from release_tracker.tui.completing import WALK_LIMIT, CompletingInput, completion_hint
 from release_tracker.tui.state import bucket_of_query, with_bucket
 from release_tracker.views import TrackRow
 
@@ -30,95 +32,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from release_tracker.tui.app import RdtApp
 
 COLUMNS = ("Date", "⟳", "Title", "Kind", "State", "Who", "Where", "What")
-_WALK_LIMIT = 40  # how many completions tab will walk through
-_HINT_WIDTH = 6  # how many of them the hint line shows at once
 _BUCKET_KEYS = {"1": Bucket.AVAILABLE, "2": Bucket.UPCOMING, "3": Bucket.WATCHED}
-
-
-class QueryInput(Input):
-    """The query bar.
-
-    Two things the browse screen needs that a plain ``Input`` will not give it:
-
-    * a settable completion tail. Textual fills one in only from a ``Suggester``, which is
-      handed the whole value and nothing else; ours depends on the caret and on how far
-      the tab walk has got, so the screen drives it directly.
-    * ctrl+backspace deleting the word to the *left*. Textual binds it to
-      ``delete_right_word``, which no terminal user expects. (In a terminal without the
-      kitty keyboard protocol, ctrl+backspace is indistinguishable from backspace and
-      only alt+backspace / ctrl+w get through — nothing can be done about that here.)
-    """
-
-    BINDINGS: ClassVar[list[BindingType]] = [
-        Binding(
-            "ctrl+backspace,ctrl+h,alt+backspace",
-            "delete_left_word",
-            "Delete word left",
-            show=False,
-        ),
-    ]
-
-    @property
-    def ghost(self) -> str:
-        """The completion rendered dim after the caret; empty when there is none."""
-        return self._suggestion
-
-    @ghost.setter
-    def ghost(self, text: str) -> None:
-        self._suggestion = text
-
-    @property
-    def _extends_value(self) -> bool:
-        return len(self.ghost) > len(self.value) and self.ghost.startswith(self.value)
-
-    @property
-    def ghosting(self) -> bool:
-        """Is a completion tail actually on screen? The same test Textual renders by."""
-        return self.has_focus and self._extends_value
-
-    def accept_ghost(self) -> bool:
-        """Commit the dim tail into the value. ``True`` if there was one to commit.
-
-        Deliberately not conditioned on focus: the last thing a blurring bar does is
-        accept, and by then Textual has already taken the focus away.
-        """
-        if not self._extends_value:
-            return False
-        self.value = self.ghost
-        self.cursor_position = len(self.value)
-        return True
-
-    async def _on_key(self, event: events.Key) -> None:
-        # Space ends the token, so it reads as "take what I can see": the table is already
-        # showing the completion's rows, and dropping it on the way to the next term would
-        # contradict what was on screen a keystroke ago.
-        if event.character == " " and self.cursor_at_end:
-            self.accept_ghost()
-        await super()._on_key(event)
-
-
-@dataclass(slots=True)
-class _Walk:
-    """An in-progress tab walk through the completions for one token.
-
-    Anchored to the text as *typed* (``origin``): applying a pick never moves the anchor,
-    so a second tab keeps stepping through the same list rather than re-deriving from its
-    own output — a fresh lookup after tab filled ``is:`` in as ``is:available`` matches
-    only "available", which would collapse the list and stall the walk.
-
-    ``value``/``caret`` are what the bar looked like after the last apply; if either has
-    drifted, the user typed something and the walk is over. ``chosen`` separates a pick
-    the user has taken from one merely being offered as a dim tail, which is what decides
-    whether the next tab steps on or takes what is on screen.
-    """
-
-    picks: tuple[query.Suggestion, ...]
-    index: int
-    origin: str
-    origin_caret: int
-    value: str
-    caret: int
-    chosen: bool = False
 
 
 class BrowseScreen(Screen[None]):
@@ -140,14 +54,15 @@ class BrowseScreen(Screen[None]):
         Binding("r", "reload", "Reload"),
         Binding("q", "quit", "Quit"),
         Binding("escape", "back", "Back", show=False),
-        Binding("tab", "complete(1)", "Complete", show=False),
-        Binding("shift+tab", "complete(-1)", "Complete back", show=False),
+        # The bar binds tab for its own completion walk, and a widget's bindings beat the
+        # screen's — so these only ever fire from the table, where nothing can be completed.
+        Binding("tab", "move_focus(1)", "Focus next", show=False),
+        Binding("shift+tab", "move_focus(-1)", "Focus previous", show=False),
     ]
 
     def __init__(self) -> None:
         super().__init__()
         self._visible: list[TrackRow] = []
-        self._walk: _Walk | None = None
         self._shown_query: str | None = None  # what the table currently holds
 
     @property
@@ -156,14 +71,13 @@ class BrowseScreen(Screen[None]):
         return cast("DataTable[Text]", self.query_one("#rows", DataTable))
 
     @property
-    def bar(self) -> QueryInput:
-        return self.query_one("#query", QueryInput)
+    def bar(self) -> CompletingInput:
+        return self.query_one("#query", CompletingInput)
 
     @property
     def effective_query(self) -> str:
         """What the table is filtered by: the bar, plus the completion it is previewing."""
-        bar = self.bar
-        return bar.ghost if bar.ghosting else bar.value
+        return self.bar.effective
 
     @property
     def rdt(self) -> RdtApp:
@@ -173,7 +87,11 @@ class BrowseScreen(Screen[None]):
         return self.app
 
     def compose(self) -> ComposeResult:
-        yield QueryInput(placeholder="filter — e.g. kind:movie genre:horror year:2026", id="query")
+        yield CompletingInput(
+            self._suggest,
+            placeholder="filter — e.g. kind:movie genre:horror year:2026",
+            id="query",
+        )
         yield Static("", id="hint")
         yield DataTable[Text](id="rows")
         yield Static("", id="status")
@@ -188,16 +106,16 @@ class BrowseScreen(Screen[None]):
         self.refresh_rows()
 
     # --- filtering ---------------------------------------------------------------
+    def _suggest(self, source: str, caret: int) -> tuple[query.Suggestion, ...]:
+        """The bar completes the token under the caret against the whole query language."""
+        return query.suggest(source, caret, self.rdt.snapshot.vocab, limit=WALK_LIMIT)
+
     @on(Input.Changed, "#query")
+    @on(CompletingInput.Offered, "#query")
     def _on_query_changed(self) -> None:
         self._sync_view()
 
     def on_descendant_focus(self) -> None:
-        """Textual drops the completion tail whenever the bar takes focus — put it back."""
-        self._sync_view()
-
-    @on(Input.Blurred, "#query")
-    def _on_query_blurred(self) -> None:
         self._sync_view()
 
     def refresh_rows(self) -> None:
@@ -206,8 +124,7 @@ class BrowseScreen(Screen[None]):
         self._sync_view()
 
     def _sync_view(self) -> None:
-        """Point the bar at the active completion and bring the table in line with it."""
-        self._sync_completion()
+        """Bring the table and the footers in line with what the bar currently means."""
         source = self.effective_query
         parsed = query.parse(source)
         if source != self._shown_query:
@@ -236,83 +153,10 @@ class BrowseScreen(Screen[None]):
                 key=row.entity_id,
             )
 
-    # --- completion --------------------------------------------------------------
-    def _live_walk(self) -> _Walk | None:
-        """The walk in progress, if the bar still looks the way it did when we set it."""
-        bar, walk = self.bar, self._walk
-        if walk is None or bar.value != walk.value or bar.cursor_position != walk.caret:
-            return None
-        return walk
-
-    def _fresh_walk(self) -> _Walk | None:
-        bar = self.bar
-        picks = query.suggest(
-            bar.value, bar.cursor_position, self.rdt.snapshot.vocab, limit=_WALK_LIMIT
-        )
-        if not picks:
-            return None
-        return _Walk(
-            picks=picks,
-            index=0,
-            origin=bar.value,
-            origin_caret=bar.cursor_position,
-            value=bar.value,
-            caret=bar.cursor_position,
-        )
-
-    def _ghost(self, walk: _Walk) -> str | None:
-        """The text the active pick would produce, when it only *extends* what was typed.
-
-        Only an extension can be painted as the bar's dim tail, and only what is painted
-        is allowed to filter — so preview and display are the same string or there is no
-        preview at all. A pick that has to rewrite the token (a quoted name, a canonical
-        field, a caret parked mid-query) falls back to being spliced in by tab.
-        """
-        pick = walk.picks[walk.index]
-        if pick.kind != "value" or walk.origin_caret != len(walk.origin):
-            return None
-        candidate = query.apply(walk.origin, pick)
-        extends = candidate.startswith(walk.origin) and len(candidate) > len(walk.origin)
-        return candidate if extends else None
-
-    def _sync_completion(self) -> None:
-        """Derive (or keep) the walk for the token under the caret and paint its tail.
-
-        Typing never writes into the bar — a completion the user has not asked for stays
-        an offer, so the only thing that changes under them is the table, which is the
-        point. Once tab has taken a pick there is nothing left to offer: the term is in
-        the bar in full, and the tail would only repeat it in grey.
-        """
-        bar = self.bar
-        if not bar.has_focus:
-            # The tail stops being painted the moment focus goes, so keeping it as a
-            # filter would narrow the table by something the user can no longer see.
-            # Committing keeps the rows they were looking at, with the reason in the bar.
-            if not bar.accept_ghost():  # a commit comes back round through Input.Changed
-                bar.ghost = ""
-            return
-        if (walk := self._live_walk()) is None:
-            self._walk = walk = self._fresh_walk()
-            if walk is None:
-                bar.ghost = ""
-                return
-        bar.ghost = "" if walk.chosen else (self._ghost(walk) or "")
-
     def _update_hint(self) -> None:
+        bar = self.bar
         hint = self.query_one("#hint", Static)
-        walk = self._walk if self.bar.has_focus else None
-        if walk is None:
-            hint.update("")
-            return
-        picks, active = walk.picks, walk.index
-        # scroll the window with the selection so a long list stays walkable
-        first = max(0, min(active - _HINT_WIDTH // 2, len(picks) - _HINT_WIDTH))
-        shown = [
-            f"[reverse]{p.label}[/]" if i + first == active else f"[dim]{p.label}[/]"
-            for i, p in enumerate(picks[first : first + _HINT_WIDTH])
-        ]
-        count = f"[dim]{active + 1}/{len(picks)}[/]" if len(picks) > 1 else ""
-        hint.update(Text.from_markup(f"[dim]↹[/] {'  '.join(shown)}  {count}"))
+        hint.update(completion_hint(bar.picks, bar.index) if bar.picks else "")
 
     def _update_status(self, parsed: query.Query) -> None:
         bucket = bucket_of_query(self.effective_query)
@@ -361,47 +205,17 @@ class BrowseScreen(Screen[None]):
         elif bar.value:
             self.set_query("")
 
-    def action_complete(self, delta: int = 1) -> None:
-        """Take the offered completion, then walk: tab again for the next candidate.
+    def action_move_focus(self, delta: int) -> None:
+        """Tab where there is nothing to complete means what it means everywhere else.
 
-        Tab writes the pick into the bar rather than only re-pointing the dim tail — the
-        tail is a hint about what is being typed, and a hint you cannot pick up leaves the
-        term to be finished by hand. So the first tab takes what is on screen (shift+tab
-        takes the one before it) and each tab after that steps to the next candidate,
-        rewriting the term in place. The caret lands at the end of it, ready for a space
-        and the next filter.
-
-        Away from the bar there is nothing to complete, so the key goes back to meaning
-        what it means in every other Textual app and every browser: move focus. With only
-        the bar and the table to move between, that is the way back to the query.
+        The bar binds tab for its own completion walk, so this only fires from the table —
+        and with just the bar and the table to move between, either direction is the way
+        back to the query, which is where a shift+tab out of a list is aiming anyway.
         """
-        bar = self.bar
-        if not bar.has_focus:
-            if delta > 0:
-                self.focus_next()
-            else:
-                self.focus_previous()
-            return
-        if (walk := self._live_walk() or self._fresh_walk()) is None:
-            self._walk = None
-            return
-        # An already-taken pick is stepped off; one merely offered is taken as it stands,
-        # unless the walk is going backwards, which has nothing to step back onto yet.
-        if walk.chosen or delta < 0:
-            walk.index = (walk.index + delta) % len(walk.picks)
-        walk.chosen = True
-        self._walk = walk
-
-        pick = walk.picks[walk.index]
-        bar.ghost = ""
-        bar.value = query.apply(walk.origin, pick)
-        bar.cursor_position = pick.start + len(pick.insert)
-        walk.value, walk.caret = bar.value, bar.cursor_position
-        # A sole completion has nowhere to cycle, so end the walk: the next tab then
-        # re-derives and moves on to the next stage — `gen` -> `genre:` -> its values.
-        if len(walk.picks) == 1:
-            self._walk = None
-        self._sync_view()
+        if delta > 0:
+            self.focus_next()
+        else:
+            self.focus_previous()
 
     @on(Input.Submitted, "#query")
     def _on_submit(self) -> None:

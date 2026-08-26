@@ -1527,9 +1527,7 @@ def edit_uncredit(
     if not removed:
         console.print(f"[yellow]No credit[/] for '{name}' on {entity.title}.")
         raise typer.Exit(1)
-    console.print(
-        f"[green]Removed[/] {removed} credit(s) for {name} from [bold]{entity.title}[/]"
-    )
+    console.print(f"[green]Removed[/] {removed} credit(s) for {name} from [bold]{entity.title}[/]")
 
 
 @edit_app.command("tag")

@@ -412,6 +412,18 @@ def test_field_and_value_suggestions_are_told_apart() -> None:
     assert all(s.kind == "value" for s in query.suggest("cast:", 5, _VOCAB))
 
 
+def test_rank_values_is_the_shared_half_of_completion() -> None:
+    """The card's `director` field wants the same candidates the query bar would offer."""
+    ranked = query.rank_values("director", _VOCAB, "")
+    assert [e.value for e, _ in ranked] == ["Denis Villeneuve"]
+    assert [e.value for e, _ in query.rank_values("cast", _VOCAB, "rit")] == ["Alan Ritchson"]
+    assert query.rank_values("cast", _VOCAB, "zzz") == ()
+
+
+def test_rank_values_resolves_a_field_alias() -> None:
+    assert query.rank_values("actor", _VOCAB, "") == query.rank_values("cast", _VOCAB, "")
+
+
 def test_apply_is_the_splice_the_widget_relies_on() -> None:
     source = "kind:tv cast:rit year:2026"
     assert query.apply(source, query.suggest(source, 16, _VOCAB)[0]) == (
