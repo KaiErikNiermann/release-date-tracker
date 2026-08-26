@@ -17,6 +17,7 @@ dependencies = [
     "dateparser>=1.2",
     "feedparser (>=6.0)",
     "textual (>=8.2,<9.0)",
+    "platformdirs (>=4.0)",
 ]
 
 [project.scripts]

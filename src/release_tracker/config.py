@@ -1,4 +1,10 @@
-"""Runtime configuration loaded from environment / ``.env`` (never committed)."""
+"""Runtime configuration loaded from environment / ``.env`` (never committed).
+
+Paths follow the XDG base directories (via ``platformdirs``), because an installed ``rdt``
+is invoked from wherever you happen to be standing and must find the *same* tracker every
+time. The one exception is a checkout that already has a ``data/releases.db`` beside it —
+see ``_legacy_project_dir``. Every path stays overridable by its ``RDT_*`` variable.
+"""
 
 from __future__ import annotations
 
@@ -6,8 +12,19 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
+from platformdirs import PlatformDirs
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _dirs() -> PlatformDirs:
+    """The XDG base dirs for this app, resolved fresh each time.
+
+    Deliberately not a module-level constant: ``platformdirs`` reads ``XDG_*`` at
+    construction, so caching one would freeze the layout at import. ``appauthor=False``
+    keeps Windows at ``%LOCALAPPDATA%\\rdt`` rather than ``%LOCALAPPDATA%\\rdt\\rdt``.
+    """
+    return PlatformDirs(appname="rdt", appauthor=False)
 
 
 def _csv_lower(raw: str) -> tuple[str, ...]:
@@ -15,9 +32,42 @@ def _csv_lower(raw: str) -> tuple[str, ...]:
     return tuple(v.strip().lower() for v in raw.split(",") if v.strip())
 
 
+def _legacy_project_dir() -> Path | None:
+    """The pre-XDG layout — a ``data/`` beside the working directory — if it is in use.
+
+    Honoured only when it already holds a database, so a checkout that has been tracking
+    titles keeps its tracker instead of silently opening an empty one under
+    ``~/.local/share`` after an upgrade. A fresh install never takes this branch.
+    """
+    legacy = Path("data")
+    return legacy if (legacy / "releases.db").is_file() else None
+
+
+def _path(kind: Literal["data", "cache", "config"], name: str, legacy: str) -> Path:
+    """``name`` under an XDG base dir — or the exact ``legacy`` path if that layout is live.
+
+    The legacy spelling is passed in per file rather than derived, because the old layout
+    split them (``data/`` for databases, ``local/`` for hand-authored seeds) and an upgrade
+    must not quietly start looking for a seeds file somewhere it was never written.
+    """
+    if _legacy_project_dir() is not None:
+        return Path(legacy)
+    dirs = _dirs()
+    match kind:
+        case "data":
+            base = dirs.user_data_dir
+        case "cache":
+            base = dirs.user_cache_dir
+        case "config":
+            base = dirs.user_config_dir
+    return Path(base) / name
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        # Loaded in order, last wins: a project-local .env overrides the user-wide one, so
+        # a checkout can point at its own keys without disturbing the installed CLI.
+        env_file=(Path(_dirs().user_config_dir) / ".env", Path(".env")),
         env_file_encoding="utf-8",
         env_prefix="",
         extra="ignore",
@@ -42,15 +92,26 @@ class Settings(BaseSettings):
     # CSV of accepted ISO-2 regions; the sentinel ANY (or *) means "region never gates me"
     # (e.g. a VPN makes region-locks inapplicable) — see contingency.matcher_from_settings.
     regions_raw: str = Field(default="US,DE,GB", alias="RDT_REGIONS")
-    db_path: Path = Field(default=Path("data/releases.db"), alias="RDT_DB_PATH")
-    seeds_path: Path = Field(default=Path("local/seeds.json"), alias="RDT_SEEDS_PATH")
+    db_path: Path = Field(
+        default_factory=lambda: _path("data", "releases.db", "data/releases.db"),
+        alias="RDT_DB_PATH",
+    )
+    seeds_path: Path = Field(
+        default_factory=lambda: _path("config", "seeds.json", "local/seeds.json"),
+        alias="RDT_SEEDS_PATH",
+    )
     # derived, disposable cache of mined studio release-timing trends (separate
     # from db_path so the stateless `rdt rd` lookup never opens the entity DB)
     trend_cache_path: Path = Field(
-        default=Path("data/trends_cache.db"), alias="RDT_TREND_CACHE_PATH"
+        default_factory=lambda: _path("cache", "trends_cache.db", "data/trends_cache.db"),
+        alias="RDT_TREND_CACHE_PATH",
     )
-    # self-growing distributor -> streaming-home map, learned as we meet new studios
-    platform_db_path: Path = Field(default=Path("data/platforms.db"), alias="RDT_PLATFORM_DB_PATH")
+    # self-growing distributor -> streaming-home map, learned as we meet new studios.
+    # Data, not cache: rebuilding it costs the LLM calls that taught it each studio.
+    platform_db_path: Path = Field(
+        default_factory=lambda: _path("data", "platforms.db", "data/platforms.db"),
+        alias="RDT_PLATFORM_DB_PATH",
+    )
 
     # --- JustWatch offer scan (the "earliest digital + where" source for film/TV) ---
     # On by default (keyless). The basket is the set of early-digital-window markets the offer
