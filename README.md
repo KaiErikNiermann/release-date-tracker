@@ -157,7 +157,10 @@ rdt upcoming 'tag:"body horror" year:2026..2028'
 - **tab** / **shift+tab** walk the completions · **1/2/3** available / upcoming / watched
 - **↓** into the list · **enter** open the work card · **←/→** change state (auto-saves) · **esc** back
 - **e** on a card edits it — title, dates, who/where/what, notes
-- **a** add a title — same syntax, pointed at TMDB/IGDB/Steam, with candidate selection
+- **a** add a title — same syntax, pointed at TMDB/IGDB/Steam, with candidate selection.
+  It moves like the browse screen: **↓** or **enter** into the candidates, **j/k** through
+  them, **enter** adds, **esc** steps back to the bar. A search or an add in flight shows a
+  spinner where its result will land
 - **/** or **shift+tab** back to the query bar · **ctrl+backspace** delete a word · **r** reload · **q** quit
 
 A half-typed value is shown as what it is about to mean: `is:a` greys `ging` in after the
