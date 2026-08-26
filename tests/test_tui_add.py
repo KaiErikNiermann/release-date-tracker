@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from textual.widgets import Input
+from textual.widgets import Input, OptionList
 
 from release_tracker.config import Settings, get_settings
 from release_tracker.db import Database
@@ -79,6 +79,67 @@ async def _search_for(pilot: Any, screen: AddScreen, text: str) -> None:
     await pilot.pause()
     await asyncio.sleep(0.05)
     await pilot.pause()
+
+
+# --- moving between the bar and the candidates --------------------------------------
+
+
+async def test_down_from_the_bar_lands_on_the_candidates(
+    app: RdtApp, offer: list[tuple[MediaKind, Candidate]]
+) -> None:
+    """The same move as the browse query bar — down out of a search box enters its list."""
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _open_add(app, pilot)
+        await _search_for(pilot, screen, "dune")
+        assert isinstance(screen.focused, Input)
+
+        await pilot.press("down")
+        await pilot.pause()
+        assert isinstance(screen.focused, OptionList)
+
+
+async def test_enter_on_the_bar_focuses_the_candidates_it_is_already_showing(
+    app: RdtApp, offer: list[tuple[MediaKind, Candidate]]
+) -> None:
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _open_add(app, pilot)
+        await _search_for(pilot, screen, "dune")
+
+        screen.query_one("#add-query", Input).focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(screen.focused, OptionList)
+
+
+async def test_down_does_nothing_while_there_is_nothing_to_move_into(app: RdtApp) -> None:
+    """An empty list has nowhere to land, so the bar keeps focus rather than going dead."""
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _open_add(app, pilot)
+        screen.query_one("#add-query", Input).focus()
+        await pilot.press("down")
+        await pilot.pause()
+        assert isinstance(screen.focused, Input)
+
+
+async def test_escape_walks_back_to_the_bar_before_it_closes_the_screen(
+    app: RdtApp, offer: list[tuple[MediaKind, Candidate]]
+) -> None:
+    """Escape out of the list is a step back, not an exit — as it is on the browse screen."""
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _open_add(app, pilot)
+        await _search_for(pilot, screen, "dune")
+        await pilot.press("down")
+        await pilot.pause()
+        assert isinstance(screen.focused, OptionList)
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert isinstance(app.screen, AddScreen), "escape from the list must not close it"
+        assert isinstance(app.screen.focused, Input)
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not isinstance(app.screen, AddScreen), "escape from the bar closes it"
 
 
 # --- capturing ----------------------------------------------------------------------
