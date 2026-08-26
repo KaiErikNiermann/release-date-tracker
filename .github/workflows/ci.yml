@@ -15,75 +15,79 @@ permissions:
   contents: read
 
 env:
+  # Installed with `python -m pip`, never pipx: pipx binds Poetry to the runner's own
+  # interpreter (3.12 on ubuntu-latest), and Poetry validates the version it is *running
+  # under* against requires-python — so every job failed before it started.
   POETRY_VERSION: "2.1.3"
 
 jobs:
-  check:
-    name: lint · types · tests (py${{ matrix.python }})
+  lint:
+    name: lint · format · types
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: python -m pip install "poetry==${{ env.POETRY_VERSION }}"
+      - run: poetry install --with dev
+      - name: Lint
+        run: poetry run ruff check src tests
+      - name: Format check
+        run: poetry run ruff format --check src tests
+      - name: Type-check (strict)
+        run: poetry run pyright src tests
+
+  test:
+    name: ${{ matrix.os }} · py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
         python: ["3.13", "3.14"]
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install Poetry
-        run: pipx install "poetry==${POETRY_VERSION}"
-
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
-          cache: poetry
 
-      # `poetry env use` is not enough: Poetry also validates the interpreter it is itself
-      # running under against requires-python, and pipx bound it to the runner's 3.12. The
-      # first install above exists only so setup-python's `cache: poetry` can find it.
-      - name: Rebind Poetry to the selected interpreter
-        run: pipx install --force --python "$(which python)" "poetry==${POETRY_VERSION}"
+      - name: Install Poetry
+        run: python -m pip install "poetry==${{ env.POETRY_VERSION }}"
 
       - name: Install dependencies
         run: poetry install --with dev
 
-      - name: Lint
-        run: poetry run ruff check src tests
-
-      - name: Format check
-        run: poetry run ruff format --check src tests
-
-      - name: Type-check (strict)
-        run: poetry run pyright src tests
-
-      # No .env and no API keys here on purpose: every test must pass keyless, which is
-      # also the promise the README makes to anyone installing this.
+      # No .env and no API keys on any runner, on purpose: every test must pass keyless,
+      # which is also the promise the README makes to anyone installing this.
       - name: Tests
         run: poetry run pytest
+
+      # The console script is the thing a user actually types, and it is wired up by the
+      # packaging metadata rather than by anything the test suite imports. Run it from a
+      # directory that is not the checkout, so a CWD-relative path bug cannot hide.
+      - name: Smoke-test the CLI outside the checkout
+        shell: bash
+        run: |
+          cd "$HOME"
+          poetry -C "$GITHUB_WORKSPACE" run rdt --help
+          poetry -C "$GITHUB_WORKSPACE" run rdt upcoming
 
   build:
     name: build wheel + sdist
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-
-      - name: Install Poetry
-        run: pipx install "poetry==${POETRY_VERSION}"
-
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
-          cache: poetry
-
-      # `poetry env use` is not enough: Poetry also validates the interpreter it is itself
-      # running under against requires-python, and pipx bound it to the runner's 3.12. The
-      # first install above exists only so setup-python's `cache: poetry` can find it.
-      - name: Rebind Poetry to the selected interpreter
-        run: pipx install --force --python "$(which python)" "poetry==${POETRY_VERSION}"
-
+      - run: python -m pip install "poetry==${{ env.POETRY_VERSION }}"
       - name: Build
         run: poetry build
 
-      # Proves the artifact is installable and the console script is wired up — the
-      # failure mode a test suite run from a checkout can never catch.
+      # Proves the artifact is installable and its entry point works — the failure a test
+      # suite run from a checkout can never catch.
       - name: Install the wheel into a clean venv and smoke-test it
         run: |
           python -m venv /tmp/smoke

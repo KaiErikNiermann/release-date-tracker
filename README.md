@@ -48,6 +48,9 @@ Requires **Python 3.13+**. Nothing is published to PyPI yet — install from the
 curl -fsSL https://raw.githubusercontent.com/KaiErikNiermann/release-date-tracker/main/install.sh | bash
 ```
 
+On Windows use the `uv` or `pipx` line below — `install.sh` needs a POSIX shell (WSL and
+Git Bash both count).
+
 The script prefers `uv`, falls back to `pipx`, and otherwise builds a private venv and
 links a shim into `~/.local/bin` — so `rdt` never lands in your system site-packages.
 Equivalent one-liners if you already have a preference:
@@ -206,10 +209,15 @@ just test -k tui
 just complexity # radon, flags anything below grade B
 ```
 
-CI runs `check` on 3.13 and 3.14, and separately builds the wheel and installs it into a
-clean venv — the packaging failure a test run from a checkout cannot catch. Releases are
-cut by tag: `just release patch` bumps, tags and pushes, and the workflow builds the
-artifacts and writes the notes.
+CI runs the suite on **Linux, macOS and Windows** across 3.13 and 3.14, lints and
+type-checks once on Linux, and separately builds the wheel and installs it into a clean
+venv — the packaging failure a test run from a checkout cannot catch.
+`tests/test_cross_platform.py` holds what actually differs by OS: where the paths
+anchor, whether the database survives a path with spaces and non-ASCII, and whether text
+round-trips when the platform's default encoding is not UTF-8.
+
+Releases are cut by tag: `just release patch` bumps, tags and pushes, and the workflow
+builds the artifacts and writes the notes.
 
 ## License
 

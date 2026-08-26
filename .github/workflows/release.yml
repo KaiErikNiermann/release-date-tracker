@@ -24,19 +24,14 @@ jobs:
           ref: ${{ github.event.inputs.tag || github.ref }}
           fetch-depth: 0   # release notes are generated from the log
 
-      - name: Install Poetry
-        run: pipx install "poetry==${POETRY_VERSION}"
-
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
-          cache: poetry
 
-      # `poetry env use` is not enough: Poetry also validates the interpreter it is itself
-      # running under against requires-python, and pipx bound it to the runner's 3.12. The
-      # first install above exists only so setup-python's `cache: poetry` can find it.
-      - name: Rebind Poetry to the selected interpreter
-        run: pipx install --force --python "$(which python)" "poetry==${POETRY_VERSION}"
+      # Never pipx: it binds Poetry to the runner's own interpreter, which Poetry then
+      # rejects against requires-python. See the note in ci.yml.
+      - name: Install Poetry
+        run: python -m pip install "poetry==${{ env.POETRY_VERSION }}"
 
       - name: Resolve version
         id: version

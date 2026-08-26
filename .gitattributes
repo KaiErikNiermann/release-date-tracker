@@ -1,0 +1,12 @@
+# Normalise line endings in the repo; check out native unless the file must stay LF.
+* text=auto
+
+# A CRLF shebang line makes the interpreter unfindable ("bad interpreter: ^M"), so
+# anything executable stays LF even on a Windows checkout.
+*.sh    text eol=lf
+Justfile text eol=lf
+.githooks/* text eol=lf
+
+# Binary-ish: never touched, never diffed as text.
+*.db    binary
+*.png   binary
