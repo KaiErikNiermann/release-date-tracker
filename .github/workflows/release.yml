@@ -12,6 +12,9 @@ on:
 permissions:
   contents: write
 
+env:
+  POETRY_VERSION: "2.1.3"
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -22,15 +25,18 @@ jobs:
           fetch-depth: 0   # release notes are generated from the log
 
       - name: Install Poetry
-        run: pipx install poetry==2.1.3
+        run: pipx install "poetry==${POETRY_VERSION}"
 
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
           cache: poetry
 
-      - name: Point Poetry at the selected interpreter
-        run: poetry env use "$(which python)"
+      # `poetry env use` is not enough: Poetry also validates the interpreter it is itself
+      # running under against requires-python, and pipx bound it to the runner's 3.12. The
+      # first install above exists only so setup-python's `cache: poetry` can find it.
+      - name: Rebind Poetry to the selected interpreter
+        run: pipx install --force --python "$(which python)" "poetry==${POETRY_VERSION}"
 
       - name: Resolve version
         id: version

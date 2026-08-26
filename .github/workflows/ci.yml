@@ -36,10 +36,11 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: poetry
 
-      # pipx installed Poetry against the runner's own interpreter; without this Poetry
-      # builds the project venv with that one and rejects it as < 3.13.
-      - name: Point Poetry at the selected interpreter
-        run: poetry env use "$(which python)"
+      # `poetry env use` is not enough: Poetry also validates the interpreter it is itself
+      # running under against requires-python, and pipx bound it to the runner's 3.12. The
+      # first install above exists only so setup-python's `cache: poetry` can find it.
+      - name: Rebind Poetry to the selected interpreter
+        run: pipx install --force --python "$(which python)" "poetry==${POETRY_VERSION}"
 
       - name: Install dependencies
         run: poetry install --with dev
@@ -72,8 +73,11 @@ jobs:
           python-version: "3.13"
           cache: poetry
 
-      - name: Point Poetry at the selected interpreter
-        run: poetry env use "$(which python)"
+      # `poetry env use` is not enough: Poetry also validates the interpreter it is itself
+      # running under against requires-python, and pipx bound it to the runner's 3.12. The
+      # first install above exists only so setup-python's `cache: poetry` can find it.
+      - name: Rebind Poetry to the selected interpreter
+        run: pipx install --force --python "$(which python)" "poetry==${POETRY_VERSION}"
 
       - name: Build
         run: poetry build
