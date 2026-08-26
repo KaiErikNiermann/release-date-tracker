@@ -71,26 +71,8 @@ class SteamSource:
 
             if not release_recorded:
                 rd = cast("dict[str, Any]", data.get("release_date", {}))
-                parsed = _parse_release_date(str(rd.get("date", "")))
-                coming_soon = bool(rd.get("coming_soon"))
-                if parsed is not None:
-                    rel, precision = parsed
-                    observations.append(
-                        ReleaseObservation(
-                            entity_id=entity.id,
-                            channel=ReleaseChannel.STEAM,
-                            region="WW",
-                            release_date=rel,
-                            precision=precision,
-                            certainty=Certainty.ESTIMATED if coming_soon else Certainty.CONFIRMED,
-                            source_tier=SourceTier.FIRST_PARTY_STORE,
-                            provider=self.name,
-                            source_name="Steam",
-                            source_url=url,
-                            source_quote=str(rd.get("date")) or None,
-                            fetched_at=now,
-                        )
-                    )
+                if (obs := date_observation(rd, entity, url, now)) is not None:
+                    observations.append(obs)
                     release_recorded = True
 
             price = cast("dict[str, Any] | None", data.get("price_overview"))
@@ -183,6 +165,38 @@ class SteamSource:
         if not entry or not entry.get("success"):
             return None
         return cast("dict[str, Any]", entry.get("data", {}))
+
+
+def date_observation(
+    rd: dict[str, Any], entity: Entity, url: str, now: datetime
+) -> ReleaseObservation | None:
+    """Steam's ``release_date`` block -> an observation (``None`` if it carries no date).
+
+    Derives certainty from precision, the way IGDB rows are read: only an announced day
+    is *confirmed*, a coarse "Q3 2026" is an ``ESTIMATED`` window. Notably **not** from
+    ``coming_soon``, which Steam sets on everything unreleased — it says the game is not
+    out, not that its date is a guess, and reading it as the latter files every announced
+    day for an upcoming game as speculation.
+    """
+    parsed = _parse_release_date(str(rd.get("date", "")))
+    if parsed is None:
+        return None
+    rel, precision = parsed
+    firm = not bool(rd.get("coming_soon")) or precision is DatePrecision.EXACT
+    return ReleaseObservation(
+        entity_id=entity.id,
+        channel=ReleaseChannel.STEAM,
+        region="WW",
+        release_date=rel,
+        precision=precision,
+        certainty=Certainty.CONFIRMED if firm else Certainty.ESTIMATED,
+        source_tier=SourceTier.FIRST_PARTY_STORE,
+        provider=SteamSource.name,
+        source_name="Steam",
+        source_url=url,
+        source_quote=str(rd.get("date")) or None,
+        fetched_at=now,
+    )
 
 
 def _parse_release_date(text: str) -> tuple[date | None, DatePrecision] | None:
