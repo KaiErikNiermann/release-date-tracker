@@ -18,14 +18,14 @@ classifiers = [
 dependencies = [
     "httpx>=0.28",
     "pydantic>=2.10",
-    "pydantic-settings>=2.14.2",
+    "pydantic-settings>=2.15.0",
     "structlog>=25.1",
-    "typer>=0.15",
+    "typer>=0.27.1",
     "rich>=13.9",
     "tenacity>=9.0",
     "openai>=1.60",
-    "dateparser>=1.2",
-    "feedparser (>=6.0)",
+    "dateparser>=1.4.2",
+    "feedparser (>=6.0.14)",
     "textual (>=8.2,<9.0)",
     "platformdirs (>=4.0)",
 ]
@@ -41,9 +41,9 @@ rdt = "release_tracker.cli:app"
 packages = [{ include = "release_tracker", from = "src" }]
 
 [tool.poetry.group.dev.dependencies]
-ruff = ">=0.9"
-pyright = ">=1.1.390"
-pytest = ">=8.3"
+ruff = ">=0.16.4"
+pyright = ">=1.1.411"
+pytest = ">=9.1.1"
 textual-dev = "^1.8.0"
 pytest-asyncio = "^1.4.0"
 radon = "^6.0.1"
