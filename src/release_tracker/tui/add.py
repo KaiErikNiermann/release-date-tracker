@@ -97,9 +97,10 @@ class AddScreen(ModalScreen[Entity | None]):
     def _status(self, markup: str) -> None:
         self.query_one("#add-status", Static).update(Text.from_markup(markup))
 
-    @work(exclusive=True)
+    @work(exclusive=True, group="add-search")
     async def search(self, text: str, kind_hint: MediaKind | None) -> None:
-        """Exclusive: a newer keystroke cancels this request rather than racing it."""
+        """Exclusive within its own group: a newer keystroke cancels this request rather
+        than racing it — but never cancels a capture, which is a write."""
         from release_tracker.tui.app import RdtApp
 
         assert isinstance(self.app, RdtApp)
@@ -145,9 +146,14 @@ class AddScreen(ModalScreen[Entity | None]):
             kind, cand = self._hits[event.option_index]
             self.capture(kind, cand)
 
-    @work(exclusive=True)
+    @work(exclusive=True, group="add-capture")
     async def capture(self, kind: MediaKind, cand: Candidate) -> None:
-        """Report on the *chosen* candidate then persist — no second search."""
+        """Report on the *chosen* candidate then persist — no second search.
+
+        Its own worker group. Sharing the default one with `search` meant a keystroke
+        landing mid-capture cancelled it — after the report had been fetched and
+        somewhere around the writes, leaving a half-enriched work behind.
+        """
         from release_tracker.tui.app import RdtApp
 
         assert isinstance(self.app, RdtApp)
