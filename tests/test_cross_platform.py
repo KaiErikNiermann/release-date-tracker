@@ -9,6 +9,7 @@ spelling, so a real difference fails and a cosmetic one does not.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -129,13 +130,21 @@ def test_the_cli_entry_point_runs_on_this_platform(tmp_path: Path) -> None:
     Run from a temp directory so anything that quietly depended on the checkout — a
     relative data path, a package-relative asset — fails here rather than on a user's
     machine.
+
+    PYTHONIOENCODING is set because a pipe on Windows inherits the console code page, not
+    UTF-8, and rich's box drawing and em dashes are not in cp1252. Without it the child's
+    output is undecodable here and the assertion below fails on an encoding artefact
+    instead of on behaviour; `errors="replace"` keeps that true even if a runner ignores
+    the hint.
     """
     result = subprocess.run(
         [sys.executable, "-m", "release_tracker.cli", "--help"],
         cwd=tmp_path,
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         capture_output=True,
         text=True,
         encoding="utf-8",
+        errors="replace",
         timeout=120,
         check=False,
     )
