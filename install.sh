@@ -64,15 +64,19 @@ Installed. Next:
   rdt --help                 # what it can do
   rdt tui                    # the interactive browser
 
-Optional API keys (everything keyless still works without them) go in
-~/.config/rdt/.env — see .env.example in the repo for the full list:
+Optional API keys widen coverage; everything keyless works without them.
 
-  TMDB_API_KEY=...           # movies / TV
-  TWITCH_CLIENT_ID=...       # games, via IGDB
-  TWITCH_CLIENT_SECRET=...
-  OPENAI_API_KEY=...         # the Tier-1 gap-filler
+  rdt doctor                 # what is set, what is missing, and what that costs
+  rdt tui  -> press s        # set them here, or: rdt config set TMDB_API_KEY=...
 
-Your tracker lives under ~/.local/share/rdt (XDG); override with RDT_DB_PATH.
+  TMDB_API_KEY               # movies / TV   themoviedb.org -> Settings -> API
+                             #   copy the v3 API key, not the v4 read token
+  TWITCH_CLIENT_ID + SECRET  # games         dev.twitch.tv/console/apps
+                             #   client type must be Confidential
+  OPENAI_API_KEY             # the Tier-1 gap-filler (paid)
+
+Settings live in ~/.config/rdt/config.toml; your tracker lives under
+~/.local/share/rdt (XDG). `rdt doctor` prints both.
 NEXT
 }
 

@@ -24,8 +24,9 @@ from textual.binding import Binding, BindingType
 
 from release_tracker import views
 from release_tracker.config import Settings, get_settings
+from release_tracker.config_file import migrate_env
 from release_tracker.db import Database
-from release_tracker.logging import configure_logging
+from release_tracker.logging import configure_logging, get_logger
 from release_tracker.models import ConsumptionState, Entity
 from release_tracker.sources.base import make_client
 from release_tracker.tui.add import AddScreen
@@ -35,6 +36,9 @@ from release_tracker.tui.state import Snapshot, build_snapshot
 from release_tracker.views import TrackRow
 
 __all__ = ["RdtApp", "run"]
+
+
+log = get_logger("tui")
 
 
 class RdtApp(App[None]):
@@ -166,10 +170,18 @@ def run() -> None:
     so a capture used to smear those lines across the frame and leave them there until
     the next full repaint. A file keeps them readable without touching the screen.
     """
+    # Lift any keys still living only in a .env into the config file, once, so the settings
+    # screen has somewhere writable to put the next one. Deliberately here and not in
+    # `get_settings` or the CLI callback: a configuration *load* with a filesystem side
+    # effect would fire in every test and every scripted invocation. The .env keeps working
+    # either way — this only copies the values one layer up.
+    migrated = migrate_env()
     settings = get_settings()
     log_path = settings.db_path.parent / "rdt-tui.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     # Truncated per session: this is a "what did that capture do" log, not an archive.
     with log_path.open("w", encoding="utf-8") as sink:
         configure_logging(stream=sink)
+        if migrated is not None:
+            log.info("config.migrated", path=str(migrated.path), keys=list(migrated.aliases))
         RdtApp(settings=settings).run()

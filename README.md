@@ -71,8 +71,8 @@ just tui
 
 ### API keys
 
-Every source that can work without a key does. Keys only widen coverage, and each is
-optional and independent:
+Everything that can work without a key does — Steam, JustWatch, Wikidata and the whole tech
+side need nothing. Keys widen coverage, and each is optional and independent:
 
 | variable | unlocks | free? |
 |---|---|---|
@@ -80,8 +80,31 @@ optional and independent:
 | `TWITCH_CLIENT_ID` + `TWITCH_CLIENT_SECRET` | games, via IGDB | yes |
 | `OPENAI_API_KEY` | the Tier-1 gap-filler for what Tier 0 leaves as TBA | paid |
 
-Put them in `~/.config/rdt/.env` (or a `.env` beside a checkout, which takes precedence).
-`.env.example` lists every variable with a comment.
+The quickest way to set them is `s` in the TUI, which writes them for you. `rdt config set
+TMDB_API_KEY=…` does the same headlessly, and `rdt doctor` says what is set, where each
+value came from, and what the missing ones cost.
+
+**Getting a TMDB key.** Create an account, then **Settings → API** and request a key; approval
+is immediate for personal use. That page shows *two* credentials, and this is the one place
+people get stuck: copy the **API Key (v3 auth)** — the short alphanumeric one — **not** the
+API Read Access Token. `rdt` authenticates with the v3 key as a query parameter, so the v4
+token (it starts `ey`, being a JWT) fails as an ordinary 401. `ctrl+t` in the settings screen
+checks the key against TMDB and names that mistake specifically if you make it.
+
+**Getting IGDB credentials.** IGDB authenticates through Twitch, so you need a Twitch account
+with 2FA enabled, then [dev.twitch.tv/console/apps](https://dev.twitch.tv/console/apps) →
+**Register Your Application**. Any name and an OAuth redirect of `http://localhost` are fine;
+the setting that matters is **Client Type: Confidential** — a Public app is never issued a
+secret, and that is the usual reason people end up with an id and nothing to pair it with.
+Then copy the Client ID and press **New Secret**. Free for non-commercial use, 4 requests a
+second, and `rdt` handles the token exchange itself.
+
+**Where they are stored.** `~/.config/rdt/config.toml`, mode 0600, written by the settings
+screen and `rdt config set`. A real environment variable always wins over the file, so a
+one-off `TMDB_API_KEY=… rdt rd dune` works and a CI runner is unaffected by whatever is on
+your machine. A `~/.config/rdt/.env` (or one beside a checkout) is still read, below the
+config file — `rdt config migrate` copies its keys up, and the TUI does that once on first
+launch.
 
 ### Where your data lives
 
@@ -94,10 +117,12 @@ directory you run it from. Every one is overridable:
 | learned platform map | `~/.local/share/rdt/platforms.db` | `RDT_PLATFORM_DB_PATH` |
 | mined trend cache | `~/.cache/rdt/trends_cache.db` | `RDT_TREND_CACHE_PATH` |
 | seeds | `~/.config/rdt/seeds.json` | `RDT_SEEDS_PATH` |
+| settings | `~/.config/rdt/config.toml` | `RDT_CONFIG_FILE` |
 
 macOS and Windows get their platform equivalents. A checkout that already has a
 `data/releases.db` beside it keeps using it, so upgrading in place never strands an
-existing tracker. `just paths` prints what this machine resolved.
+existing tracker. `rdt doctor` prints what this machine resolved, along with which settings are overridden
+and where each value came from.
 
 ## Usage
 
@@ -158,6 +183,7 @@ rdt upcoming 'tag:"body horror" year:2026..2028'
 - **↓** into the list · **enter** open the work card · **←/→** change state (auto-saves) · **esc** back
 - **e** on a card edits it — title, dates, who/where/what, notes
 - **u** on a card refreshes it and drops you in that same form, with what moved marked
+- **s** settings — keys, paths and preferences, with a check for the API keys
 - **a** add a title — same syntax, pointed at TMDB/IGDB/Steam/Wikidata, with candidate
   selection. It moves like the browse screen: **↓** or **enter** into the candidates,
   **j/k** through them, **enter** adds, **e** reviews first, **esc** steps back to the bar. A
@@ -179,7 +205,7 @@ rdt upcoming 'tag:"body horror" year:2026..2028'
   as hardware carrying a generation marker, the trailing marker is stripped, the family is
   looked up, and the entry is offered as a new one prefilled from its lineage. It can only be
   added through the review form, because every field on it is a guess
-- **/** or **shift+tab** back to the query bar · **ctrl+backspace** delete a word · **r** reload · **q** quit
+- **/** or **shift+tab** back to the query bar · **ctrl+backspace** delete a word · **s** settings · **r** reload · **q** quit
 
 A half-typed value is shown as what it is about to mean: `is:a` greys `ging` in after the
 caret and the table already shows `is:aging`. Tab takes that offer into the bar and walks

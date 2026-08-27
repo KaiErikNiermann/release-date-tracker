@@ -2554,6 +2554,13 @@ def doctor() -> None:
             "[dim]Using the pre-XDG layout: a data/releases.db beside the working "
             "directory takes precedence.[/]"
         )
+    # Suggest rather than perform: an automatic write from a read-only command would be a
+    # surprise, and this is exactly where someone is looking for what to do next.
+    if not config_file_path().exists() and any(origin == ".env" for origin in where.values()):
+        console.print(
+            "\n[dim]Your settings live in a .env. `rdt config migrate` copies them into "
+            "the config file, which is what the TUI settings screen writes.[/]"
+        )
 
 
 def _field_for(alias: str) -> str:
