@@ -159,8 +159,8 @@ rdt upcoming 'tag:"body horror" year:2026..2028'
 - **e** on a card edits it — title, dates, who/where/what, notes
 - **a** add a title — same syntax, pointed at TMDB/IGDB/Steam/Wikidata, with candidate
   selection. It moves like the browse screen: **↓** or **enter** into the candidates,
-  **j/k** through them, **enter** adds, **esc** steps back to the bar. A search or an add in
-  flight shows a spinner where its result will land
+  **j/k** through them, **enter** adds, **e** reviews first, **esc** steps back to the bar. A
+  search or an add in flight shows a spinner where its result will land
 - **Sources on a card** — every work lists where its dates can be read, split into what the
   tool can refetch (`●`, and `u` re-pulls them) and what only a person can open (`○`, with
   the reason). The second list comes from Wikidata: given an id we already hold, one query
@@ -173,6 +173,11 @@ rdt upcoming 'tag:"body horror" year:2026..2028'
   as hardware (`Xiaomi Mix 4`, `RTX 5090`, `Steam Deck`) is retried as tech automatically
   when the media DBs come back empty; anything else takes an explicit `kind:tech` (`gadget`
   and `hardware` alias it), and the no-match line says so
+- **tracking something unannounced** — `Steam Deck 2` matches nothing anywhere, which is the
+  case a release tracker is actually for. When the search comes back empty and the name reads
+  as hardware carrying a generation marker, the trailing marker is stripped, the family is
+  looked up, and the entry is offered as a new one prefilled from its lineage. It can only be
+  added through the review form, because every field on it is a guess
 - **/** or **shift+tab** back to the query bar · **ctrl+backspace** delete a word · **r** reload · **q** quit
 
 A half-typed value is shown as what it is about to mean: `is:a` greys `ging` in after the
@@ -184,6 +189,22 @@ you typed, so `is:a` never offers `dated`.
 
 The bucket keys rewrite the `is:` term in the query rather than keeping separate view
 state, so what you see is always explained by the string in the bar.
+
+### Reviewing before adding
+
+**e** on a candidate opens it as a draft instead of writing it: title, kind, tech category
+and a date, with the line it was inferred from stated underneath. **ctrl+s** adds it, **esc**
+drops it, and nothing is written either way until you say so.
+
+It matters most for an entry nobody has published yet. Category is inferred from the name, and
+a product line can change category between generations — a handheld's successor need not be a
+handheld — so the guess needs somewhere to be corrected. Correcting it is not cosmetic: the
+category picks which sites the card's Sources section sends you to.
+
+What is *never* inferred is a date. Successor cadence looks predictable and isn't — across
+real predecessor chains, guessing the next release from the previous interval lands a median
+of ~200 days out, and inside 30 days approximately never. The predecessor's own date is shown
+as an anchor to type against instead.
 
 ### Editing a card
 
