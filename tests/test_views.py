@@ -554,3 +554,60 @@ def test_never_condition_keeps_a_work_permanently_unavailable(tmp_path: Path) ->
     assert views.available(db, today, s) == []  # never -> never available
     (row,) = views.upcoming(db, today, s)
     assert row.blockers == ("Vanguard Linux",)
+
+
+def _retail(entity: Entity, region: str, when: date) -> ReleaseObservation:
+    return ReleaseObservation(
+        entity_id=entity.id,
+        channel=ReleaseChannel.RETAIL,
+        region=region,
+        release_date=when,
+        precision=DatePrecision.EXACT,
+        certainty=Certainty.CONFIRMED,
+        source_tier=SourceTier.AGGREGATOR,
+        provider="wikidata",
+        source_name="Wikidata",
+        source_url="https://www.wikidata.org/wiki/Q1",
+        confidence=0.7,
+        fetched_at=datetime.now(UTC),
+    )
+
+
+def test_a_devices_markets_stay_apart_on_its_card(tmp_path: Path) -> None:
+    """A film's card collapses to the soonest region because you can travel to that date. A
+    device cannot be travelled to — it launches and is priced per country — so showing
+    Taiwan's date to a reader in the US would state something false, not something rough.
+    """
+    db = Database(tmp_path / "regions.db")
+    phone = Entity.create("Sony Xperia 1 VIII", MediaKind.TECH)
+    db.upsert_entity(phone)
+    db.upsert_node(Node(id=phone.id, node_kind=NodeKind.WORK, name=phone.title, owned=True))
+    db.upsert_observations(
+        [
+            _retail(phone, "TW", date(2026, 5, 26)),
+            _retail(phone, "WW", date(2026, 6, 26)),
+        ]
+    )
+
+    card = views.work_card(db, phone)
+    assert {(e.region, e.release_date) for e in card.estimates} == {
+        ("TW", date(2026, 5, 26)),
+        ("WW", date(2026, 6, 26)),
+    }
+
+
+def test_a_films_regions_still_collapse_to_the_soonest(tmp_path: Path) -> None:
+    """The other half — this is why the card is 3 lines and not 60."""
+    db = Database(tmp_path / "collapse.db")
+    film = Entity.create("Some Film", MediaKind.MOVIE)
+    db.upsert_entity(film)
+    db.upsert_node(Node(id=film.id, node_kind=NodeKind.WORK, name=film.title, owned=True))
+    db.upsert_observations(
+        [
+            _retail(film, "TW", date(2026, 5, 26)),
+            _retail(film, "US", date(2026, 6, 26)),
+        ]
+    )
+
+    card = views.work_card(db, film)
+    assert [e.release_date for e in card.estimates] == [date(2026, 5, 26)]

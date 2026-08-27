@@ -453,14 +453,23 @@ def build_vocabulary(db: Database) -> Vocabulary:
     )
 
 
-def _collapse_estimates(estimates: Iterable[BestEstimate]) -> tuple[BestEstimate, ...]:
-    """One row per channel (soonest region), so a card shows ~3 lines, not 60."""
-    by_channel: dict[ReleaseChannel, BestEstimate] = {}
+def _collapse_estimates(
+    estimates: Iterable[BestEstimate], *, per_region: bool = False
+) -> tuple[BestEstimate, ...]:
+    """One row per channel (soonest region), so a card shows ~3 lines, not 60.
+
+    ``per_region`` keeps the markets apart instead, which is what tech needs: a film's
+    "soonest anywhere" is a useful summary because you can travel to the date, but a device
+    launches and is priced per country, so collapsing Taiwan's date onto a US reader states
+    something false rather than something approximate.
+    """
+    by_slot: dict[tuple[ReleaseChannel, str | None], BestEstimate] = {}
     for est in estimates:
-        cur = by_channel.get(est.channel)
+        key = (est.channel, est.region if per_region else None)
+        cur = by_slot.get(key)
         if cur is None or (est.release_date or date.max) < (cur.release_date or date.max):
-            by_channel[est.channel] = est
-    return tuple(sorted(by_channel.values(), key=lambda e: e.release_date or date.max))
+            by_slot[key] = est
+    return tuple(sorted(by_slot.values(), key=lambda e: e.release_date or date.max))
 
 
 # --- graph -> resolved lines ----------------------------------------------
@@ -708,7 +717,10 @@ def work_card(db: Database, entity: Entity) -> WorkCard:
     season = next((e.ordinal for e in series_edges if e.ordinal is not None), None)
     return WorkCard(
         entity=entity,
-        estimates=_collapse_estimates(best_estimates(db.iter_observations(entity.id))),
+        estimates=_collapse_estimates(
+            best_estimates(db.iter_observations(entity.id)),
+            per_region=entity.kind is MediaKind.TECH,
+        ),
         credits=tuple(_credit_lines(db, entity.id)),
         platforms=tuple(_platform_lines(db, entity.id)),
         tags=tuple(_tag_lines(db, entity.id)),
