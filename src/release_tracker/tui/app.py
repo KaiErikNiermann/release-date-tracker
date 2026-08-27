@@ -73,6 +73,25 @@ class RdtApp(App[None]):
         self.db.close()
 
     # --- snapshot ------------------------------------------------------------------
+    def apply_settings(self) -> Settings:
+        """Re-read configuration after a write and repaint what depends on it.
+
+        Everything except the tracker's own path takes effect immediately: colours and
+        freshness thresholds are read per render, and keys are read at the start of each
+        capture. ``RDT_DB_PATH`` is deliberately not applied live — async workers hold this
+        connection across awaits, so closing it mid-flight raises from a background worker,
+        and the screen says "next launch" instead.
+        """
+        get_settings.cache_clear()
+        fresh = get_settings()
+        if fresh.db_path == self.settings.db_path:
+            self.settings = fresh
+        else:
+            self.settings = fresh.model_copy(update={"db_path": self.settings.db_path})
+        self.reload_snapshot()
+        self._refresh_browse()
+        return self.settings
+
     def reload_snapshot(self) -> None:
         self.snapshot = build_snapshot(self.db, self.settings, self.today)
 
@@ -120,6 +139,12 @@ class RdtApp(App[None]):
             self.notify("that work is no longer in the tracker", severity="warning")
             return
         self.push_screen(CardScreen(entity, views.work_card(self.db, entity)))
+
+    def open_settings(self) -> None:
+        """The settings screen, which is where a key can actually be typed."""
+        from release_tracker.tui.settings import SettingsScreen
+
+        self.push_screen(SettingsScreen())
 
     def open_add(self, initial: str = "") -> None:
         def added(entity: Entity | None) -> None:

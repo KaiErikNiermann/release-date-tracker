@@ -219,3 +219,40 @@ EditScreen {
     height: 1;
     color: $text-muted;
 }
+
+
+/* The settings form. Same shape as #edit — same rows — and the same docked chrome, so the
+   key bar survives a small window. */
+SettingsScreen {
+    align: center middle;
+}
+
+#settings {
+    width: 106;
+    max-width: 96%;
+    height: auto;
+    max-height: 90%;
+    border: round $accent;
+    background: $surface;
+    padding: 1 2;
+}
+
+#settings-title {
+    padding-bottom: 1;
+}
+
+#settings-body {
+    height: 1fr;
+    max-height: 60vh;
+    overflow-y: auto;
+}
+
+#settings-chrome {
+    dock: bottom;
+    height: auto;
+}
+
+#settings-hint, #settings-foot, #settings-status {
+    height: 1;
+    color: $text-muted;
+}

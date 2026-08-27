@@ -37,6 +37,7 @@ from release_tracker.tui.app import RdtApp
 from release_tracker.tui.card import CardScreen
 from release_tracker.tui.draft import DraftScreen
 from release_tracker.tui.edit import EditScreen
+from release_tracker.tui.settings import SettingsScreen
 
 TODAY = date(2026, 8, 28)
 
@@ -163,3 +164,20 @@ async def test_a_short_window_still_scrolls_the_body(busy: tuple[Path, Entity]) 
         await pilot.pause()
         body = app.screen.query_one("#card-body")
         assert body.region.height > 0
+
+
+@pytest.mark.parametrize(("width", "height"), SIZES)
+async def test_the_settings_screen_keeps_its_key_bar(
+    busy: tuple[Path, Entity], width: int, height: int
+) -> None:
+    """The longest form in the app — every setting there is — so the one most able to push
+    its own key bar off a short window."""
+    path, _ = busy
+    app = _app(path)
+    async with app.run_test(size=(width, height)) as pilot:
+        app.push_screen(SettingsScreen())
+        await pilot.pause()
+        await pilot.pause()
+        assert _on_screen(app, "#settings-foot", height), (
+            f"settings keys off screen at {width}x{height}"
+        )

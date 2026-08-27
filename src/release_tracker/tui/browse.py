@@ -51,6 +51,7 @@ class BrowseScreen(Screen[None]):
         # widget's bindings beat the screen's, so this only ever fires from the bar.
         Binding("down", "focus_rows", "Into the list", show=False),
         Binding("a", "add", "Add"),
+        Binding("s", "settings", "Settings"),
         Binding("r", "reload", "Reload"),
         Binding("q", "quit", "Quit"),
         Binding("escape", "back", "Back", show=False),
@@ -165,7 +166,7 @@ class BrowseScreen(Screen[None]):
         parts = [
             f"{len(self._visible)}/{len(self.rdt.snapshot.rows)}",
             f"[bold]{bucket.value}[/]" if bucket else "all buckets",
-            "[dim]1/2/3 bucket · a add · enter card · / search · r reload · q quit[/]",
+            "[dim]1/2/3 bucket · a add · enter card · / search · s settings · r reload · q quit[/]",
         ]
         if parsed.unknown_fields:
             parts.insert(1, f"[yellow]?{','.join(parsed.unknown_fields)}[/]")
@@ -237,6 +238,9 @@ class BrowseScreen(Screen[None]):
 
     def action_add(self) -> None:
         self.rdt.open_add(self.effective_query)
+
+    def action_settings(self) -> None:
+        self.rdt.open_settings()
 
     def action_reload(self) -> None:
         self.rdt.reload_snapshot()
