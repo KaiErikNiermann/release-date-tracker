@@ -88,12 +88,16 @@ class DraftScreen(ModalScreen[Entity | None]):
                     (self.draft.category or TechCategory.OTHER).value,
                 )
                 yield Row("date", Input(value=self.draft.edtf, placeholder=DATE_HELP))
-            yield Static(self._lineage(), id="draft-lineage")
-            yield Static(
-                Text.from_markup("[dim]↓↑ field · ←→ change · ctrl+s adds it · esc drops it[/]"),
-                id="draft-foot",
-            )
-            yield Static("", id="draft-status")
+            # Docked as one container — see the note in `edit.py`; docked siblings overlap.
+            with Vertical(id="draft-chrome"):
+                yield Static(self._lineage(), id="draft-lineage")
+                yield Static(
+                    Text.from_markup(
+                        "[dim]↓↑ field · ←→ change · ctrl+s adds it · esc drops it[/]"
+                    ),
+                    id="draft-foot",
+                )
+                yield Static("", id="draft-status")
 
     def _lineage(self) -> Text:
         """What the prefill was read off, stated plainly so a wrong guess is visible."""

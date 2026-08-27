@@ -62,10 +62,23 @@ StateToggle:focus {
     border-left: thick $accent;
 }
 
+/* Bodies are capped in *viewport* units, not rows. A modal is `height: auto` inside a
+   `max-height: 90%`, so when the terminal shrinks the modal clamps but an auto-height child
+   keeps its content height and overflows — pushing the docked chrome past the bottom edge.
+   A vh cap makes the body shrink with the window instead, and it is low enough here that on
+   a roomy terminal `auto` still wins and the dialog stays the size of its content. */
 #card-body {
     height: auto;
-    max-height: 20;
+    max-height: 60vh;
     overflow-y: auto;
+}
+
+/* The key bar is docked, not flowed. A modal is `height: auto` up to a `max-height`, so on
+   a short terminal the scrolling body claims the space and the last child in the flow gets
+   laid out past the bottom edge — the keys vanish exactly when the window is too small to
+   guess them from. Docking reserves the row first, and the body scrolls in what is left. */
+#card-foot {
+    dock: bottom;
 }
 
 AddScreen {
@@ -112,9 +125,12 @@ EditScreen {
     padding-bottom: 1;
 }
 
+/* The one screen that flexes rather than sizing to content: the form is long enough to
+   scroll on any real terminal, so filling the modal costs nothing and `1fr` guarantees the
+   chrome fits at every size. */
 #edit-body {
-    height: auto;
-    max-height: 24;
+    height: 1fr;
+    max-height: 60vh;
     overflow-y: auto;
 }
 
@@ -195,14 +211,11 @@ EditScreen {
 
 #draft-body {
     height: auto;
-    max-height: 16;
+    max-height: 25vh;
     overflow-y: auto;
 }
 
-#draft-lineage {
-    padding-top: 1;
-}
-
-#draft-foot, #draft-status {
-    padding-top: 1;
+#draft-lineage, #draft-foot, #draft-status {
+    height: 1;
+    color: $text-muted;
 }

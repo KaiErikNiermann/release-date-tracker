@@ -351,15 +351,19 @@ class EditScreen(ModalScreen[None]):
             )
             with VerticalScroll(id="edit-body", can_focus=False):
                 yield from self._rows()
-            yield Static("", id="edit-hint")
-            yield Static(
-                Text.from_markup(
-                    "[dim]↹ complete · ↓↑ field · empty a row to remove it · d drops a note "
-                    "· esc back[/]"
-                ),
-                id="edit-foot",
-            )
-            yield Static("", id="edit-status")
+            # One container, docked as a unit. Textual pins every bottom-docked sibling to
+            # the same edge rather than stacking them, so three docked Statics would sit on
+            # top of each other — and three undocked ones are what fell off a short window.
+            with Vertical(id="edit-chrome"):
+                yield Static("", id="edit-hint")
+                yield Static(
+                    Text.from_markup(
+                        "[dim]↹ complete · ↓↑ field · empty a row to remove it · d drops a "
+                        "note · esc back[/]"
+                    ),
+                    id="edit-foot",
+                )
+                yield Static("", id="edit-status")
 
     def _rows(self) -> ComposeResult:
         yield TitleRow(self.entity.title)
