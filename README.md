@@ -157,6 +157,7 @@ rdt upcoming 'tag:"body horror" year:2026..2028'
 - **tab** / **shift+tab** walk the completions · **1/2/3** available / upcoming / watched
 - **↓** into the list · **enter** open the work card · **←/→** change state (auto-saves) · **esc** back
 - **e** on a card edits it — title, dates, who/where/what, notes
+- **u** on a card refreshes it and drops you in that same form, with what moved marked
 - **a** add a title — same syntax, pointed at TMDB/IGDB/Steam/Wikidata, with candidate
   selection. It moves like the browse screen: **↓** or **enter** into the candidates,
   **j/k** through them, **enter** adds, **e** reviews first, **esc** steps back to the bar. A
@@ -189,6 +190,31 @@ you typed, so `is:a` never offers `dated`.
 
 The bucket keys rewrite the `is:` term in the query rather than keeping separate view
 state, so what you see is always explained by the string in the bar.
+
+### Refreshing a card
+
+**u** runs the same refresh `rdt refresh` runs for one work — Tier-0 sources *and* the
+JustWatch offer scan — then opens the edit form rather than flashing a notification.
+
+Nothing you typed can be lost to it. A pull only clears the providers that answered, and no
+source is called `manual`, so a hand-authored date and a pulled one are separate rows that
+both survive. What can happen is that yours stops being the one shown, because
+`best_estimates` re-picks on every read and **precision dominates** — a typed `2026-Q4` loses
+to a pulled `2026-10-15`. Meeting that in silence is confusing, so each date row carries the
+other value and says which is live:
+
+```
+theatrical   2026-36        moved 2026-09-01 → 2026-10-15  ◀ more precise
+primary      2026-11-05
+digital                     pulled 2027-01-20
+```
+
+`moved` is what this refresh changed; `◀` marks the value the card is showing, with the
+reason it won, read straight off the ranking key so the two cannot drift apart. Rows with
+nothing to report stay blank, so the ones that moved are the ones you see.
+
+There is no "always prefer mine" — if you disagree with the ranking, sharpen your own date
+and it wins on its own merits.
 
 ### Reviewing before adding
 
