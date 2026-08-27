@@ -17,7 +17,7 @@ from typing import Any, cast
 import httpx
 
 from release_tracker.cache import TrendCache
-from release_tracker.config import Settings
+from release_tracker.config import Settings, secret
 from release_tracker.logging import get_logger
 from release_tracker.models import (
     Certainty,
@@ -116,8 +116,9 @@ class IgdbSource:
     async def _ensure_token(
         self, client: httpx.AsyncClient, settings: Settings
     ) -> tuple[str, str] | None:
-        cid, secret = settings.twitch_client_id, settings.twitch_client_secret
-        if not cid or not secret:
+        cid = secret(settings.twitch_client_id)
+        client_secret = secret(settings.twitch_client_secret)
+        if not cid or not client_secret:
             log.warning("igdb.skip", reason=NO_KEYS)
             return None
         # lock so concurrent game pulls fetch the app token exactly once
@@ -131,7 +132,7 @@ class IgdbSource:
                         TOKEN_URL,
                         params={
                             "client_id": cid,
-                            "client_secret": secret,
+                            "client_secret": client_secret,
                             "grant_type": "client_credentials",
                         },
                     ),

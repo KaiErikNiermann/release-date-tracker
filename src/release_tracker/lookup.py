@@ -26,7 +26,7 @@ from typing import Literal
 
 import httpx
 
-from release_tracker.config import Settings
+from release_tracker.config import Settings, secret
 from release_tracker.contingency import REGION_WILDCARD
 from release_tracker.deltas import (
     Estimate,
@@ -770,7 +770,7 @@ async def _movie_claims(
         default=None,
     )
 
-    key = settings.tmdb_api_key
+    key = secret(settings.tmdb_api_key)
     src = TmdbSource()
     # one detail call up front: the distributor feeds both the digital-window
     # estimate and the streaming-home prediction, plus the no-theatrical fallback.
@@ -938,7 +938,7 @@ async def _tv_claims(
         notes.append("No air date on TMDB yet.")
 
     streaming: tuple[str, ...] = ()
-    key = settings.tmdb_api_key
+    key = secret(settings.tmdb_api_key)
     if tmdb_id and key:
         streaming = await TmdbSource().tv_platforms(client, key, tmdb_id, settings.regions)
     return claims, streaming, notes

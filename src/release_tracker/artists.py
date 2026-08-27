@@ -15,7 +15,7 @@ from datetime import UTC, date, datetime
 import httpx
 
 from release_tracker import views
-from release_tracker.config import Settings
+from release_tracker.config import Settings, secret
 from release_tracker.db import Database
 from release_tracker.logging import get_logger
 from release_tracker.models import (
@@ -167,9 +167,10 @@ async def _split_filmography(
     client: httpx.AsyncClient, settings: Settings, person_id: str, today: date
 ) -> tuple[FilmCredit | None, tuple[FilmCredit, ...]]:
     """(latest released, upcoming slate) for a person's filmography — one TMDB call."""
-    if not settings.tmdb_api_key:
+    key = secret(settings.tmdb_api_key)
+    if not key:
         return None, ()
-    credits = await TmdbSource().person_credits(client, settings.tmdb_api_key, person_id)
+    credits = await TmdbSource().person_credits(client, key, person_id)
     return partition_filmography(credits, today)
 
 
@@ -185,9 +186,10 @@ async def _resolve_artist_node(
     existing = find_artist(db, name)
     if existing is not None:
         return existing
-    if kind is NodeKind.PERSON and settings is not None and settings.tmdb_api_key:
+    key = secret(settings.tmdb_api_key) if settings is not None else None
+    if kind is NodeKind.PERSON and key:
         try:
-            person_id = await TmdbSource().search_person(client, settings.tmdb_api_key, name)
+            person_id = await TmdbSource().search_person(client, key, name)
         except Exception as exc:  # a TMDB hiccup must not block following the creator
             log.warning("artists.person_resolve_error", name=name, error=str(exc))
             person_id = None

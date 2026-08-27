@@ -16,7 +16,7 @@ import pytest
 from pydantic import ValidationError
 
 from release_tracker import config_file
-from release_tracker.config import ConfigFileError, Settings, config_file_path
+from release_tracker.config import ConfigFileError, Settings, config_file_path, secret
 from release_tracker.config_file import (
     FIELD_DOCS,
     known_aliases,
@@ -33,7 +33,7 @@ def test_the_file_is_read(isolated_config: Path) -> None:
     set_values({"RDT_FRESH_DAYS": "3", "TMDB_API_KEY": "from-toml"}, path=isolated_config)
     settings = Settings()
     assert settings.fresh_days == 3
-    assert settings.tmdb_api_key == "from-toml"
+    assert secret(settings.tmdb_api_key) == "from-toml"
 
 
 def test_the_environment_still_wins(isolated_config: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal
 
+from pydantic import SecretStr
 from pydantic_settings import DotEnvSettingsSource
 
 from release_tracker.config import ConfigFileError, Settings, config_file_path, env_file_paths
@@ -164,7 +165,12 @@ def coerce(updates: Mapping[str, str]) -> dict[str, TomlScalar]:
         alias = _alias_of(name)
         assert alias is not None  # guarded above
         value = getattr(settings, by_alias[alias])
-        out[alias] = value if _is_scalar(value) else str(value)
+        # A credential comes back wrapped, and `str()` on it is "**********" — writing that
+        # would persist a mask as if it were the key, and nothing downstream would object.
+        if isinstance(value, SecretStr):
+            out[alias] = value.get_secret_value()
+        else:
+            out[alias] = value if _is_scalar(value) else str(value)
     return out
 
 

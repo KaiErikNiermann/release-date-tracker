@@ -23,7 +23,7 @@ from typing import Final
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
-from release_tracker.config import Settings
+from release_tracker.config import Settings, secret
 from release_tracker.deltas import match_studio, predicted_platform
 from release_tracker.logging import get_logger
 
@@ -125,7 +125,7 @@ async def resolve_platform_llm(studio: str, settings: Settings) -> str | None:
     """Ask the LLM gap-filler for a studio's typical streaming home (``None`` if unknown)."""
     if not settings.openai_api_key:
         return None
-    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    client = AsyncOpenAI(api_key=secret(settings.openai_api_key))
     try:
         completion = await client.beta.chat.completions.parse(
             model=settings.openai_model,

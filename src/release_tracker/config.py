@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from platformdirs import PlatformDirs
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import (
     BaseSettings,
     DotEnvSettingsSource,
@@ -150,19 +150,19 @@ class Settings(BaseSettings):
         )
 
     # --- LLM gap-filler ---
-    openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
+    openai_api_key: SecretStr | None = Field(default=None, alias="OPENAI_API_KEY")
     openai_model: str = Field(default="gpt-4o-mini", alias="OPENAI_MODEL")
 
     # --- TMDB (movies/TV) ---
-    tmdb_api_key: str | None = Field(default=None, alias="TMDB_API_KEY")
+    tmdb_api_key: SecretStr | None = Field(default=None, alias="TMDB_API_KEY")
 
     # --- IGDB (games) via Twitch ---
-    twitch_client_id: str | None = Field(default=None, alias="TWITCH_CLIENT_ID")
-    twitch_client_secret: str | None = Field(default=None, alias="TWITCH_CLIENT_SECRET")
+    twitch_client_id: SecretStr | None = Field(default=None, alias="TWITCH_CLIENT_ID")
+    twitch_client_secret: SecretStr | None = Field(default=None, alias="TWITCH_CLIENT_SECRET")
 
     # --- Notion seed (optional) ---
-    notion_token: str | None = Field(default=None, alias="NOTION_TOKEN")
-    notion_database_id: str | None = Field(default=None, alias="NOTION_DATABASE_ID")
+    notion_token: SecretStr | None = Field(default=None, alias="NOTION_TOKEN")
+    notion_database_id: SecretStr | None = Field(default=None, alias="NOTION_DATABASE_ID")
 
     # --- defaults ---
     # CSV of accepted ISO-2 regions; the sentinel ANY (or *) means "region never gates me"
@@ -268,6 +268,18 @@ class Settings(BaseSettings):
             if dim and values:
                 out[dim] = values
         return out
+
+
+def secret(value: SecretStr | None) -> str | None:
+    """Unwrap a credential at the point it is actually used.
+
+    The six credentials are ``SecretStr`` so they cannot leak through a ``repr``, a
+    traceback or a future ``model_dump``. Every read goes through here, so the places a
+    secret escapes into a request are greppable rather than scattered — and an empty
+    ``SecretStr`` is falsy either way, so ``if not settings.tmdb_api_key`` still means what
+    it always did.
+    """
+    return value.get_secret_value() if value is not None else None
 
 
 @lru_cache(maxsize=1)

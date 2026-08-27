@@ -25,7 +25,7 @@ from typing import Any, cast
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
-from release_tracker.config import Settings
+from release_tracker.config import Settings, secret
 from release_tracker.logging import get_logger
 from release_tracker.models import (
     Certainty,
@@ -157,8 +157,21 @@ def write_batch_jsonl(tasks: list[ExtractionTask], path: Path, model: str) -> in
     return written
 
 
+def _openai(settings: Settings) -> OpenAI:
+    """An OpenAI client, or a refusal that names the setting.
+
+    Everywhere else a missing key degrades to an empty result; batch extraction genuinely
+    cannot proceed without one, so it stops — but with a sentence that says what to set
+    rather than the SDK's own error, which does not know what `rdt` calls this.
+    """
+    key = secret(settings.openai_api_key)
+    if not key:
+        raise RuntimeError("OPENAI_API_KEY is not set — try `rdt config set OPENAI_API_KEY …`")
+    return OpenAI(api_key=key)
+
+
 def submit_batch(path: Path, settings: Settings) -> str:
-    client = OpenAI(api_key=settings.openai_api_key)
+    client = _openai(settings)
     upload = client.files.create(file=path.open("rb"), purpose="batch")
     batch = client.batches.create(
         input_file_id=upload.id,
@@ -173,7 +186,7 @@ def collect_batch(
     batch_id: str, tasks_by_id: dict[str, ExtractionTask], settings: Settings
 ) -> list[ReleaseObservation]:
     """Poll a finished batch and map structured outputs to observations."""
-    client = OpenAI(api_key=settings.openai_api_key)
+    client = _openai(settings)
     batch = client.batches.retrieve(batch_id)
     if batch.status != "completed" or batch.output_file_id is None:
         log.info("extract.batch.pending", batch_id=batch_id, status=batch.status)

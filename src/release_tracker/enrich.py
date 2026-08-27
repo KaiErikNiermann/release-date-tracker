@@ -19,7 +19,7 @@ import httpx
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
-from release_tracker.config import Settings
+from release_tracker.config import Settings, secret
 from release_tracker.db import Database
 from release_tracker.deltas import (
     estimate_digital,
@@ -287,7 +287,7 @@ def _write_platform(
 async def _fetch(
     client: httpx.AsyncClient, settings: Settings, entity: Entity
 ) -> tuple[MediaGraph | None, list[PlatformRef]]:
-    key = settings.tmdb_api_key
+    key = secret(settings.tmdb_api_key)
     match entity.kind:
         case MediaKind.MOVIE:
             tmdb_id, skip = pinned_id(entity.external_ids, "tmdb")
@@ -347,7 +347,9 @@ async def _llm_themes(settings: Settings, entity: Entity, graph: MediaGraph) -> 
         f"Summary: {graph.summary or 'unknown'}"
     )
     try:
-        completion = await AsyncOpenAI(api_key=settings.openai_api_key).beta.chat.completions.parse(
+        completion = await AsyncOpenAI(
+            api_key=secret(settings.openai_api_key)
+        ).beta.chat.completions.parse(
             model=settings.openai_model,
             messages=[
                 {"role": "system", "content": _THEME_PROMPT},

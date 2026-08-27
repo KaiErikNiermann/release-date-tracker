@@ -17,7 +17,7 @@ from typing import Any, cast
 
 import httpx
 
-from release_tracker.config import Settings
+from release_tracker.config import Settings, secret
 from release_tracker.logging import get_logger
 from release_tracker.models import (
     Certainty,
@@ -48,7 +48,8 @@ class NotionSeed:
     name = "notion"
 
     def load(self, settings: Settings) -> SeedBundle:
-        token, db_id = settings.notion_token, settings.notion_database_id
+        token = secret(settings.notion_token)
+        db_id = secret(settings.notion_database_id)
         if not token or not db_id:
             log.warning("seed.notion.skip", reason="no NOTION_TOKEN/NOTION_DATABASE_ID")
             return SeedBundle()

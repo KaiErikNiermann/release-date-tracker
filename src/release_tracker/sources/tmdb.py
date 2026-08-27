@@ -16,7 +16,7 @@ from typing import Any, cast
 
 import httpx
 
-from release_tracker.config import Settings
+from release_tracker.config import Settings, secret
 from release_tracker.logging import get_logger
 from release_tracker.models import (
     Certainty,
@@ -102,7 +102,8 @@ class TmdbSource:
         if not settings.tmdb_api_key:
             log.warning("tmdb.skip", reason=NO_KEY, entity=entity.title)
             return SourceResult(skipped=NO_KEY)
-        key = settings.tmdb_api_key
+        key = secret(settings.tmdb_api_key)
+        assert key is not None  # guarded directly above
         if entity.kind is MediaKind.MOVIE:
             return await self._pull_movie(client, entity, key)
         return await self._pull_tv(client, entity, key)
@@ -259,7 +260,8 @@ class TmdbSource:
         *,
         limit: int = 6,
     ) -> list[Candidate]:
-        if not settings.tmdb_api_key:
+        key = secret(settings.tmdb_api_key)
+        if not key:
             return []
         media = "tv" if kind is MediaKind.TV else "movie"
         payload = cast(
@@ -267,7 +269,7 @@ class TmdbSource:
             await get_json(
                 client,
                 f"{BASE}/search/{media}",
-                params={"api_key": settings.tmdb_api_key, "query": query, "include_adult": "false"},
+                params={"api_key": key, "query": query, "include_adult": "false"},
             ),
         )
         out: list[Candidate] = []
