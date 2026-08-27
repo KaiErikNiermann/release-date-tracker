@@ -20,12 +20,15 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import os
 import sys
 from datetime import UTC, date, datetime
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from typing import Annotated
 
 import typer
+from pydantic import SecretStr, ValidationError
 from rich.console import Console
 from rich.table import Table
 
@@ -40,7 +43,7 @@ from release_tracker.artists import (
     refresh_artist,
 )
 from release_tracker.capture import CaptureOutcome, run_capture
-from release_tracker.config import Settings, get_settings
+from release_tracker.config import Settings, env_file_paths, get_settings, secret
 from release_tracker.contingency import ResolutionStatus
 from release_tracker.dates_edtf import parse_edtf, to_edtf
 from release_tracker.db import Database
@@ -95,10 +98,12 @@ seed_app = typer.Typer(help="Manage the entity watchlist (seed).")
 resolve_app = typer.Typer(help="Find canonical ids and pin them to entities (manual matching).")
 artist_app = typer.Typer(help="Artist-radar: follow creators and surface their latest content.")
 edit_app = typer.Typer(help="Freeform edits: retitle, (un)credit, (un)tag, part-split a work.")
+config_app = typer.Typer(help="Read and write the config file (API keys, paths, preferences).")
 app.add_typer(seed_app, name="seed")
 app.add_typer(resolve_app, name="resolve")
 app.add_typer(artist_app, name="artist")
 app.add_typer(edit_app, name="edit")
+app.add_typer(config_app, name="config")
 
 
 def _version() -> str:
@@ -2475,3 +2480,169 @@ def resolve_run(
 
 if __name__ == "__main__":
     app()
+
+
+# ---------------------------------------------------------------------------
+# configuration: what is set, where it came from, and how to change it
+# ---------------------------------------------------------------------------
+def _consequence(alias: str) -> str:
+    """What not setting this costs, in the terms someone would notice."""
+    return {
+        "TMDB_API_KEY": "no movie or TV dates, credits or watch providers",
+        "TWITCH_CLIENT_ID": "no game dates from IGDB",
+        "TWITCH_CLIENT_SECRET": "no game dates from IGDB",
+        "OPENAI_API_KEY": "no gap-filling for what the free sources leave TBA",
+        "NOTION_TOKEN": "the Notion seed provider is unavailable",
+        "NOTION_DATABASE_ID": "the Notion seed provider is unavailable",
+    }.get(alias, "")
+
+
+@app.command()
+def doctor() -> None:
+    """Show what is configured, where each value comes from, and what is missing.
+
+    Read-only and redacted, so it is safe to paste into a bug report.
+    """
+    configure_logging()
+    settings = get_settings()
+    from release_tracker import config_file
+    from release_tracker.config import config_file_path
+
+    where = config_file.origins()
+    console.print(f"[bold]config file[/]  {config_file_path()}")
+    console.print(f"[bold].env chain  [/]  {', '.join(str(p) for p in env_file_paths())}\n")
+
+    keys = Table(title="API keys", show_lines=False)
+    for column in ("Variable", "Set", "From"):
+        keys.add_column(column)
+    absent: list[str] = []
+    for doc in config_file.FIELD_DOCS:
+        if doc.group != "keys":
+            continue
+        raw = getattr(settings, _field_for(doc.alias))
+        value = secret(raw) if isinstance(raw, SecretStr) else raw
+        shown = config_file.mask(doc.alias, str(value)) if value else ""
+        keys.add_row(
+            doc.alias,
+            f"[green]{shown}[/]" if value else "[yellow]—[/]",
+            where.get(doc.alias, ""),
+        )
+        if not value and _consequence(doc.alias):
+            absent.append(doc.alias)
+    console.print(keys)
+    # Below the table rather than in it: this is the part worth acting on, and a table
+    # column squeezes it to nothing on an 80-column terminal.
+    for alias in absent:
+        console.print(f"  [yellow]{alias}[/] is not set — [dim]{_consequence(alias)}[/]")
+    if absent:
+        console.print(f"  [dim]Set one with[/] rdt config set {absent[0]}=…")
+    console.print()
+
+    paths = Table(title="Paths", show_lines=False)
+    for column in ("What", "Where", "Overridden"):
+        paths.add_column(column)
+    for label, alias, value in (
+        ("tracker", "RDT_DB_PATH", settings.db_path),
+        ("seeds", "RDT_SEEDS_PATH", settings.seeds_path),
+        ("trend cache", "RDT_TREND_CACHE_PATH", settings.trend_cache_path),
+        ("platform map", "RDT_PLATFORM_DB_PATH", settings.platform_db_path),
+    ):
+        paths.add_row(label, str(value), where.get(alias, ""))
+    console.print(paths)
+    if Path("data/releases.db").is_file():
+        console.print(
+            "[dim]Using the pre-XDG layout: a data/releases.db beside the working "
+            "directory takes precedence.[/]"
+        )
+
+
+def _field_for(alias: str) -> str:
+    """The attribute behind an alias, so doctor can read a value it only knows by name."""
+    for name, field in Settings.model_fields.items():
+        if field.alias == alias:
+            return name
+    raise KeyError(alias)
+
+
+@config_app.command("path")
+def config_path() -> None:
+    """Print the config file's location. Works even when the file itself is unparseable."""
+    from release_tracker.config import config_file_path
+
+    # Plain print, not the console: this is meant to be scriptable (`cat $(rdt config path)`)
+    # and Rich wraps a long path at the terminal width, which silently corrupts it.
+    print(config_file_path())
+
+
+@config_app.command("show")
+def config_show() -> None:
+    """List every setting that is set, and which layer it came from."""
+    from release_tracker import config_file
+
+    where = config_file.origins()
+    table = Table(title="Configured", show_lines=False)
+    for column in ("Variable", "Value", "From"):
+        table.add_column(column)
+    stored = config_file.read_config()
+    for alias in sorted(where):
+        raw = str(stored.get(alias, ""))
+        table.add_row(alias, config_file.mask(alias, raw) if raw else "[dim]set[/]", where[alias])
+    console.print(table if where else "[dim]Nothing is configured.[/]")
+
+
+@config_app.command("set")
+def config_set(
+    assignments: Annotated[list[str], typer.Argument(help="NAME=VALUE, one or more")],
+) -> None:
+    """Write settings to the config file, e.g. `rdt config set TMDB_API_KEY=abc123`."""
+
+    updates: dict[str, str | None] = {}
+    for item in assignments:
+        name, sep, value = item.partition("=")
+        if not sep:
+            console.print(f"[red]Expected NAME=VALUE[/], got '{item}'.")
+            raise typer.Exit(1)
+        updates[name.strip()] = value
+    _write_config(updates)
+
+
+@config_app.command("unset")
+def config_unset(
+    names: Annotated[list[str], typer.Argument(help="setting names to remove")],
+) -> None:
+    """Remove settings from the config file. The environment and .env are untouched."""
+    _write_config(dict.fromkeys(names))
+
+
+def _write_config(updates: dict[str, str | None]) -> None:
+    from release_tracker import config_file
+
+    try:
+        path = config_file.set_values(updates)
+    except KeyError as exc:
+        console.print(f"[red]{exc.args[0]}[/]")
+        raise typer.Exit(1) from exc
+    except ValidationError as exc:
+        console.print(f"[red]Rejected[/]: {exc.errors()[0]['msg']}")
+        raise typer.Exit(1) from exc
+    console.print(f"[green]Wrote[/] {path}")
+    # The environment outranks the file, so a leftover variable makes a correct write look
+    # like it did nothing — which is the single most confusing outcome available here.
+    shadowed = [name for name in updates if name in os.environ]
+    for name in shadowed:
+        console.print(
+            f"[yellow]Note[/]: {name} is also set in your environment, which wins. "
+            f"Unset it for this to take effect."
+        )
+
+
+@config_app.command("migrate")
+def config_migrate() -> None:
+    """Copy recognised keys out of the .env chain into the config file, once."""
+    from release_tracker import config_file
+
+    report = config_file.migrate_env()
+    if report is None:
+        console.print("[dim]Nothing to migrate.[/]")
+        return
+    console.print(f"[green]Imported[/] {', '.join(report.aliases)} [dim]->[/] {report.path}")

@@ -104,7 +104,7 @@ _GROUP_TITLES: Final[dict[Group, str]] = {
     "keys": "API keys — this file is chmod 0600. Every one is optional.",
     "paths": "where things live",
     "sources": "which optional sources to consult",
-    "preferences": "what counts as available to you",
+    "preferences": "preferences — what to prioritise, and what counts as available to you",
     "display": "colours",
 }
 
