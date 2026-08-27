@@ -51,7 +51,7 @@ from release_tracker.resolve import (
     earliest_confirmed_theatrical,
     earliest_premiere,
 )
-from release_tracker.sources import justwatch, sources_for
+from release_tracker.sources import justwatch, sources_for, unavailable_for
 from release_tracker.sources.base import Candidate, SourceResult, make_client
 from release_tracker.sources.ddg import WebInfo, instant_answer
 from release_tracker.sources.igdb import IgdbSource
@@ -66,7 +66,9 @@ from release_tracker.trends import StudioTrend, narrow_coarse
 log = get_logger("lookup")
 
 # Kinds we can auto-detect (each has at least one Tier-0 source).
-_DETECT_KINDS: tuple[MediaKind, ...] = (MediaKind.MOVIE, MediaKind.TV, MediaKind.GAME)
+# The kinds an unhinted search sweeps. Public so a caller can report on exactly the sources
+# that sweep consulted, rather than guessing at them.
+DETECT_KINDS: tuple[MediaKind, ...] = (MediaKind.MOVIE, MediaKind.TV, MediaKind.GAME)
 # below this title-similarity we don't trust the match — caller should web-search.
 _MATCH_FLOOR = 0.4
 # how far the top candidate's score must lead the runner-up to auto-pick it on the capture
@@ -365,7 +367,7 @@ async def _detect(
     """
     best_key: tuple[float, float] | None = None
     best: tuple[MediaKind, Candidate] | None = None
-    for kind in _DETECT_KINDS:
+    for kind in DETECT_KINDS:
         for cand in await _search_kind(client, query, kind, settings):
             key = (score_candidate(query, None, cand, kind), cand.popularity)
             if best_key is None or key > best_key:
@@ -470,7 +472,7 @@ async def capture_candidates(
     the winner) so the caller can disambiguate before persisting."""
     from release_tracker.matching import candidates_for
 
-    kinds = (kind_hint,) if kind_hint is not None else _DETECT_KINDS
+    kinds = (kind_hint,) if kind_hint is not None else DETECT_KINDS
 
     async def for_kind(kind: MediaKind) -> list[tuple[MediaKind, Candidate]]:
         found = await candidates_for(client, Entity.create(query, kind), settings, limit=limit)
@@ -934,6 +936,10 @@ async def _tv_claims(
                 o.region,
             )
         )
+    elif missing := unavailable_for((MediaKind.TV,), settings):
+        # Saying "TMDB has no date" when TMDB was never asked sends the reader off to
+        # check a source that was never consulted.
+        notes.extend(sorted(missing.values()))
     else:
         notes.append("No air date on TMDB yet.")
 
@@ -988,6 +994,8 @@ async def _game_claims(
             notes.append("Estimate biased toward the publisher's historical release timing.")
     elif obs:
         notes.append("Listed but no concrete date yet (TBA).")
+    elif missing := unavailable_for((MediaKind.GAME,), settings):
+        notes.extend(sorted(missing.values()))
     else:
         notes.append("No release info found on IGDB/Steam.")
     return claims, price, notes

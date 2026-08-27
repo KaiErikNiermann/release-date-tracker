@@ -27,8 +27,9 @@ from textual.widgets.option_list import Option
 from release_tracker import drafts, query
 from release_tracker.capture import capture_work
 from release_tracker.drafts import Draft
-from release_tracker.lookup import capture_candidates, report_for_candidate
+from release_tracker.lookup import DETECT_KINDS, capture_candidates, report_for_candidate
 from release_tracker.models import Entity, MediaKind
+from release_tracker.sources import unavailable_for
 from release_tracker.sources.base import Candidate
 from release_tracker.tech import looks_like_tech
 from release_tracker.tui.draft import DraftScreen
@@ -176,10 +177,21 @@ class AddScreen(ModalScreen[Entity | None]):
             self._status(f"[red]search failed:[/] {exc}")
             return
         self._memo[key] = (time.monotonic(), hits)
-        self._show(hits, key, draft)
+        missing = (
+            unavailable_for(self._searched_kinds(kind_hint), self.app.settings) if not hits else {}
+        )
+        self._show(hits, key, draft, missing)
+
+    def _searched_kinds(self, kind_hint: MediaKind | None) -> tuple[MediaKind, ...]:
+        """The kinds this query actually reached, so only their sources are reported on."""
+        return (kind_hint,) if kind_hint is not None else DETECT_KINDS
 
     def _show(
-        self, hits: list[tuple[MediaKind, Candidate]], key: KeyT, draft: Draft | None = None
+        self,
+        hits: list[tuple[MediaKind, Candidate]],
+        key: KeyT,
+        draft: Draft | None = None,
+        missing: dict[str, str] | None = None,
     ) -> None:
         self._hits = hits
         self._draft = draft
@@ -220,6 +232,13 @@ class AddScreen(ModalScreen[Entity | None]):
             )
         elif draft is not None:
             self._status("[yellow]nothing matched[/][dim] — ↓ then enter to review a new entry[/]")
+        elif missing:
+            # An unconfigured source returns an empty list exactly like a real miss, so
+            # without this the answer to "why is Dune not here" is indistinguishable from
+            # "Dune does not exist". Name what was never asked.
+            self._status(
+                f"[yellow]nothing matched[/] [dim]— {'; '.join(sorted(missing.values()))}[/]"
+            )
         else:
             # Only worth saying when it would actually change the outcome: a hinted search
             # already scoped itself, and a name we recognised as a device has already been

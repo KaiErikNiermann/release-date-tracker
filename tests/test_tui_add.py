@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import SecretStr
 from textual.widgets import Input, OptionList, Static
 
 from release_tracker.config import Settings, get_settings
@@ -343,3 +344,54 @@ async def test_a_film_that_finds_nothing_does_not_retry_as_tech(
         assert asked == [None]
         # and the miss says how to reach a device, which is the one thing a user can't guess
         assert "kind:tech" in _status_text(screen)
+
+
+async def test_an_unconfigured_source_is_named_instead_of_looking_like_a_miss(
+    app: RdtApp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A keyless TMDB returns an empty list exactly like a genuine miss, so "no matches" was
+    the answer to both "this film doesn't exist" and "you never gave me a key". The second
+    one now says so."""
+
+    async def _nothing(*_a: object, **_k: object) -> list[tuple[MediaKind, Candidate]]:
+        return []
+
+    async def _no_client(_self: RdtApp) -> None: ...
+
+    monkeypatch.setattr(add_module, "capture_candidates", _nothing)
+    monkeypatch.setattr(RdtApp, "http", _no_client)
+    app.settings = app.settings.model_copy(update={"tmdb_api_key": None, "twitch_client_id": None})
+
+    async with app.run_test(size=(150, 40)) as pilot:
+        screen = await _open_add(app, pilot)
+        await _search_for(pilot, screen, "dune")
+        status = _status_text(screen)
+        assert "TMDB_API_KEY" in status, status
+        assert "no matches" not in status, "the misleading phrasing must not survive"
+
+
+async def test_a_configured_search_that_finds_nothing_still_says_no_matches(
+    app: RdtApp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half: with keys in place an empty result really does mean the title is
+    wrong, and blaming configuration would send the user off fixing the wrong thing."""
+
+    async def _nothing(*_a: object, **_k: object) -> list[tuple[MediaKind, Candidate]]:
+        return []
+
+    async def _no_client(_self: RdtApp) -> None: ...
+
+    monkeypatch.setattr(add_module, "capture_candidates", _nothing)
+    monkeypatch.setattr(RdtApp, "http", _no_client)
+    app.settings = app.settings.model_copy(
+        update={
+            "tmdb_api_key": SecretStr("k"),
+            "twitch_client_id": SecretStr("i"),
+            "twitch_client_secret": SecretStr("s"),
+        }
+    )
+
+    async with app.run_test(size=(150, 40)) as pilot:
+        screen = await _open_add(app, pilot)
+        await _search_for(pilot, screen, "zzzzzz")
+        assert "no matches" in _status_text(screen)

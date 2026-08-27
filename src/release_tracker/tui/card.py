@@ -261,6 +261,14 @@ class CardScreen(ModalScreen[ConsumptionState | None]):
             return
         if not self._reread():
             return
+        if result.skipped:
+            # Otherwise a refresh where every source was skipped looks identical to one
+            # where nothing had changed: same spinner, same silence, same dates.
+            self.app.notify(
+                "; ".join(sorted(result.skipped.values())),
+                title="Not everything could be checked",
+                severity="warning",
+            )
         # the row behind the modal is showing the old date until this lands
         self.rdt.after_edit(self.entity, graph=False)
         # Straight into the form rather than a notification. The write has already happened
