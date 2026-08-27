@@ -81,9 +81,13 @@ CATEGORY_INFO: Final[dict[TechCategory, TechInfo]] = {
     ),
     TechCategory.CPU: TechInfo(
         "cpu",
-        ("techpowerup.com", "tomshardware.com"),
+        ("intel.com", "techpowerup.com", "tomshardware.com"),
         price_volatile=True,
-        note="Intel/AMD MSRP set at launch; street price moves with supply.",
+        note=(
+            "Intel/AMD MSRP set at launch; street price moves with supply. Intel ARK carries "
+            "the canonical 'Launch Date' (as a quarter, e.g. Q4'24) and Recommended Customer "
+            "Price per SKU — read it there rather than from a review."
+        ),
     ),
     TechCategory.GPU: TechInfo(
         "gpu",

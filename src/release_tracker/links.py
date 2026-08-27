@@ -91,6 +91,15 @@ _SPECS: Final[dict[str, _Spec]] = {
         "TechPowerUp CPU", "https://www.techpowerup.com/cpu-specs/_.{id}",
         reason=_LICENCE_DECLINED,
     ),
+    # The numeric SKU id alone resolves — Intel redirects it to the slugged url. There is no
+    # puller because there is no way to *find* the id: ARK has no public API, its search page
+    # is client-rendered, and Wikidata carries no ARK property. A human finds the SKU, we
+    # deep-link it.
+    "intel_ark": _Spec(
+        "Intel ARK",
+        "https://www.intel.com/content/www/us/en/products/sku/{id}/specifications.html",
+        reason="no way to search ARK programmatically — open it for the launch date",
+    ),
     "imdb": _Spec("IMDb", "https://www.imdb.com/title/{id}/", reason=_NO_STRUCTURE),
     "metacritic": _Spec(
         "Metacritic", "https://www.metacritic.com/{id}", reason=_NO_STRUCTURE
