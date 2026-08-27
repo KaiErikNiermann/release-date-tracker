@@ -394,6 +394,11 @@ class WorkRelation(enum.StrEnum):
     ADAPTATION = "adaptation"  # a film/series -> the book it adapts
     SEQUEL = "sequel"
     PREQUEL = "prequel"
+    # Hardware lineage, where "sequel" reads wrong: a Steam Deck 2 does not continue a
+    # story, it replaces a product. No PREDECESSOR counterpart — that is this same edge
+    # read backwards, which `derivatives_of` already gives you, unlike PREQUEL which is a
+    # genuinely different relation rather than a direction.
+    SUCCESSOR = "successor"
     REMAKE = "remake"
     REMASTER = "remaster"
     TIE_IN = "tie_in"  # an art book / soundtrack / companion -> the work
