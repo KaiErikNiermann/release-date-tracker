@@ -174,6 +174,69 @@ def _sort_key(obs: ReleaseObservation) -> tuple[int, int, float, int, str, str]:
     )
 
 
+# One phrase per component of ``_sort_key``, in the same order. The reason is read off the
+# key itself rather than restated, so it cannot drift from the ranking it explains — and the
+# ``strict=True`` zip below turns a new tiebreak with no phrase for it into a loud failure
+# rather than an explanation that quietly names the wrong component.
+# Terse on purpose: these sit in a fixed-width column beside the date, where a phrase that
+# wraps or truncates explains nothing.
+_KEY_REASONS: tuple[str, ...] = (
+    "theirs is confirmed",
+    "more precise",
+    "better corroborated",
+    "higher-trust source",
+    "more recent",
+    "more recent",
+)
+
+
+def _losing_reason(mine: ReleaseObservation, winner: ReleaseObservation) -> str | None:
+    """Why ``winner`` outranks ``mine``: the first component of the key they differ on.
+
+    The tuples are compared whole before any component is named, so this can only ever
+    explain a loss that actually happened.
+    """
+    mine_key, winner_key = _sort_key(mine), _sort_key(winner)
+    if winner_key <= mine_key:
+        return None
+    for phrase, mine_part, winner_part in zip(_KEY_REASONS, mine_key, winner_key, strict=True):
+        if mine_part != winner_part:
+            return phrase
+    return None
+
+
+def outranked_manual(
+    observations: Iterable[ReleaseObservation], manual_provider: str
+) -> dict[ReleaseChannel, str]:
+    """Channels where a hand-authored date exists but isn't the one being shown, and why.
+
+    A refresh never deletes what a person typed — a pull only clears the providers that
+    answered, and no source is called ``manual`` — so a hand-authored date cannot be
+    overwritten. It can still be *outranked*, most often on precision: a typed "2026-Q4" is
+    coarser than a pulled "2026-10-15", and the ranking prefers the finer claim.
+
+    That is the right call and a confusing one to meet silently, which is what this is for.
+    Scores are recomputed first, exactly as :func:`best_estimates` does, because corroboration
+    is a property of the whole set rather than of one row.
+    """
+    scored = rescore(list(observations))
+    by_channel: dict[ReleaseChannel, list[ReleaseObservation]] = defaultdict(list)
+    for obs in scored:
+        by_channel[obs.channel].append(obs)
+
+    out: dict[ReleaseChannel, str] = {}
+    for channel, obss in by_channel.items():
+        mine = next((o for o in obss if o.provider == manual_provider), None)
+        if mine is None:
+            continue
+        winner = max(obss, key=_sort_key)
+        if winner is mine or winner.provider == manual_provider:
+            continue
+        if (reason := _losing_reason(mine, winner)) is not None:
+            out[channel] = reason
+    return out
+
+
 def best_estimates(observations: Iterable[ReleaseObservation]) -> list[BestEstimate]:
     """Collapse to one best estimate per (entity, channel, facet-set)."""
     scored = rescore(list(observations))

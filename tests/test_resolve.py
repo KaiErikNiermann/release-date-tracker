@@ -16,6 +16,7 @@ from release_tracker.resolve import (
     commercial_anchor,
     earliest_confirmed_theatrical,
     earliest_premiere,
+    outranked_manual,
 )
 
 
@@ -235,3 +236,96 @@ def test_earliest_confirmed_theatrical_excludes_premiere_and_unconfirmed() -> No
 def test_earliest_confirmed_theatrical_none_without_commercial_date() -> None:
     only_premiere = [_theatrical_obs(date(2026, 5, 17), ReleaseChannel.PREMIERE, region="FR")]
     assert earliest_confirmed_theatrical(only_premiere) is None
+
+
+# --- why a hand-authored date isn't the one being shown -----------------------------------
+def test_a_hand_authored_date_outranked_on_precision_says_so() -> None:
+    """The common case, and the confusing one. Nothing overwrote the typed quarter — a pull
+    only clears the providers that answered, and no source is called `manual` — but the
+    finer pulled date wins the ranking, and meeting that silently is what the reason is for.
+    """
+    reasons = outranked_manual(
+        [
+            _obs(
+                date(2026, 10, 1),
+                DatePrecision.QUARTER,
+                Certainty.CONFIRMED,
+                SourceTier.OFFICIAL,
+                provider="manual",
+            ),
+            _obs(
+                date(2026, 10, 15),
+                DatePrecision.EXACT,
+                Certainty.CONFIRMED,
+                SourceTier.OFFICIAL,
+                provider="tmdb",
+            ),
+        ],
+        "manual",
+    )
+    assert reasons == {ReleaseChannel.PRIMARY: "more precise"}
+
+
+def test_a_hand_authored_date_that_wins_needs_no_explanation() -> None:
+    reasons = outranked_manual(
+        [
+            _obs(
+                date(2026, 10, 15),
+                DatePrecision.EXACT,
+                Certainty.CONFIRMED,
+                SourceTier.OFFICIAL,
+                provider="manual",
+            ),
+            _obs(
+                date(2026, 10, 1),
+                DatePrecision.QUARTER,
+                Certainty.CONFIRMED,
+                SourceTier.OFFICIAL,
+                provider="tmdb",
+            ),
+        ],
+        "manual",
+    )
+    assert reasons == {}
+
+
+def test_a_channel_with_no_hand_authored_date_is_not_explained() -> None:
+    """There is nothing to be confused about when you never typed one."""
+    reasons = outranked_manual(
+        [
+            _obs(
+                date(2026, 10, 15),
+                DatePrecision.EXACT,
+                Certainty.CONFIRMED,
+                SourceTier.OFFICIAL,
+                provider="tmdb",
+            )
+        ],
+        "manual",
+    )
+    assert reasons == {}
+
+
+def test_an_unconfirmed_hand_authored_date_loses_on_certainty_first() -> None:
+    """Certainty is the first component of the key, so it is named before precision even
+    when both differ — the explanation walks the key in the key's own order."""
+    reasons = outranked_manual(
+        [
+            _obs(
+                date(2026, 10, 15),
+                DatePrecision.EXACT,
+                Certainty.RUMORED,
+                SourceTier.OFFICIAL,
+                provider="manual",
+            ),
+            _obs(
+                date(2026, 10, 1),
+                DatePrecision.QUARTER,
+                Certainty.CONFIRMED,
+                SourceTier.OFFICIAL,
+                provider="tmdb",
+            ),
+        ],
+        "manual",
+    )
+    assert reasons == {ReleaseChannel.PRIMARY: "theirs is confirmed"}
