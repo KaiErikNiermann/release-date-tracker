@@ -63,11 +63,11 @@ _CHANNELS: tuple[ReleaseChannel, ...] = (
 )
 _ROLES: tuple[CreditRole, ...] = tuple(CreditRole)
 _KINDS: tuple[DescriptorKind, ...] = tuple(DescriptorKind)
-_DATE_HELP = "2026 · 2026-09 · 2026-Q3 · 2026-09-18 · 2027..2029 · ~ approx · ? unsure"
+DATE_HELP = "2026 · 2026-09 · 2026-Q3 · 2026-09-18 · 2027..2029 · ~ approx · ? unsure"
 
 
 # --- rows ---------------------------------------------------------------------------------
-class _Row(Horizontal):
+class Row(Horizontal):
     """One editable line: a label (or a picker) and a field. Rows never write anything.
 
     ↓/↑ are bound here rather than on the screen because the scroll container that holds
@@ -99,7 +99,7 @@ class _Row(Horizontal):
         self.original = value
 
 
-class _CompletingRow(_Row):
+class _CompletingRow(Row):
     """A row whose field completes against the graph.
 
     ``completing`` is the same widget as ``field``, kept under a second name so the
@@ -112,12 +112,12 @@ class _CompletingRow(_Row):
         self.completing = field
 
 
-class TitleRow(_Row):
+class TitleRow(Row):
     def __init__(self, title: str) -> None:
         super().__init__("title", Input(value=title))
 
 
-class DateRow(_Row):
+class DateRow(Row):
     """A hand-authored date for one channel, as an EDTF literal.
 
     ``channel`` is None on the add row, where it comes from the picker instead. The field
@@ -129,7 +129,7 @@ class DateRow(_Row):
         picker = None if channel is not None else Cycle([c.value for c in _CHANNELS])
         super().__init__(
             channel.value if channel is not None else "",
-            Input(value=edtf, placeholder=pulled or _DATE_HELP),
+            Input(value=edtf, placeholder=pulled or DATE_HELP),
             picker=picker,
         )
         self.channel = channel
@@ -181,7 +181,7 @@ class PlatformRow(_CompletingRow):
         self.node_id = node_id
 
 
-class NoteAddRow(_Row):
+class NoteAddRow(Row):
     def __init__(self) -> None:
         super().__init__("note", Input(placeholder="add a note…"))
 
@@ -348,10 +348,10 @@ class EditScreen(ModalScreen[None]):
     @on(Input.Submitted)
     @on(Input.Blurred)
     def _on_field_done(self, event: Input.Submitted | Input.Blurred) -> None:
-        if isinstance(row := event.input.parent, _Row):
+        if isinstance(row := event.input.parent, Row):
             self._commit(row)
 
-    def _commit(self, row: _Row) -> None:
+    def _commit(self, row: Row) -> None:
         """Apply what a row now says. A no-op when it says what it said before, so the
         explicit flush on escape cannot double-write."""
         value = row.field.value.strip()
@@ -397,7 +397,7 @@ class EditScreen(ModalScreen[None]):
         try:
             written = edits.set_date(self.db, self.entity, row.target, value)
         except ValueError as exc:
-            self._say(f"[red]{exc}[/]  [dim]{_DATE_HELP}[/]")
+            self._say(f"[red]{exc}[/]  [dim]{DATE_HELP}[/]")
             return
         row.settle(written.edtf)  # echo the canonical literal back
         if row.channel is None:  # the add row: leave a real one behind and reset
@@ -493,6 +493,6 @@ class EditScreen(ModalScreen[None]):
         Blur would commit it too, but blur arrives as a message — by the time it landed
         the screen would be gone and the card would already have re-read without it.
         """
-        if isinstance(row := getattr(self.focused, "parent", None), _Row):
+        if isinstance(row := getattr(self.focused, "parent", None), Row):
             self._commit(row)
         self.dismiss()

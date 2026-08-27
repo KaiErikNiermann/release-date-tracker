@@ -167,3 +167,33 @@ EditScreen {
     height: 1;
     color: $text-muted;
 }
+
+/* The review-before-add form. Same shape as #edit — it is the same rows — but shorter,
+   because a draft has only the handful of fields we could infer. */
+#draft {
+    width: 84;
+    max-width: 90%;
+    height: auto;
+    max-height: 90%;
+    border: round $accent;
+    background: $surface;
+    padding: 1 2;
+}
+
+#draft-title {
+    padding-bottom: 1;
+}
+
+#draft-body {
+    height: auto;
+    max-height: 16;
+    overflow-y: auto;
+}
+
+#draft-lineage {
+    padding-top: 1;
+}
+
+#draft-foot, #draft-status {
+    padding-top: 1;
+}

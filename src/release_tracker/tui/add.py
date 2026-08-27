@@ -24,12 +24,14 @@ from textual.timer import Timer
 from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
 
-from release_tracker import query
+from release_tracker import drafts, query
 from release_tracker.capture import capture_work
+from release_tracker.drafts import Draft
 from release_tracker.lookup import capture_candidates, report_for_candidate
 from release_tracker.models import Entity, MediaKind
 from release_tracker.sources.base import Candidate
 from release_tracker.tech import looks_like_tech
+from release_tracker.tui.draft import DraftScreen
 
 KeyT = tuple[str, "MediaKind | None"]
 
@@ -50,6 +52,7 @@ class AddScreen(ModalScreen[Entity | None]):
         # list — the same arrangement the browse table uses.
         Binding("j", "highlight(1)", "Down", show=False),
         Binding("k", "highlight(-1)", "Up", show=False),
+        Binding("e", "review", "Review before adding", show=False),
         Binding("slash", "focus_query", "Search", show=False),
         Binding("tab", "move_focus(1)", "Focus next", show=False),
         Binding("shift+tab", "move_focus(-1)", "Focus previous", show=False),
@@ -60,6 +63,9 @@ class AddScreen(ModalScreen[Entity | None]):
         self._initial = initial
         self._timer: Timer | None = None
         self._hits: list[tuple[MediaKind, Candidate]] = []
+        # A device nothing has heard of, offered as its own row below the (empty) hits.
+        # Never auto-added: everything about it is inferred, so it only ever opens review.
+        self._draft: Draft | None = None
         # The key the shown hits came from, so `enter` can tell "act on these" from
         # "you have typed past them" without guessing at the debounce.
         self._shown_key: tuple[str, MediaKind | None] | None = None
@@ -157,15 +163,26 @@ class AddScreen(ModalScreen[Entity | None]):
                 hits = await capture_candidates(
                     await self.app.http(), text, self.app.settings, kind_hint=MediaKind.TECH
                 )
+            # Still nothing, and the name reads like hardware with a generation on it —
+            # so this is the successor case the tracker exists for. Wikidata cannot know a
+            # device that has not been announced; propose one rather than shrugging.
+            draft = (
+                await drafts.infer_synthetic(await self.app.http(), text)
+                if not hits and (kind_hint is MediaKind.TECH or looks_like_tech(text))
+                else None
+            )
         except Exception as exc:  # a dead provider must not kill the palette
             self._candidates.loading = False
             self._status(f"[red]search failed:[/] {exc}")
             return
         self._memo[key] = (time.monotonic(), hits)
-        self._show(hits, key)
+        self._show(hits, key, draft)
 
-    def _show(self, hits: list[tuple[MediaKind, Candidate]], key: KeyT) -> None:
+    def _show(
+        self, hits: list[tuple[MediaKind, Candidate]], key: KeyT, draft: Draft | None = None
+    ) -> None:
         self._hits = hits
+        self._draft = draft
         self._shown_key = key
         options = self._candidates
         options.loading = False
@@ -181,10 +198,28 @@ class AddScreen(ModalScreen[Entity | None]):
                     )
                 )
             )
+        if draft is not None:
+            version = f" {draft.version.token}" if draft.version else ""
+            follows = (
+                f"  [dim]follows {draft.predecessor.label}[/]"
+                if draft.predecessor is not None
+                else "  [dim]no lineage found[/]"
+            )
+            options.add_option(
+                Option(
+                    Text.from_markup(
+                        f"[bold]{draft.title}[/]  [dim]not announced · track it as new"
+                        f"{version}[/]{follows}"
+                    )
+                )
+            )
         if hits:
             self._status(
-                f"[dim]{len(hits)} candidate(s) · ↓ into the list, enter adds · esc back[/]"
+                f"[dim]{len(hits)} candidate(s) · ↓ into the list, enter adds, e reviews first"
+                " · esc back[/]"
             )
+        elif draft is not None:
+            self._status("[yellow]nothing matched[/][dim] — ↓ then enter to review a new entry[/]")
         else:
             # Only worth saying when it would actually change the outcome: a hinted search
             # already scoped itself, and a name we recognised as a device has already been
@@ -199,6 +234,34 @@ class AddScreen(ModalScreen[Entity | None]):
         if 0 <= event.option_index < len(self._hits):
             kind, cand = self._hits[event.option_index]
             self.capture(kind, cand)
+        elif self._draft is not None and event.option_index == len(self._hits):
+            self._review(self._draft)
+
+    def action_review(self) -> None:
+        """Open the highlighted row as a draft instead of adding it outright.
+
+        The same door for both kinds of row: a search hit arrives with its title and kind
+        already filled in, a synthetic one with whatever the lineage gave up. Printable
+        keys are swallowed while the bar has focus, so this only fires from the list.
+        """
+        index = self._candidates.highlighted
+        if index is None:
+            return
+        if 0 <= index < len(self._hits):
+            kind, cand = self._hits[index]
+            parsed = query.parse(self.query_one("#add-query", Input).value)
+            self._review(drafts.for_candidate(parsed.text.strip() or cand.title, kind, cand))
+        elif self._draft is not None and index == len(self._hits):
+            self._review(self._draft)
+
+    def _review(self, draft: Draft) -> None:
+        """Hand off to the review screen and adopt whatever it decides."""
+
+        def done(entity: Entity | None) -> None:
+            if entity is not None:
+                self.dismiss(entity)
+
+        self.app.push_screen(DraftScreen(draft), done)
 
     @work(exclusive=True, group="add-capture")
     async def capture(self, kind: MediaKind, cand: Candidate) -> None:
