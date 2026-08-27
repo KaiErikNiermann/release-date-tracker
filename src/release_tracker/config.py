@@ -1,4 +1,9 @@
-"""Runtime configuration loaded from environment / ``.env`` (never committed).
+"""Runtime configuration, layered so the app can write some of it and you can override all of it.
+
+Sources, first match wins: real environment variables, then ``config.toml`` (the file the
+settings screen and ``rdt config set`` write), then the ``.env`` chain. The environment
+staying on top is what makes a one-off ``TMDB_API_KEY=… rdt …`` work, and what makes a
+CI runner immune to whatever a developer once typed into the TUI.
 
 Paths follow the XDG base directories (via ``platformdirs``), because an installed ``rdt``
 is invoked from wherever you happen to be standing and must find the *same* tracker every
@@ -8,13 +13,22 @@ see ``_legacy_project_dir``. Every path stays overridable by its ``RDT_*`` varia
 
 from __future__ import annotations
 
+import os
+import tomllib
 from functools import lru_cache
+from importlib.resources.abc import Traversable
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from platformdirs import PlatformDirs
 from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import (
+    BaseSettings,
+    DotEnvSettingsSource,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+    TomlConfigSettingsSource,
+)
 
 
 def _dirs() -> PlatformDirs:
@@ -25,6 +39,48 @@ def _dirs() -> PlatformDirs:
     keeps Windows at ``%LOCALAPPDATA%\\rdt`` rather than ``%LOCALAPPDATA%\\rdt\\rdt``.
     """
     return PlatformDirs(appname="rdt", appauthor=False)
+
+
+CONFIG_FILE_ENV = "RDT_CONFIG_FILE"
+
+
+class ConfigFileError(RuntimeError):
+    """``config.toml`` could not be parsed. Carries the path, so it can be pointed at."""
+
+    def __init__(self, path: Path, reason: str) -> None:
+        super().__init__(f"{path}: {reason}")
+        self.path = path
+        self.reason = reason
+
+
+def config_file_path() -> Path:
+    """The writable config file. ``RDT_CONFIG_FILE`` wins, else ``<config dir>/config.toml``."""
+    override = os.environ.get(CONFIG_FILE_ENV)
+    return Path(override) if override else Path(_dirs().user_config_dir) / "config.toml"
+
+
+def env_file_paths() -> tuple[Path, Path]:
+    """The ``.env`` chain, user-wide then project-local — last wins, so a checkout can point
+    at its own keys without disturbing the installed CLI."""
+    return Path(_dirs().user_config_dir) / ".env", Path(".env")
+
+
+class _TomlSource(TomlConfigSettingsSource):
+    """``config.toml``, with a parse failure that names the file instead of a traceback.
+
+    Unwrapped, a stray quote in that file raises out of *every* ``get_settings()`` call —
+    including the command you would use to fix it.
+    """
+
+    def __init__(self, settings_cls: type[BaseSettings]) -> None:
+        super().__init__(settings_cls, toml_file=config_file_path())
+
+    def _read_file(self, file_path: Path | Traversable) -> dict[str, Any]:
+        try:
+            with file_path.open("rb") as handle:
+                return tomllib.load(handle)
+        except tomllib.TOMLDecodeError as exc:
+            raise ConfigFileError(Path(str(file_path)), str(exc)) from exc
 
 
 def _csv_lower(raw: str) -> tuple[str, ...]:
@@ -64,14 +120,34 @@ def _path(kind: Literal["data", "cache", "config"], name: str, legacy: str) -> P
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(
-        # Loaded in order, last wins: a project-local .env overrides the user-wide one, so
-        # a checkout can point at its own keys without disturbing the installed CLI.
-        env_file=(Path(_dirs().user_config_dir) / ".env", Path(".env")),
-        env_file_encoding="utf-8",
-        env_prefix="",
-        extra="ignore",
-    )
+    model_config = SettingsConfigDict(env_file_encoding="utf-8", env_prefix="", extra="ignore")
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Highest priority first: env, then the written config, then the ``.env`` chain.
+
+        Both file sources are built *here* rather than in ``model_config`` because the
+        paths come from ``_dirs()``, which reads ``XDG_*`` when it is called — naming them
+        at class-definition time froze the layout at import, which is exactly what
+        ``_dirs()`` exists to avoid.
+        """
+        del dotenv_settings  # rebuilt below, so its paths are resolved now rather than at import
+        return (
+            init_settings,
+            env_settings,
+            _TomlSource(settings_cls),
+            DotEnvSettingsSource(
+                settings_cls, env_file=env_file_paths(), env_file_encoding="utf-8"
+            ),
+            file_secret_settings,
+        )
 
     # --- LLM gap-filler ---
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
