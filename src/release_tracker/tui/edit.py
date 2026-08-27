@@ -80,10 +80,10 @@ def date_note(
     about the values, and keeping it here means it can be read and tested as one.
     """
     parts: list[str] = []
-    if moved is not None:
+    if moved:
         # What just changed outranks what the value currently is — the latter is on the
         # left of the row anyway, and a note on every line would bury the ones that moved.
-        parts.append(f"[yellow]moved[/] {moved}")
+        parts.append(f"[yellow]{moved}[/]")
     elif pulled:
         parts.append(f"[dim]pulled[/] {pulled}")
     if pulled and mine and reason is None:
@@ -96,9 +96,21 @@ def date_note(
     return "  ".join(parts)
 
 
-def _fmt_day(when: date | None) -> str:
-    """A date as the annotation shows it; an absent one reads as a gap, not a blank."""
-    return when.isoformat() if when is not None else "—"
+def change_note(old: date | None, new: date | None) -> str:
+    """How one channel changed, as a phrase that leads with its own verb.
+
+    A refresh reports an absent side as ``None``, and the two absences mean different
+    things: no date *before* is a channel that just appeared — a physical release finally
+    dated — while no date *after* is one the source stopped carrying. Rendering either as
+    "moved — → …" says "moved from nothing", which reads as a glitch rather than as news.
+    """
+    if old is None and new is not None:
+        return f"new {new.isoformat()}"
+    if new is None and old is not None:
+        return f"dropped {old.isoformat()}"
+    if old is None or new is None:  # pragma: no cover - diff_estimates never emits this
+        return ""
+    return f"moved {old.isoformat()} → {new.isoformat()}"
 
 
 _ROLES: tuple[CreditRole, ...] = tuple(CreditRole)
@@ -358,10 +370,7 @@ class EditScreen(ModalScreen[None]):
         # Why a hand-authored date is not the one on the card, when it isn't. Nothing was
         # overwritten to cause that — it was outranked, and the row says on what.
         reasons = outranked_manual(self.db.iter_observations(self.entity.id), MANUAL_PROVIDER)
-        moved = {
-            change.channel: f"{_fmt_day(change.old)} → {_fmt_day(change.new)}"
-            for change in self.changes
-        }
+        moved = {change.channel: change_note(change.old, change.new) for change in self.changes}
         for est in self.card.estimates:
             source = pulled.get(est.channel)
             yield DateRow(

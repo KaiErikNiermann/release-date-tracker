@@ -34,7 +34,7 @@ from release_tracker.models import (
     SourceTier,
 )
 from release_tracker.tui.app import RdtApp
-from release_tracker.tui.edit import EditScreen, date_note
+from release_tracker.tui.edit import EditScreen, change_note, date_note
 from release_tracker.views import DateChange
 
 TODAY = date(2026, 8, 28)
@@ -62,8 +62,22 @@ def test_a_row_where_the_typed_date_loses_says_which_and_why() -> None:
 def test_a_row_the_refresh_moved_leads_with_the_move() -> None:
     """What changed just now is more urgent than what the current value is, and the old
     value is still on file either way."""
-    note = date_note("2026-10-15", "", moved="2026-09-01 → 2026-10-15")
-    assert note.startswith("[yellow]moved[/] 2026-09-01 → 2026-10-15")
+    note = date_note("2026-10-15", "", moved=change_note(date(2026, 9, 1), date(2026, 10, 15)))
+    assert note.startswith("[yellow]moved 2026-09-01 → 2026-10-15[/]")
+
+
+def test_a_channel_that_just_gained_a_date_reads_as_new_not_as_a_move() -> None:
+    """`diff_estimates` reports a first appearance as ``old=None``, which is genuine news —
+    a physical release finally dated. Rendering it as "moved — → …" says "moved from
+    nothing", which reads as a glitch and is what this actually looked like in use."""
+    assert change_note(None, date(2026, 8, 1)) == "new 2026-08-01"
+    assert "moved" not in date_note("2026-08-01", "", moved=change_note(None, date(2026, 8, 1)))
+
+
+def test_a_channel_the_source_stopped_carrying_reads_as_dropped() -> None:
+    """The other absence, and it means the opposite — worth seeing, and worth not calling
+    a move either."""
+    assert change_note(date(2026, 11, 17), None) == "dropped 2026-11-17"
 
 
 def test_a_row_with_nothing_to_report_stays_quiet() -> None:

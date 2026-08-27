@@ -205,12 +205,14 @@ other value and says which is live:
 
 ```
 theatrical   2026-36        moved 2026-09-01 → 2026-10-15  ◀ more precise
+physical                    new 2026-11-17
 primary      2026-11-05
 digital                     pulled 2027-01-20
 ```
 
-`moved` is what this refresh changed; `◀` marks the value the card is showing, with the
-reason it won, read straight off the ranking key so the two cannot drift apart. Rows with
+`moved` is what this refresh changed — `new` when a channel gained its first date (a physical
+release finally dated), `dropped` when a source stopped carrying one. `◀` marks the value the
+card is showing, with the reason it won, read straight off the ranking key so the two cannot drift apart. Rows with
 nothing to report stay blank, so the ones that moved are the ones you see.
 
 There is no "always prefer mine" — if you disagree with the ranking, sharpen your own date
