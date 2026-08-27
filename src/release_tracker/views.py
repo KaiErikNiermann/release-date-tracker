@@ -23,6 +23,7 @@ from release_tracker.contingency import (
     matcher_from_settings,
 )
 from release_tracker.db import Database
+from release_tracker.links import SourceLink, work_sources
 from release_tracker.models import (
     BestEstimate,
     Bucket,
@@ -199,6 +200,9 @@ class WorkCard:
     derived_from: tuple[RelatedWork, ...] = ()  # what it descends from
     derivatives: tuple[RelatedWork, ...] = ()  # what descends from it
     blockers: tuple[ConditionLine, ...] = ()  # external conditions this work is BLOCKED_BY
+    # where these dates can be read, split into what we can refetch and what the user has to
+    # open themselves — derived, so it always matches the ids actually pinned right now.
+    sources: tuple[SourceLink, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -713,7 +717,22 @@ def work_card(db: Database, entity: Entity) -> WorkCard:
         derived_from=tuple(derived_from(db, entity.id)),
         derivatives=tuple(derivatives_of(db, entity.id)),
         blockers=_blocker_lines(db, entity.id),
+        sources=work_sources(entity, _source_urls(db, entity.id)),
     )
+
+
+def _source_urls(db: Database, entity_id: str) -> dict[str, str]:
+    """provider -> the url it recorded, newest wins.
+
+    Sources already write the canonical page onto every observation and nothing has ever
+    shown it. For IGDB it is the only usable url, since the pinned id is numeric and its
+    pages are addressed by slug.
+    """
+    return {
+        obs.provider: obs.source_url
+        for obs in db.iter_observations(entity_id)
+        if obs.source_url
+    }
 
 
 def _blocker_lines(db: Database, entity_id: str) -> tuple[ConditionLine, ...]:

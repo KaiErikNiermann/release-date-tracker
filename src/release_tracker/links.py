@@ -129,7 +129,6 @@ def _search_links(entity: Entity) -> list[SourceLink]:
             label=f"Search {domain}",
             access=SourceAccess.LINK,
             url=f"https://duckduckgo.com/?q=site%3A{domain}+{query}",
-            reason=_NO_STRUCTURE,
         )
         for domain in info.preferred_sources
     ]
@@ -139,7 +138,6 @@ def _search_links(entity: Entity) -> list[SourceLink]:
             label="Search the web",
             access=SourceAccess.LINK,
             url=f"https://duckduckgo.com/?q={query}+release+date",
-            reason=_NO_STRUCTURE,
         )
     )
     return links

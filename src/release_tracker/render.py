@@ -15,16 +15,20 @@ from datetime import date
 
 from release_tracker import views
 from release_tracker.config import get_settings
+from release_tracker.links import SourceAccess, SourceLink
 from release_tracker.models import BestEstimate, ConsumptionState, DatePrecision
 
 __all__ = [
     "fmt_cell",
+    "fmt_source",
     "fmt_tag",
     "fmt_when",
     "fresh_color",
     "fresh_dot",
     "legend_dots",
+    "linked",
     "provenance",
+    "source_legend",
     "stance_color",
     "state_label",
     "title_cell",
@@ -137,3 +141,42 @@ def wcw_cells(
         ", ".join(row.where[:where]) or "[dim]—[/]",
         ", ".join(fmt_tag(t) for t in row.what[:what]) or "[dim]—[/]",
     )
+
+
+def linked(text: str, url: str | None) -> str:
+    """Wrap cell text in an OSC-8 terminal hyperlink (degrades to plain text if unsupported)."""
+    return f"[link={url}]{text}[/link]" if url else text
+
+
+def fmt_source(link: SourceLink) -> str:
+    """One Sources line: a marker for whether we can refetch it, then a clickable label.
+
+    The marker is the whole point of the section — a filled dot is something the update key
+    will actually re-pull, a hollow one is a page only the user can read. The reason follows
+    the hollow ones so "why can't it just fetch this" is answered in place.
+    """
+    auto = link.access is SourceAccess.AUTO
+    marker = "[cyan]\u25cf[/]" if auto else "[dim]\u25cb[/]"
+    tail = f"  [dim]{link.reason}[/]" if link.reason else ""
+    # A search url is all query string and unreadable; its label already says where it goes.
+    shown = "" if link.provider.startswith("search:") else _short_url(link.url)
+    body = f"[bold]{link.label}[/]  [dim]{shown}[/]" if shown else f"[bold]{link.label}[/]"
+    return f"  {marker} {linked(body, link.url)}{tail}"
+
+
+def _short_url(url: str) -> str:
+    """Drop the scheme and a leading www — the noise in front of every url."""
+    for prefix in ("https://www.", "http://www.", "https://", "http://"):
+        if url.startswith(prefix):
+            return url[len(prefix) :]
+    return url
+
+
+def source_legend() -> str:
+    """Fully dim, so it reads as a caption rather than another source line.
+
+    Frontend-neutral on purpose: the TUI names its update key in the card footer, and
+    the CLI has `rdt refresh` — the fact both share is which sources can be refetched
+    at all.
+    """
+    return "[dim]\u25cf refetchable  ·  \u25cb open the link and hand-edit[/]"

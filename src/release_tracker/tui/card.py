@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, ClassVar
 
 from rich.text import Text
+from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Vertical, VerticalScroll
@@ -18,7 +19,9 @@ from textual.timer import Timer
 from textual.widgets import Static
 
 from release_tracker import render, views
+from release_tracker.links import SourceAccess
 from release_tracker.models import ConsumptionState, Entity
+from release_tracker.pipeline import pull_entity
 from release_tracker.tui.cycle import Cycle
 from release_tracker.views import WorkCard
 
@@ -68,6 +71,7 @@ class CardScreen(ModalScreen[ConsumptionState | None]):
 
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("e", "edit", "Edit", show=False),
+        Binding("u", "update", "Re-pull the automatic sources", show=False),
         Binding("escape", "close", "Back", show=False),
         Binding("q", "close", "Back", show=False),
     ]
@@ -86,7 +90,9 @@ class CardScreen(ModalScreen[ConsumptionState | None]):
             with VerticalScroll(id="card-body"):
                 yield Static(Text.from_markup(self._body()), id="card-detail")
             yield Static(
-                Text.from_markup("[dim]←/→ change state (auto-saves) · e edit · esc back[/]"),
+                Text.from_markup(
+                    "[dim]←/→ change state (auto-saves) · u update · e edit · esc back[/]"
+                ),
                 id="card-foot",
             )
 
@@ -133,6 +139,16 @@ class CardScreen(ModalScreen[ConsumptionState | None]):
                     [f"  [red]{b.name}[/] [dim]{b.status}[/]" for b in self.card.blockers],
                 )
             )
+        if self.card.sources:
+            sections.append(
+                (
+                    "Sources",
+                    [
+                        *[render.fmt_source(link) for link in self.card.sources],
+                        f"  {render.source_legend()}",
+                    ],
+                )
+            )
         if self.card.derived_from or self.card.derivatives:
             related = [
                 f"  [dim]{r.relation.value}[/] {r.node.name}" for r in self.card.derived_from
@@ -177,15 +193,59 @@ class CardScreen(ModalScreen[ConsumptionState | None]):
         from release_tracker.tui.edit import EditScreen
 
         def reread(_: None) -> None:
-            if (entity := self.rdt.db.get_entity(self.entity.id)) is None:
-                self.dismiss(self.entity.consumption_state)  # deleted out from under us
-                return
-            self.entity = entity
-            self.card = views.work_card(self.rdt.db, entity)
-            self.query_one("#card-title", Static).update(Text.from_markup(self._title()))
-            self.query_one("#card-detail", Static).update(Text.from_markup(self._body()))
+            self._reread()
 
         self.app.push_screen(EditScreen(self.entity, self.card), reread)
+
+    def _reread(self) -> bool:
+        """Re-read the work from the db and repaint. False if it is gone.
+
+        The card is a snapshot taken when it opened, so anything that can change the work
+        underneath it — an edit screen, a re-pull — ends here rather than patching whichever
+        field it happened to touch.
+        """
+        if (entity := self.rdt.db.get_entity(self.entity.id)) is None:
+            self.dismiss(self.entity.consumption_state)  # deleted out from under us
+            return False
+        self.entity = entity
+        self.card = views.work_card(self.rdt.db, entity)
+        self.query_one("#card-title", Static).update(Text.from_markup(self._title()))
+        self.query_one("#card-detail", Static).update(Text.from_markup(self._body()))
+        return True
+
+    def action_update(self) -> None:
+        """Re-pull every source the Sources section marks as automatic."""
+        if not any(link.access is SourceAccess.AUTO for link in self.card.sources):
+            self.app.notify("Nothing here updates automatically — open a link instead.")
+            return
+        self._refetch()
+
+    # Its own group, never the default one. Nothing else on this card spawns a worker yet, so
+    # today it changes nothing — but an exclusive worker cancels its whole group, and that is
+    # precisely how the add screen once had a keystroke abort a half-finished write.
+    @work(exclusive=True, group="card-update")
+    async def _refetch(self) -> None:
+        """Pull the automatic sources again, then repaint from the db.
+
+        The spinner sits on the card body because that is where the new dates land. Every
+        failure is caught and shown: a dead provider must leave the card usable, not tear
+        the screen down.
+        """
+        body = self.query_one("#card-body", VerticalScroll)
+        body.loading = True
+        try:
+            await pull_entity(
+                self.rdt.db, self.rdt.settings, self.entity, client=await self.rdt.http()
+            )
+        except Exception as exc:
+            body.loading = False
+            self.app.notify(f"Update failed: {exc}", severity="error")
+            return
+        body.loading = False
+        if self._reread():
+            # the row behind the modal is showing the old date until this lands
+            self.rdt.after_edit(self.entity, graph=False)
+            self.app.notify("Updated from the automatic sources.")
 
     @property
     def rdt(self) -> RdtApp:

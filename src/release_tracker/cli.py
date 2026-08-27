@@ -29,7 +29,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from release_tracker import edits, matching, query, views
+from release_tracker import edits, matching, query, render, views
 from release_tracker.artists import (
     ArtistReport,
     add_artist,
@@ -1115,8 +1115,7 @@ def artist_members(ref: Annotated[str, typer.Argument(help="a group or a person"
 
 # --- artist renderers -----------------------------------------------------
 def _linked(text: str, url: str | None) -> str:
-    """Wrap cell text in an OSC-8 terminal hyperlink (degrades to plain text if unsupported)."""
-    return f"[link={url}]{text}[/link]" if url else text
+    return render.linked(text, url)
 
 
 def _ago(when: date | None) -> str:
@@ -2257,6 +2256,13 @@ def _render_card(card: views.WorkCard) -> None:
             else:
                 state = f"[{stance_color(False)}]⏳ pending[/]"
             console.print(f"  {state} {b.name}")
+    if card.sources:
+        # same strings the TUI card shows — the split between what `rdt refresh` can re-read
+        # and what you have to open yourself is the same fact in both frontends.
+        console.print("[bold]Sources[/]")
+        for link in card.sources:
+            console.print(render.fmt_source(link))
+        console.print(f"  {render.source_legend()}")
 
 
 # ---------------------------------------------------------------------------
