@@ -157,10 +157,16 @@ rdt upcoming 'tag:"body horror" year:2026..2028'
 - **tab** / **shift+tab** walk the completions · **1/2/3** available / upcoming / watched
 - **↓** into the list · **enter** open the work card · **←/→** change state (auto-saves) · **esc** back
 - **e** on a card edits it — title, dates, who/where/what, notes
-- **a** add a title — same syntax, pointed at TMDB/IGDB/Steam, with candidate selection.
-  It moves like the browse screen: **↓** or **enter** into the candidates, **j/k** through
-  them, **enter** adds, **esc** steps back to the bar. A search or an add in flight shows a
-  spinner where its result will land
+- **a** add a title — same syntax, pointed at TMDB/IGDB/Steam/Wikidata, with candidate
+  selection. It moves like the browse screen: **↓** or **enter** into the candidates,
+  **j/k** through them, **enter** adds, **esc** steps back to the bar. A search or an add in
+  flight shows a spinner where its result will land
+- **adding a device** — a bare search covers movies, TV and games only. Wikidata (the tech
+  source) label-matches *everything* at full score, so sweeping it by default would put a
+  sand dune and a Klaus Schulze album above the film for `dune`. Instead, a query that reads
+  as hardware (`Xiaomi Mix 4`, `RTX 5090`, `Steam Deck`) is retried as tech automatically
+  when the media DBs come back empty; anything else takes an explicit `kind:tech` (`gadget`
+  and `hardware` alias it), and the no-match line says so
 - **/** or **shift+tab** back to the query bar · **ctrl+backspace** delete a word · **r** reload · **q** quit
 
 A half-typed value is shown as what it is about to mean: `is:a` greys `ging` in after the

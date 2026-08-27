@@ -55,3 +55,35 @@ def test_component_heavy_categories_flag_price_volatility() -> None:
     assert tech_info(TechCategory.GPU).price_volatile is True
     assert tech_info(TechCategory.CPU).price_volatile is True
     assert tech_info(TechCategory.AUDIO).price_volatile is False
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Poco X7",
+        "Poco X70",
+        "Realme 14 Pro",
+        "Honor Magic7",
+        "Honor Magic 7",
+        "Motorola Edge 60",
+        "Moto G Power",
+        "Oppo Find X8",
+        "Asus Zenfone 12 Ultra",
+        "Vivo X200",
+    ],
+)
+def test_mid_range_phone_brands_are_recognised(title: str) -> None:
+    """These dominate the mid-range and were missing entirely, so `looks_like_tech` said no
+    and the add screen's tech retry never fired for them."""
+    assert classify_tech(title) is TechCategory.PHONE
+
+
+@pytest.mark.parametrize(
+    "title",
+    ["Vivo", "Honor", "Poco", "Honor Society", "Dune", "Blade", "Severance", "Weapons"],
+)
+def test_brand_words_that_are_also_titles_stay_out_of_tech(title: str) -> None:
+    """Vivo is a 2021 film and Honor/Poco are ordinary words, so those brands only match with
+    a model number attached. A false positive here would route a film into the tech branch.
+    """
+    assert looks_like_tech(title) is False

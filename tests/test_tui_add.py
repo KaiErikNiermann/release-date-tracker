@@ -281,3 +281,65 @@ async def test_a_search_that_fails_clears_its_own_spinner(
 
         assert not screen.query_one("#candidates", OptionList).loading
         assert "no provider" in _status_text(screen)
+
+
+async def test_a_device_name_retries_as_tech_when_the_media_dbs_are_empty(
+    app: RdtApp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tech is deliberately absent from the unhinted sweep — Wikidata label-matches
+    everything at score 1.0, so "Dune" would return a sand dune alongside the film. Once the
+    media DBs come back empty there is nothing left to drown, so a name that plainly reads as
+    a device gets a second pass. Without this, typing "Xiaomi Mix 4" silently finds nothing.
+    """
+    asked: list[MediaKind | None] = []
+    device = _candidates("Xiaomi Mi MIX 4")
+
+    async def _search(
+        _client: object, _text: str, _settings: object, *, kind_hint: MediaKind | None, **_k: object
+    ) -> list[tuple[MediaKind, Candidate]]:
+        asked.append(kind_hint)
+        return device if kind_hint is MediaKind.TECH else []
+
+    async def _no_client(_self: RdtApp) -> None: ...
+
+    monkeypatch.setattr(add_module, "capture_candidates", _search)
+    monkeypatch.setattr(RdtApp, "http", _no_client)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        screen = await _open_add(app, pilot)
+        screen.query_one("#add-query", Input).value = "Xiaomi Mix 4"
+        await pilot.press("enter")
+        await _until(pilot, lambda: len(asked) >= 2, "the tech retry")
+        assert asked == [None, MediaKind.TECH]
+        await _until(
+            pilot,
+            lambda: screen.query_one("#candidates", OptionList).option_count == 1,
+            "the device to appear",
+        )
+
+
+async def test_a_film_that_finds_nothing_does_not_retry_as_tech(
+    app: RdtApp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard that keeps the retry from becoming a second sweep for everything."""
+    asked: list[MediaKind | None] = []
+
+    async def _search(
+        _client: object, _text: str, _settings: object, *, kind_hint: MediaKind | None, **_k: object
+    ) -> list[tuple[MediaKind, Candidate]]:
+        asked.append(kind_hint)
+        return []
+
+    async def _no_client(_self: RdtApp) -> None: ...
+
+    monkeypatch.setattr(add_module, "capture_candidates", _search)
+    monkeypatch.setattr(RdtApp, "http", _no_client)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        screen = await _open_add(app, pilot)
+        screen.query_one("#add-query", Input).value = "Some Unknown Film"
+        await pilot.press("enter")
+        await _until(pilot, lambda: "no matches" in _status_text(screen), "the empty result")
+        assert asked == [None]
+        # and the miss says how to reach a device, which is the one thing a user can't guess
+        assert "kind:tech" in _status_text(screen)

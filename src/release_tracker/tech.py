@@ -210,6 +210,18 @@ _KEYWORDS: Final[tuple[tuple[TechCategory, tuple[str, ...]], ...]] = (
             "redmi",
             r"nothing\s+phone",
             "xperia",
+            # The brands that dominate the mid-range and were missing entirely. Several are
+            # ordinary words or existing titles — "Vivo" is a 2021 film, "Honor" and "Poco"
+            # are common enough — so those are anchored to a model pattern rather than
+            # matched bare, keeping "Dune"/"Blade"/"Severance" out of the tech branch.
+            "motorola",
+            r"moto\s+(?:g|e|edge)",
+            "oppo",
+            "realme",
+            "zenfone",
+            r"poco\s+[a-z]\d+",
+            r"honor\s+(?:magic|play)\d*",
+            r"vivo\s+[a-z]\d+",
             "smartphone",
             "phone",
         ),

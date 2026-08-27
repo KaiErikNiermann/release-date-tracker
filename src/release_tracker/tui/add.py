@@ -29,6 +29,7 @@ from release_tracker.capture import capture_work
 from release_tracker.lookup import capture_candidates, report_for_candidate
 from release_tracker.models import Entity, MediaKind
 from release_tracker.sources.base import Candidate
+from release_tracker.tech import looks_like_tech
 
 KeyT = tuple[str, "MediaKind | None"]
 
@@ -147,6 +148,15 @@ class AddScreen(ModalScreen[Entity | None]):
             hits = await capture_candidates(
                 await self.app.http(), text, self.app.settings, kind_hint=kind_hint
             )
+            # Tech is deliberately absent from the unhinted sweep: Wikidata label-matches
+            # everything at score 1.0, so "Dune" would return a sand dune and a Klaus Schulze
+            # album alongside the film. But once the media DBs have come back empty there is
+            # nothing left to drown — so when the text plainly names a device, retry as tech.
+            # Same routing `lookup` already does via `looks_like_tech`.
+            if not hits and kind_hint is None and looks_like_tech(text):
+                hits = await capture_candidates(
+                    await self.app.http(), text, self.app.settings, kind_hint=MediaKind.TECH
+                )
         except Exception as exc:  # a dead provider must not kill the palette
             self._candidates.loading = False
             self._status(f"[red]search failed:[/] {exc}")
@@ -171,11 +181,17 @@ class AddScreen(ModalScreen[Entity | None]):
                     )
                 )
             )
-        self._status(
-            f"[dim]{len(hits)} candidate(s) · ↓ into the list, enter adds · esc back[/]"
-            if hits
-            else "[yellow]no matches[/]"
-        )
+        if hits:
+            self._status(
+                f"[dim]{len(hits)} candidate(s) · ↓ into the list, enter adds · esc back[/]"
+            )
+        else:
+            # Only worth saying when it would actually change the outcome: a hinted search
+            # already scoped itself, and a name we recognised as a device has already been
+            # retried as tech, so telling either to add `kind:tech` sends them nowhere.
+            already_tried = key[1] is not None or looks_like_tech(key[0])
+            hint = "" if already_tried else " [dim]— for a device, add[/] [bold]kind:tech[/]"
+            self._status(f"[yellow]no matches[/]{hint}")
 
     # --- capturing -----------------------------------------------------------------
     @on(OptionList.OptionSelected, "#candidates")
