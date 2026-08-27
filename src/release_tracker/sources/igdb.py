@@ -78,6 +78,17 @@ _REGION: dict[int, str] = {
 }
 
 
+def _slug_of(rows: list[dict[str, Any]]) -> str | None:
+    """The game's slug from any release-date row that carries it (they all name one game)."""
+    for row in rows:
+        game = row.get("game")
+        if isinstance(game, dict):
+            slug = cast("dict[str, Any]", game).get("slug")
+            if isinstance(slug, str) and slug:
+                return slug
+    return None
+
+
 class IgdbSource:
     name = "igdb"
 
@@ -131,9 +142,13 @@ class IgdbSource:
         if game_id is None:
             return SourceResult()
 
+        # game.slug: IGDB addresses its pages by slug, not by the numeric id we pin, and
+        # Wikidata's P5794 stores the slug too — so pinning it both fixes the source_url
+        # (`igdb_slug` was already read at row_to_observation but never written) and lets the
+        # Wikidata id-hub join find the game.
         body = (
             "fields date,human,category,region,status,"
-            "platform.name,game.name; "
+            "platform.name,game.name,game.slug; "
             f"where game = {game_id}; limit 50;"
         )
         rows = cast(
@@ -152,8 +167,11 @@ class IgdbSource:
             )
         ) is not None:
             observations.append(refined)
+        ids: dict[str, str] = {"igdb": str(game_id)}
+        if (slug := _slug_of(rows)) is not None:
+            ids["igdb_slug"] = slug
         log.info("igdb.game", entity=entity.title, igdb_id=game_id, observations=len(observations))
-        return SourceResult(observations=observations, external_ids={"igdb": str(game_id)})
+        return SourceResult(observations=observations, external_ids=ids)
 
     async def _trend_refinement(
         self,

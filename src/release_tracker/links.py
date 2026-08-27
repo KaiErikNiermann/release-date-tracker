@@ -102,6 +102,9 @@ _SPECS: Final[dict[str, _Spec]] = {
     ),
     "imdb": _Spec("IMDb", "https://www.imdb.com/title/{id}/", reason=_NO_STRUCTURE),
     "metacritic": _Spec("Metacritic", "https://www.metacritic.com/{id}", reason=_NO_STRUCTURE),
+    "rottentomatoes": _Spec(
+        "Rotten Tomatoes", "https://www.rottentomatoes.com/{id}", reason=_NO_STRUCTURE
+    ),
     "official_website": _Spec("Official site", "{id}", reason=_NO_STRUCTURE),
 }
 

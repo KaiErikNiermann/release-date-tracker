@@ -122,6 +122,34 @@ _COUNTRY_QIDS: Final[dict[str, str]] = {
 
 _WORLDWIDE: Final = "WW"
 
+_SPARQL = "https://query.wikidata.org/sparql"
+
+# Kind -> (Wikidata property, the key we already pin). The join runs in *our* direction: we
+# hold the id, so the item is found by exact statement match rather than by name, which means
+# no title-similarity guessing and no false positives.
+#
+# Tried in order; the first id we actually hold wins. Games need two because P5794 stores
+# IGDB's *slug* ("cyberpunk-2077") while the id we pin from a pull is numeric — they never
+# compare, so the slug is pinned alongside it and the Steam appid covers whatever predates
+# that.
+_REVERSE_JOIN: Final[dict[MediaKind, tuple[tuple[str, str], ...]]] = {
+    MediaKind.MOVIE: (("P4947", "tmdb"),),
+    MediaKind.TV: (("P4983", "tmdb"),),
+    MediaKind.GAME: (("P1733", "steam_appid"), ("P5794", "igdb_slug")),
+}
+
+# SPARQL variable -> our external_ids key. These are all places a person goes to read a date
+# or a status; none of them is a puller, so every one lands on the card as a plain link.
+_LINK_VARS: Final[dict[str, tuple[str, str]]] = {
+    "imdb": ("P345", "imdb"),
+    "metacritic": ("P1712", "metacritic"),
+    "rottentomatoes": ("P1258", "rottentomatoes"),
+    "official": ("P856", "official_website"),
+}
+
+# An external id is a bare token; anything else is not one and must not reach a query string.
+_ID_VALUE_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._:/-]{0,127}$")
+
 # `+2026-06-26T00:00:00Z`. Coarse precisions zero-fill the unknown components
 # (`+2026-00-00T...` for a year), which `date.fromisoformat` rejects outright.
 _TIME_RE: Final = re.compile(r"^([+-])(\d{4,})-(\d{2})-(\d{2})T")
@@ -344,6 +372,54 @@ def parse_observations(
     return out
 
 
+def link_query(pid: str, value: str) -> str:
+    """The one-shot join: find the item carrying our id, and read its sibling links off it.
+
+    One round trip rather than two (search for the QID, then fetch the entity), which matters
+    because ``lookup.report_for_candidate`` pulls its sources serially — this sits on the hot
+    path of every film lookup.
+    """
+    optionals = "\n".join(
+        f"  OPTIONAL {{ ?item wdt:{p} ?{var} }}" for var, (p, _) in _LINK_VARS.items()
+    )
+    selects = " ".join(f"?{var}" for var in _LINK_VARS)
+    return (
+        f'SELECT ?item {selects} WHERE {{\n  ?item wdt:{pid} "{value}" .\n{optionals}\n}} LIMIT 1'
+    )
+
+
+def parse_link_bindings(payload: dict[str, Any]) -> dict[str, str]:
+    """A SPARQL result row as ``{our_id_key: value}``, including the QID we resolved."""
+    results = payload.get("results")
+    if not isinstance(results, dict):
+        return {}
+    rows = cast("dict[str, Any]", results).get("bindings")
+    if not isinstance(rows, list) or not rows:
+        return {}
+    first = cast("list[Any]", rows)[0]
+    if not isinstance(first, dict):
+        return {}
+    row = cast("dict[str, Any]", first)
+
+    def value_of(var: str) -> str | None:
+        cell = row.get(var)
+        if not isinstance(cell, dict):
+            return None
+        raw = cast("dict[str, Any]", cell).get("value")
+        return raw.strip() if isinstance(raw, str) and raw.strip() else None
+
+    out: dict[str, str] = {}
+    if (item := value_of("item")) is not None:
+        qid = item.rsplit("/", 1)[-1]
+        if _QID_RE.fullmatch(qid):
+            # cached so the next pull skips the join entirely
+            out["wikidata"] = qid
+    for var, (_, key) in _LINK_VARS.items():
+        if (found := value_of(var)) is not None:
+            out[key] = found
+    return out
+
+
 def parse_candidates(payload: dict[str, Any], limit: int) -> list[Candidate]:
     """Search hits as candidates. Wikidata search carries no date, so ``year`` stays None."""
     hits = payload.get("search")
@@ -377,12 +453,59 @@ class WikidataSource:
     name = "wikidata"
 
     def supports(self, kind: MediaKind) -> bool:
-        return kind is MediaKind.TECH
+        """Tech for dates; the rest for identifiers only.
+
+        The two jobs are different and stay different. Tech has no other structured source,
+        so here Wikidata is the date source. Film/TV/games already have TMDB and IGDB, which
+        are strictly better at dates — Wikidata must never compete with them on that. What it
+        alone can do is say *where else this work lives*, which is what the card's Sources
+        section is made of.
+        """
+        return kind is MediaKind.TECH or kind in _REVERSE_JOIN
 
     async def pull(
         self, client: httpx.AsyncClient, entity: Entity, settings: Settings
     ) -> SourceResult:
         del settings  # region comes from the claims themselves, not the user's profile
+        if entity.kind is not MediaKind.TECH:
+            return await self._pull_links(client, entity)
+        return await self._pull_tech(client, entity)
+
+    async def _pull_links(self, client: httpx.AsyncClient, entity: Entity) -> SourceResult:
+        """Sibling-site ids for a work we already have a canonical id for. Never any dates.
+
+        The join is exact: we look for the item carrying *our* id, so there is no title
+        matching and therefore no false positive. A miss just means Wikidata has no item.
+        """
+        pid, value = "", None
+        for candidate_pid, key in _REVERSE_JOIN.get(entity.kind, ()):
+            found, skip = pinned_id(entity.external_ids, key)
+            if skip or found is None or _ID_VALUE_RE.fullmatch(found) is None:
+                continue
+            pid, value = candidate_pid, found
+            break
+        if value is None:
+            return SourceResult()
+        try:
+            payload = cast(
+                "dict[str, Any]",
+                await get_json(
+                    client,
+                    _SPARQL,
+                    params={"query": link_query(pid, value), "format": "json"},
+                    headers={"Accept": "application/sparql-results+json"},
+                ),
+            )
+        except Exception as exc:  # best-effort: a link miss must never fail a date pull
+            log.warning("wikidata.link_error", entity=entity.title, error=str(exc))
+            return SourceResult()
+        external_ids = parse_link_bindings(payload)
+        log.info(
+            "wikidata.links", entity=entity.title, join=f"{pid}={value}", ids=sorted(external_ids)
+        )
+        return SourceResult(external_ids=external_ids)
+
+    async def _pull_tech(self, client: httpx.AsyncClient, entity: Entity) -> SourceResult:
         qid, skip = pinned_id(entity.external_ids, "wikidata")
         # No blind search on a miss — see the module docstring. An unpinned gadget stays
         # unpinned rather than getting some unrelated item's date.
@@ -423,7 +546,10 @@ class WikidataSource:
         limit: int = 6,
     ) -> list[Candidate]:
         del settings
-        if not self.supports(kind):
+        # `supports` is now true for film/TV/games as well, but only for their *ids* — they
+        # have TMDB and IGDB to disambiguate with, and Wikidata results here would be noise
+        # at score 1.0 (it label-matches everything, so "Dune" returns a sand dune).
+        if kind is not MediaKind.TECH:
             return []
         try:
             payload = cast(

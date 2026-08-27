@@ -161,6 +161,12 @@ rdt upcoming 'tag:"body horror" year:2026..2028'
   selection. It moves like the browse screen: **↓** or **enter** into the candidates,
   **j/k** through them, **enter** adds, **esc** steps back to the bar. A search or an add in
   flight shows a spinner where its result will land
+- **Sources on a card** — every work lists where its dates can be read, split into what the
+  tool can refetch (`●`, and `u` re-pulls them) and what only a person can open (`○`, with
+  the reason). The second list comes from Wikidata: given an id we already hold, one query
+  finds the item carrying it and reads off IMDb, Metacritic, Rotten Tomatoes, the official
+  site — and, for hardware, GSMArena and TechPowerUp, which decline automated extraction but
+  are exactly where a human should look
 - **adding a device** — a bare search covers movies, TV and games only. Wikidata (the tech
   source) label-matches *everything* at full score, so sweeping it by default would put a
   sand dune and a Klaus Schulze album above the film for `dune`. Instead, a query that reads

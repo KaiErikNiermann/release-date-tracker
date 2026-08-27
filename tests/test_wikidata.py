@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from release_tracker.models import Certainty, DatePrecision, Entity, MediaKind, ReleaseChannel
 from release_tracker.sources.wikidata import (
+    WikidataSource,
+    link_query,
     parse_candidates,
     parse_external_ids,
+    parse_link_bindings,
     parse_observations,
     parse_region,
     parse_time,
@@ -275,3 +278,182 @@ def test_candidates_on_a_miss_are_empty() -> None:
     """ "Poco X7" really does return nothing — the miss is the expected case, not an error."""
     assert parse_candidates({"search": []}, 6) == []
     assert parse_candidates({}, 6) == []
+
+
+# --- the identifier hub for film / TV / games --------------------------------
+
+
+def _binding(**vals: str) -> dict[str, Any]:
+    return {"results": {"bindings": [{k: {"value": v} for k, v in vals.items()}]}}
+
+
+def test_the_join_reads_sibling_links_off_the_resolved_item() -> None:
+    payload = _binding(
+        item="http://www.wikidata.org/entity/Q109228991",
+        imdb="tt15239678",
+        metacritic="movie/dune-part-two",
+        rottentomatoes="m/dune_part_two",
+        official="https://www.dunemovie.net/",
+    )
+    assert parse_link_bindings(payload) == {
+        "wikidata": "Q109228991",
+        "imdb": "tt15239678",
+        "metacritic": "movie/dune-part-two",
+        "rottentomatoes": "m/dune_part_two",
+        "official_website": "https://www.dunemovie.net/",
+    }
+
+
+def test_the_qid_is_kept_so_the_next_pull_skips_the_join() -> None:
+    ids = parse_link_bindings(_binding(item="http://www.wikidata.org/entity/Q1", imdb="tt1"))
+    assert ids["wikidata"] == "Q1"
+
+
+def test_absent_optionals_are_omitted_not_blanked() -> None:
+    assert parse_link_bindings(_binding(item="http://www.wikidata.org/entity/Q1")) == {
+        "wikidata": "Q1"
+    }
+
+
+def test_a_join_that_matches_nothing_is_empty() -> None:
+    """The common shape for anything Wikidata has no item for — a miss, not an error."""
+    assert parse_link_bindings({"results": {"bindings": []}}) == {}
+    assert parse_link_bindings({}) == {}
+
+
+def test_the_query_pins_the_item_by_our_own_id() -> None:
+    """Exact statement match, so there is no title similarity involved and therefore no way
+    to bind the wrong work."""
+    q = link_query("P4947", "693134")
+    assert '?item wdt:P4947 "693134"' in q
+    assert "wdt:P345" in q and "wdt:P1258" in q
+    assert q.rstrip().endswith("LIMIT 1")
+
+
+def test_supports_splits_dates_from_identifiers() -> None:
+    """Tech is the only kind Wikidata may date. Film/TV/games have TMDB and IGDB, which are
+    strictly better at it — here Wikidata only ever says where else the work lives."""
+    src = WikidataSource()
+    assert src.supports(MediaKind.TECH) is True
+    for kind in (MediaKind.MOVIE, MediaKind.TV, MediaKind.GAME):
+        assert src.supports(kind) is True
+    assert src.supports(MediaKind.BOOK) is False
+
+
+@pytest.mark.asyncio
+async def test_only_tech_gets_candidates() -> None:
+    """`supports` is true for films now, but their disambiguation stays with TMDB — Wikidata
+    label-matches everything at score 1.0, so its candidates here would be pure noise."""
+    src = WikidataSource()
+    from release_tracker.config import Settings
+
+    got = await src.search_candidates(
+        cast("Any", None), "Dune", MediaKind.MOVIE, Settings(), limit=3
+    )
+    assert got == []
+
+
+@pytest.mark.asyncio
+async def test_a_film_pull_never_produces_a_date(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The load-bearing half of the split: Wikidata must not compete with TMDB on dates."""
+    from release_tracker.config import Settings
+    from release_tracker.sources import wikidata as mod
+
+    async def _fake(*_a: Any, **_k: Any) -> dict[str, Any]:
+        return _binding(item="http://www.wikidata.org/entity/Q1", imdb="tt1")
+
+    monkeypatch.setattr(mod, "get_json", _fake)
+    film = Entity.create("Dune", MediaKind.MOVIE, external_ids={"tmdb": "693134"})
+    result = await WikidataSource().pull(cast("Any", None), film, Settings())
+    assert result.observations == []
+    assert result.external_ids == {"wikidata": "Q1", "imdb": "tt1"}
+
+
+@pytest.mark.asyncio
+async def test_a_game_joins_on_the_steam_appid_not_the_igdb_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P5794 stores IGDB's slug and we pin its numeric id, so they never compare. Joining on
+    the numeric id would silently match nothing forever."""
+    from release_tracker.config import Settings
+    from release_tracker.sources import wikidata as mod
+
+    seen: list[str] = []
+
+    async def _fake(_client: Any, _url: str, **kw: Any) -> dict[str, Any]:
+        seen.append(str(kw.get("params", {}).get("query", "")))
+        return _binding(item="http://www.wikidata.org/entity/Q3182559")
+
+    monkeypatch.setattr(mod, "get_json", _fake)
+    game = Entity.create(
+        "Cyberpunk 2077", MediaKind.GAME, external_ids={"igdb": "1877", "steam_appid": "1091500"}
+    )
+    await WikidataSource().pull(cast("Any", None), game, Settings())
+    assert 'wdt:P1733 "1091500"' in seen[0]
+    assert "1877" not in seen[0]
+
+
+@pytest.mark.asyncio
+async def test_a_game_with_no_steam_appid_makes_no_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from release_tracker.config import Settings
+    from release_tracker.sources import wikidata as mod
+
+    called = False
+
+    async def _fake(*_a: Any, **_k: Any) -> dict[str, Any]:
+        nonlocal called
+        called = True
+        return {}
+
+    monkeypatch.setattr(mod, "get_json", _fake)
+    game = Entity.create("Some Game", MediaKind.GAME, external_ids={"igdb": "1877"})
+    assert await WikidataSource().pull(cast("Any", None), game, Settings()) is not None
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_a_junk_pinned_id_never_reaches_the_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An external id is a bare token. A hand-pinned value that isn't one — `rdt resolve pin`
+    takes free text — must not be interpolated into a query at all."""
+    from release_tracker.config import Settings
+    from release_tracker.sources import wikidata as mod
+
+    called = False
+
+    async def _fake(*_a: Any, **_k: Any) -> dict[str, Any]:
+        nonlocal called
+        called = True
+        return {}
+
+    monkeypatch.setattr(mod, "get_json", _fake)
+    film = Entity.create("X", MediaKind.MOVIE, external_ids={"tmdb": '1" . ?x ?y ?z . #'})
+    assert await WikidataSource().pull(cast("Any", None), film, Settings()) is not None
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_a_game_falls_back_to_the_igdb_slug(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Most tracked games predate Steam-appid pinning, so the slug is the one that has to
+    work. P5794 stores exactly that, which is why the puller now pins it."""
+    from release_tracker.config import Settings
+    from release_tracker.sources import wikidata as mod
+
+    seen: list[str] = []
+
+    async def _fake(_client: Any, _url: str, **kw: Any) -> dict[str, Any]:
+        seen.append(str(kw.get("params", {}).get("query", "")))
+        return _binding(item="http://www.wikidata.org/entity/Q3182559")
+
+    monkeypatch.setattr(mod, "get_json", _fake)
+    game = Entity.create(
+        "Cyberpunk 2077",
+        MediaKind.GAME,
+        external_ids={"igdb": "1877", "igdb_slug": "cyberpunk-2077"},
+    )
+    result = await WikidataSource().pull(cast("Any", None), game, Settings())
+    assert 'wdt:P5794 "cyberpunk-2077"' in seen[0]
+    assert result.external_ids["wikidata"] == "Q3182559"
