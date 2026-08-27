@@ -43,6 +43,9 @@ log = get_logger("tmdb")
 
 BASE = "https://api.themoviedb.org/3"
 
+# Phrased for a person, not a log line — it reaches the add screen and `rdt doctor`.
+NO_KEY = "TMDB_API_KEY is not set"
+
 
 @dataclass(slots=True, frozen=True)
 class MovieMeta:
@@ -89,12 +92,16 @@ class TmdbSource:
     def supports(self, kind: MediaKind) -> bool:
         return kind in (MediaKind.MOVIE, MediaKind.TV)
 
+    def unavailable(self, settings: Settings) -> str | None:
+        """Why this source cannot answer right now, or None if it can."""
+        return None if settings.tmdb_api_key else NO_KEY
+
     async def pull(
         self, client: httpx.AsyncClient, entity: Entity, settings: Settings
     ) -> SourceResult:
         if not settings.tmdb_api_key:
-            log.warning("tmdb.skip", reason="no TMDB_API_KEY", entity=entity.title)
-            return SourceResult()
+            log.warning("tmdb.skip", reason=NO_KEY, entity=entity.title)
+            return SourceResult(skipped=NO_KEY)
         key = settings.tmdb_api_key
         if entity.kind is MediaKind.MOVIE:
             return await self._pull_movie(client, entity, key)

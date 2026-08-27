@@ -582,6 +582,11 @@ class WikidataSource:
         """
         return kind is MediaKind.TECH or kind in _REVERSE_JOIN
 
+    def unavailable(self, settings: Settings) -> str | None:
+        """Never — this source needs no credentials."""
+        del settings
+        return None
+
     async def pull(
         self, client: httpx.AsyncClient, entity: Entity, settings: Settings
     ) -> SourceResult:

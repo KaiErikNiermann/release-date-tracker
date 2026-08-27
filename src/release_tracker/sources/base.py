@@ -46,10 +46,17 @@ class MediaGraph:
 
 @dataclass(slots=True)
 class SourceResult:
-    """What a single source produced for one entity."""
+    """What a single source produced for one entity.
+
+    ``skipped`` is the difference between "I looked and there is nothing" and "I was never
+    able to look" — an unconfigured source returns empty either way, and a caller that
+    cannot tell them apart will happily delete the rows this source wrote last time. It
+    carries the reason so the difference can also be shown to a person.
+    """
 
     observations: list[ReleaseObservation] = field(default_factory=list[ReleaseObservation])
     external_ids: dict[str, str] = field(default_factory=dict[str, str])
+    skipped: str | None = None
 
 
 @dataclass(slots=True)
@@ -82,6 +89,15 @@ class Source(Protocol):
     name: str
 
     def supports(self, kind: MediaKind) -> bool: ...
+
+    def unavailable(self, settings: Settings) -> str | None:
+        """Why this source cannot answer right now, or None if it can.
+
+        Pure and cheap — it reads configuration, never the network — so callers can ask
+        before doing any work and tell a user what is missing instead of returning a
+        silently empty result.
+        """
+        ...
 
     async def pull(
         self, client: httpx.AsyncClient, entity: Entity, settings: Settings

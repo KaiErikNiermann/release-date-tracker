@@ -43,6 +43,10 @@ from release_tracker.trends import StudioTrend, compute_trend, narrow_coarse
 
 log = get_logger("igdb")
 
+# Phrased for a person, not a log line — these reach the add screen and `rdt doctor`.
+NO_KEYS = "TWITCH_CLIENT_ID / TWITCH_CLIENT_SECRET are not set"
+BAD_KEYS = "Twitch rejected these credentials"
+
 TOKEN_URL = "https://id.twitch.tv/oauth2/token"  # noqa: S105 - public OAuth endpoint
 GAMES_URL = "https://api.igdb.com/v4/games"
 RELEASE_DATES_URL = "https://api.igdb.com/v4/release_dates"
@@ -99,12 +103,22 @@ class IgdbSource:
     def supports(self, kind: MediaKind) -> bool:
         return kind is MediaKind.GAME
 
+    def unavailable(self, settings: Settings) -> str | None:
+        """Why this source cannot answer right now, or None if it can.
+
+        Only the credential *gap* is knowable without a request; a rejected credential is
+        found by `_ensure_token` and reported from there.
+        """
+        if not settings.twitch_client_id or not settings.twitch_client_secret:
+            return NO_KEYS
+        return None
+
     async def _ensure_token(
         self, client: httpx.AsyncClient, settings: Settings
     ) -> tuple[str, str] | None:
         cid, secret = settings.twitch_client_id, settings.twitch_client_secret
         if not cid or not secret:
-            log.warning("igdb.skip", reason="no TWITCH_CLIENT_ID/SECRET")
+            log.warning("igdb.skip", reason=NO_KEYS)
             return None
         # lock so concurrent game pulls fetch the app token exactly once
         async with self._token_lock:
@@ -122,7 +136,15 @@ class IgdbSource:
                         },
                     ),
                 )
-                self._token = str(payload["access_token"])
+                token = payload.get("access_token")
+                if not isinstance(token, str) or not token:
+                    # Twitch answers bad credentials with 400 and a JSON body, which
+                    # `post_json` passes through untouched — reading the key blind raised
+                    # KeyError, which the search layer swallowed into "no matches". A typo
+                    # in the secret looked exactly like the game not existing.
+                    log.warning("igdb.auth_rejected", body=str(payload)[:200])
+                    return None
+                self._token = token
         return cid, self._token
 
     async def pull(
@@ -130,7 +152,7 @@ class IgdbSource:
     ) -> SourceResult:
         auth = await self._ensure_token(client, settings)
         if auth is None:
-            return SourceResult()
+            return SourceResult(skipped=self.unavailable(settings) or BAD_KEYS)
         cid, token = auth
         headers = {"Client-ID": cid, "Authorization": f"Bearer {token}"}
 

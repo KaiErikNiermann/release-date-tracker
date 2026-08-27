@@ -29,7 +29,7 @@ from release_tracker.models import (
 )
 from release_tracker.resolve import best_estimates
 from release_tracker.sources import justwatch, sources_for
-from release_tracker.sources.base import make_client
+from release_tracker.sources.base import SourceResult, make_client
 from release_tracker.sources.justwatch import JustWatchAvailability
 
 log = get_logger("pipeline")
@@ -44,6 +44,9 @@ class PullStats:
     entities: int = 0
     observations: int = 0
     errors: int = 0
+    # provider -> why it could not answer. Distinct from `errors`: nothing went wrong, the
+    # source was never in a position to look.
+    skipped: dict[str, str] = field(default_factory=dict[str, str])
 
 
 @dataclass(slots=True)
@@ -55,6 +58,9 @@ class RefreshResult:
     before: list[BestEstimate] = field(default_factory=list[BestEstimate])
     after: list[BestEstimate] = field(default_factory=list[BestEstimate])
     error: str | None = None
+    # provider -> why it could not answer. An empty diff means something different when a
+    # source was never asked, and the caller has to be able to say so.
+    skipped: dict[str, str] = field(default_factory=dict[str, str])
 
 
 async def _pull_entity(
@@ -75,12 +81,17 @@ async def _pull_entity(
             return_exceptions=True,
         )
     merged_ids: dict[str, str] = {}
-    # refresh: clear this entity's prior rows for the providers that succeeded, so
-    # re-pulls (e.g. after re-pinning a canonical id) don't leave wrong-match ghosts.
+    # refresh: clear this entity's prior rows for the providers that answered, so re-pulls
+    # (e.g. after re-pinning a canonical id) don't leave wrong-match ghosts.
+    #
+    # A *skipped* source must not count as answering. It returns an empty result exactly
+    # like a source that looked and found nothing, so treating the two alike meant an
+    # unconfigured TMDB wiped every date it had previously written — losing your key and
+    # running a refresh silently emptied the tracker and reported a clean run.
     succeeded = tuple(
         src.name
         for src, r in zip(sources, results, strict=True)
-        if not isinstance(r, BaseException)
+        if isinstance(r, SourceResult) and r.skipped is None
     )
     db.delete_observations(entity.id, succeeded)
     for src, result in zip(sources, results, strict=True):
@@ -92,6 +103,10 @@ async def _pull_entity(
                 entity=entity.title,
                 error=str(result),
             )
+            continue
+        if result.skipped is not None:
+            stats.skipped[src.name] = result.skipped
+            log.info("pipeline.source_skipped", source=src.name, reason=result.skipped)
             continue
         merged_ids.update(result.external_ids)
         if result.observations:
@@ -209,8 +224,9 @@ async def _refresh_one(
     before/after best-estimates. Each stage acquires ``sem`` on its own (never nested), so the
     batch stays bounded and one entity's failure is isolated to its own result."""
     before = list(best_estimates(db.iter_observations(entity.id)))
+    stats = PullStats()
     try:
-        await _pull_entity(client, db, entity, settings, sem, PullStats())  # acquires sem itself
+        await _pull_entity(client, db, entity, settings, sem, stats)  # acquires sem itself
         if offers:
             async with sem:
                 await _refresh_offers(client, db, settings, entity)
@@ -223,7 +239,7 @@ async def _refresh_one(
         log.error("pipeline.refresh_error", entity=entity.title, error=str(exc))
         return RefreshResult(entity.id, entity.title, before, before, error=str(exc))
     after = list(best_estimates(db.iter_observations(entity.id)))
-    return RefreshResult(entity.id, entity.title, before, after)
+    return RefreshResult(entity.id, entity.title, before, after, skipped=dict(stats.skipped))
 
 
 async def refresh_entity(

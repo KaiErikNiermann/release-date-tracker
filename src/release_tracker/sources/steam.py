@@ -47,6 +47,11 @@ class SteamSource:
     def supports(self, kind: MediaKind) -> bool:
         return kind is MediaKind.GAME
 
+    def unavailable(self, settings: Settings) -> str | None:
+        """Never — this source needs no credentials."""
+        del settings
+        return None
+
     async def pull(
         self, client: httpx.AsyncClient, entity: Entity, settings: Settings
     ) -> SourceResult:
