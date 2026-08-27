@@ -100,23 +100,25 @@ async def capture_work(
     Returns the persisted entity (so a caller can jump to it), or ``None`` if it was skipped.
 
     This is a *tracker*, tech included, so ``/rd-add`` never refuses a capture:
-    - **Resolvable kinds** (movie/tv/game) that pinned a canonical id capture *with* it, then
-      pull dates + enrich who/where/what — *including date-less (TBA) ones* (the skill then
-      proposes a speculative window so nothing sits date-less).
-    - **Unresolvable kinds** (tech, other) have no Tier-0 source, so they capture as a bare
-      entity with no ids and no auto-pull — exactly like the manual ``rdt add`` path that
-      seeded e.g. Steam Frames. The skill follows up with a release window.
+    - **Anything that pinned a canonical id** captures *with* it, then pulls dates + enriches
+      who/where/what — *including date-less (TBA) ones* (the skill then proposes a
+      speculative window so nothing sits date-less).
+    - **A kind where a miss is expected** (tech, other) captures as a bare entity with no ids
+      and no auto-pull — exactly like the manual ``rdt add`` path that seeded e.g. Steam
+      Frames. The skill follows up with a release window.
 
-    The only true skip is a total miss with no kind at all; and a *resolvable* kind we
-    couldn't pin is skipped too (a bare unpinned movie would be a bogus, un-enrichable stub
-    — better surfaced as "not tracked" so the title can be corrected).
+    The only true skip is a total miss with no kind at all, and a *strict* kind we couldn't
+    pin (see ``matching.STRICT_CAPTURE_KINDS``): a bare unpinned movie would be a bogus,
+    un-enrichable stub, better surfaced as "not tracked" so the title can be corrected. Tech
+    is resolvable but not strict — Wikidata simply hasn't heard of most devices, so a miss
+    there says nothing about whether the name was right.
 
     With ``season``, the entry is canonical-titled ``"Show: Season N"`` and carries the
     structured coord so enrichment auto-wires the series link + subtitle (full-auto path).
     """
     if report.kind is None:
         return None
-    if matching.is_resolvable(report.kind) and not report.canonical:
+    if matching.requires_canonical_for_capture(report.kind) and not report.canonical:
         return None
     entity = entity_for(db, name, report, season)
     db.upsert_entity(entity)
@@ -146,17 +148,17 @@ async def run_capture(
 ) -> CaptureOutcome:
     """Look a title up and persist it, refusing to guess when the name collides.
 
-    Only a *resolvable* kind goes through ``select_candidate``; a name collision then
-    surfaces the candidate list rather than silently adding the wrong (or a duplicate)
-    title. Tech has no Tier-0 candidate list to disambiguate, so it captures directly.
-    """
-    if kind_hint is MediaKind.TECH:
-        report = await lookup(name, settings, kind_hint=kind_hint, region=region, season=season)
-        return CaptureOutcome(
-            report=report,
-            entity=await capture_work(db, settings, name, report, season=season, client=client),
-        )
+    Every kind goes through ``select_candidate``; a name collision then surfaces the
+    candidate list rather than silently adding the wrong (or a duplicate) title. Tech joined
+    them once Wikidata gave it an id space — "RTX 5090" vs "RTX 5090D" and "Steam Deck" vs
+    "Steam Deck OLED" are exactly the picks a user has to make.
 
+    A *miss* is a different thing from a collision, and the two must not share an answer.
+    For a movie a miss means the title was wrong; for a device it usually just means
+    Wikidata is thin, and the device still has to be trackable. So the miss branch hands
+    off to ``capture_work``, whose own gate keeps movie/tv/game untracked while letting tech
+    through as a bare entity.
+    """
     async with contextlib.AsyncExitStack() as stack:
         http = client or await stack.enter_async_context(make_client())
         kinded = await capture_candidates(http, name, settings, kind_hint=kind_hint)
@@ -171,9 +173,19 @@ async def run_capture(
                 ambiguous=tuple((kind_of[id(c)], c) for c in pick.candidates),
             )
         if pick.outcome == "no_match" or pick.cand is None:
-            # nothing solid — same web-fallback report as a plain miss, not tracked.
+            # nothing solid — same web-fallback report as a plain miss.
             report = await lookup(name, settings, kind_hint=kind_hint, region=region, season=season)
-            return CaptureOutcome(report=report)
+            # `select_candidate` also reports no_match when --latest/--year/--id filtered every
+            # contender out. `lookup` re-runs the search *without* those, so it can come back
+            # with a confident match for the very title the selector rejected — capturing that
+            # would silently track the wrong year's entry. Only an unfiltered miss falls back.
+            narrowed = latest or want_year is not None or bool(id_pick)
+            entity = (
+                None
+                if narrowed
+                else await capture_work(db, settings, name, report, season=season, client=http)
+            )
+            return CaptureOutcome(report=report, entity=entity)
         chosen = pick.cand
         report = await report_for_candidate(
             http, name, kind_of[id(chosen)], chosen, settings, season=season

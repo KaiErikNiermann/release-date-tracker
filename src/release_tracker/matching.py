@@ -32,7 +32,21 @@ REQUIRED_ID: dict[MediaKind, str] = {
     MediaKind.MOVIE: "tmdb",
     MediaKind.TV: "tmdb",
     MediaKind.GAME: "igdb",
+    MediaKind.TECH: "wikidata",
 }
+
+# Kinds where an *unpinned* capture is worthless. TMDB/IGDB coverage is near-total, so for
+# them "no canonical id" means "wrong title" and a bare entity would be an un-enrichable
+# stub — better surfaced as "not tracked" so the name can be corrected.
+#
+# Tech is deliberately absent even though it is resolvable. Wikidata knows a small fraction
+# of consumer devices (253 phone models carry a release date, 15 of them from 2025 on), so
+# there "no id" means "Wikidata is thin", not "wrong title" — and this is a *tracker*, so a
+# device it has never heard of still has to be trackable as a bare entity. Reusing
+# `is_resolvable` for the capture gate is exactly what would take that away.
+STRICT_CAPTURE_KINDS: frozenset[MediaKind] = frozenset(
+    {MediaKind.MOVIE, MediaKind.TV, MediaKind.GAME}
+)
 
 
 def required_id_key(kind: MediaKind) -> str | None:
@@ -41,6 +55,11 @@ def required_id_key(kind: MediaKind) -> str | None:
 
 def is_resolvable(kind: MediaKind) -> bool:
     return kind in REQUIRED_ID
+
+
+def requires_canonical_for_capture(kind: MediaKind) -> bool:
+    """True if capturing this kind without a pinned id should be refused."""
+    return kind in STRICT_CAPTURE_KINDS
 
 
 def needs_resolution(entity: Entity) -> bool:

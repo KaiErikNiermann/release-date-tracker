@@ -101,7 +101,9 @@ def combine(parts: Iterable[Resolution]) -> Resolution:
     return Resolution(ResolutionStatus.PENDING)  # nothing to go on
 
 
-_REGION_WILDCARD: frozenset[str] = frozenset({"ANY", "*"})
+# "region doesn't gate me" (a VPN). Public because tech has to read *past* it:
+# a stream can be region-hopped, a device cannot.
+REGION_WILDCARD: frozenset[str] = frozenset({"ANY", "*"})
 
 
 def matcher_from_settings(settings: Settings) -> ProfileMatcher:
@@ -114,7 +116,7 @@ def matcher_from_settings(settings: Settings) -> ProfileMatcher:
     """
     region = (
         frozenset[str]()
-        if _REGION_WILDCARD & frozenset(settings.regions)
+        if REGION_WILDCARD & frozenset(settings.regions)
         else frozenset({*settings.regions, "WW"})
     )
     accepted: dict[str, frozenset[str]] = {

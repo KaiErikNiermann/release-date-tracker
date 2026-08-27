@@ -27,6 +27,7 @@ from typing import Literal
 import httpx
 
 from release_tracker.config import Settings
+from release_tracker.contingency import REGION_WILDCARD
 from release_tracker.deltas import (
     Estimate,
     estimate_digital,
@@ -59,7 +60,7 @@ from release_tracker.sources.tmdb import TmdbSource
 from release_tracker.sources.whentostream import WhenToStreamHints
 from release_tracker.sources.whentostream import hints as wts_hints
 from release_tracker.sources.wiki import WikiHints, wiki_hints
-from release_tracker.tech import classify_tech, looks_like_tech, tech_info
+from release_tracker.tech import TechInfo, classify_tech, looks_like_tech, tech_info
 from release_tracker.trends import StudioTrend, narrow_coarse
 
 log = get_logger("lookup")
@@ -187,10 +188,9 @@ async def lookup(
     dates are reported as earliest-worldwide and ignore it. ``season`` pins a specific TV
     season explicitly (preferred over parsing it out of the title).
     """
-    if kind_hint is MediaKind.TECH:
-        return _tech_report(query, settings, region)
-
     async with make_client() as client:
+        if kind_hint is MediaKind.TECH:
+            return await _tech_lookup(client, query, settings, region)
         if kind_hint is not None:
             cands = await _search_kind(client, query, kind_hint, settings)
             picked = (kind_hint, cands[0]) if cands else None
@@ -199,7 +199,7 @@ async def lookup(
             # nothing solid from the media DBs, but the title clearly names a
             # gadget? treat it as tech rather than forcing a bad film/game match.
             if looks_like_tech(query) and (picked is None or picked[1].score < _TECH_OVERRIDE):
-                return _tech_report(query, settings, region)
+                return await _tech_lookup(client, query, settings, region)
 
         if picked is None or picked[1].score < _MATCH_FLOOR:
             return RdReport(
@@ -222,12 +222,15 @@ async def report_for_candidate(
     settings: Settings,
     *,
     season: int | None = None,
+    region: str | None = None,
 ) -> RdReport:
     """Build the full dated report for an already-chosen (kind, candidate).
 
     Split out of :func:`lookup` so the capture path can pick a candidate explicitly
     (``--latest`` / ``--year`` / ``--id`` / a disambiguation choice) and still get the
     identical Tier-0 + JustWatch + WhenToStream report without re-running the search.
+
+    ``region`` is only read for tech, where it decides which market's date leads.
     """
     # keep the raw query as the title (so "Show: Season 5" still resolves the
     # season) but pin the canonical id we just chose so pullers don't re-search.
@@ -258,7 +261,15 @@ async def report_for_candidate(
         case MediaKind.TV:
             claims, streaming, notes = await _tv_claims(client, settings, tmdb_id, observations)
             price = None
-        case _:  # game / tech
+        case MediaKind.TECH:
+            # never _game_claims: that path narrows on a *publisher's* release timing and
+            # ends its miss branch with "No release info found on IGDB/Steam", which is a
+            # nonsense thing to tell someone who asked about a phone.
+            tech = _tech_policy(query, settings, region)
+            claims, market_note = _tech_claims(observations, tech)
+            notes = [market_note, *tech.notes]
+            price, streaming = None, ()
+        case _:  # game
             claims, price, notes = await _game_claims(
                 client, settings, canonical.get("igdb"), observations
             )
@@ -473,17 +484,30 @@ async def capture_candidates(
     return out
 
 
-# --- tech (search-first, no Tier-0 DB) -----------------------------------
-def _tech_report(query: str, settings: Settings, region: str | None) -> RdReport:
-    """Build the policy scaffold for a tech lookup: category, region, search guidance.
+# --- tech -----------------------------------------------------------------
+@dataclass(frozen=True, slots=True)
+class _TechPolicy:
+    """The per-category scaffold every tech answer carries, dated or not."""
 
-    There is no structured tech source, so this never carries dates — it tells the
-    /rd skill *how* to web-search (region-scoped, preferred domains) and *how* to
-    reason about price (predecessor anchor, adjusted for part-cost swings).
+    info: TechInfo
+    region: str
+    notes: tuple[str, ...]
+
+
+def _tech_policy(query: str, settings: Settings, region: str | None) -> _TechPolicy:
+    """Category, the region this lookup is scoped to, and how to reason about price.
+
+    Shared by the dated and the date-less paths on purpose. Knowing *when* the Xperia ships
+    says nothing about *what it costs*, so the predecessor-MSRP guidance stays relevant even
+    on a hit — and region matters more once there is a date, not less.
     """
-    category = classify_tech(query)
-    info = tech_info(category)
-    reg = (region or (settings.regions[0] if settings.regions else _DEFAULT_TECH_REGION)).upper()
+    info = tech_info(classify_tech(query))
+    # The ANY/* sentinel in RDT_REGIONS means "region doesn't gate me — I use a VPN". That is
+    # true of a stream and categorically false of a device: you can't VPN a phone into your
+    # hands. So tech reads past the sentinel to a real market rather than scoping a launch
+    # date to "ANY", which would be no scope at all.
+    home = next((r for r in settings.regions if r not in REGION_WILDCARD), None)
+    reg = (region or home or _DEFAULT_TECH_REGION).upper()
     price_note = (
         "Anchor price to the predecessor's MSRP in this region, but adjust for component / "
         "part-cost swings (DRAM/NAND, panels, silicon node, tariffs, FX) — last-gen price is a "
@@ -494,24 +518,101 @@ def _tech_report(query: str, settings: Settings, region: str | None) -> RdReport
             "part-cost swings are minor here."
         )
     )
-    notes = (
-        f"Tech has no Tier-0 DB — web-search scoped to {reg}. Region is a HARD constraint for "
-        "tech: launch date and price are per-country (tariffs/taxes/FX/carrier deals) and can't "
-        "be VPN-bypassed.",
-        f"Category: {info.label}. Prefer sources: {', '.join(info.preferred_sources)}.",
-        info.note,
-        price_note,
+    return _TechPolicy(
+        info=info,
+        region=reg,
+        notes=(
+            f"Region is a HARD constraint for tech: launch date and price are per-country "
+            f"(tariffs/taxes/FX/carrier deals) and can't be VPN-bypassed — scoped to {reg}.",
+            f"Category: {info.label}. Prefer sources: {', '.join(info.preferred_sources)}.",
+            info.note,
+            price_note,
+        ),
     )
+
+
+async def _tech_lookup(
+    client: httpx.AsyncClient, query: str, settings: Settings, region: str | None
+) -> RdReport:
+    """A device: Wikidata's dates if it knows the thing, the search scaffold if not.
+
+    The floor matters more here than elsewhere. ``wbsearchentities`` matches every item in
+    Wikidata — people, concepts, ships — and a Wikidata candidate has no popularity to break
+    ties with, so title similarity is doing all the work. Below the floor we would rather
+    say "go and search" than hand back some unrelated item's release date.
+    """
+    cands = await _search_kind(client, query, MediaKind.TECH, settings)
+    top = cands[0] if cands else None
+    if top is None or top.score < _MATCH_FLOOR:
+        return _tech_report(query, settings, region)
+    return await report_for_candidate(
+        client, query, MediaKind.TECH, top, settings, region=region
+    )
+
+
+def _tech_report(query: str, settings: Settings, region: str | None) -> RdReport:
+    """The date-less tech answer: the policy scaffold and nothing more.
+
+    Reached when Wikidata has no item for the device, which is the common case — it knows a
+    small fraction of consumer tech. This never carries dates; it tells the /rd skill *how*
+    to web-search (region-scoped, preferred domains) and *how* to reason about price.
+    """
+    policy = _tech_policy(query, settings, region)
     return RdReport(
         query=query,
         found=False,
         kind=MediaKind.TECH,
         matched_title=query,
-        category=info.label,
-        region=reg,
-        preferred_sources=info.preferred_sources,
-        notes=notes,
+        category=policy.info.label,
+        region=policy.region,
+        preferred_sources=policy.info.preferred_sources,
+        notes=(
+            "No Wikidata item for this device — no structured date, so web-search it.",
+            *policy.notes,
+        ),
     )
+
+
+def _tech_claims(obs: list[ReleaseObservation], policy: _TechPolicy) -> tuple[list[Claim], str]:
+    """Dated answers for a device — the requested market first, other markets as context.
+
+    Region is not decoration here. A phone launches and is priced per country, so a US date
+    is not an answer for someone in DE; the claims stay labelled by market rather than being
+    collapsed into one "release date" that silently belongs to somebody else's country.
+    """
+    dated = [o for o in obs if o.release_date is not None]
+    if not dated:
+        return [], "Wikidata has the device but no release date on it yet."
+
+    def rank(o: ReleaseObservation) -> tuple[int, date]:
+        # the user's market first, then worldwide, then everyone else's
+        home = 0 if o.region == policy.region else (1 if o.region == "WW" else 2)
+        assert o.release_date is not None
+        return home, o.release_date
+
+    claims = [
+        Claim(
+            "Release" if o.region in (policy.region, "WW") else f"Release ({o.region})",
+            o.release_date,
+            o.precision,
+            "confirmed" if o.certainty is Certainty.CONFIRMED else "speculative",
+            o.confidence,
+            None,
+            f"Wikidata{' · window' if o.date_end is not None else ''}",
+            o.region,
+        )
+        for o in sorted(dated, key=rank)
+    ]
+    markets = {o.region for o in dated}
+    note = (
+        f"Dated for {policy.region} specifically."
+        if policy.region in markets
+        else (
+            f"No {policy.region} date on Wikidata — showing "
+            f"{', '.join(sorted(markets))}. Confirm the local launch before relying on it."
+        )
+    )
+    return claims, note
 
 
 async def _none() -> None:
