@@ -275,9 +275,7 @@ def _observation(
         precision=precision,
         # A dated Wikidata statement is a sourced fact, not a guess; a bare year is too
         # coarse to read as an announcement.
-        certainty=(
-            Certainty.ESTIMATED if precision is DatePrecision.YEAR else Certainty.CONFIRMED
-        ),
+        certainty=(Certainty.ESTIMATED if precision is DatePrecision.YEAR else Certainty.CONFIRMED),
         source_tier=SourceTier.AGGREGATOR,  # crowd-sourced, not a first-party store
         provider="wikidata",
         source_name="Wikidata",
@@ -346,7 +344,6 @@ def parse_observations(
     return out
 
 
-
 def parse_candidates(payload: dict[str, Any], limit: int) -> list[Candidate]:
     """Search hits as candidates. Wikidata search carries no date, so ``year`` stays None."""
     hits = payload.get("search")
@@ -392,9 +389,7 @@ class WikidataSource:
         if skip or qid is None or _QID_RE.fullmatch(qid) is None:
             return SourceResult()
         try:
-            payload = cast(
-                "dict[str, Any]", await get_json(client, _ENTITY_DATA.format(qid=qid))
-            )
+            payload = cast("dict[str, Any]", await get_json(client, _ENTITY_DATA.format(qid=qid)))
         except Exception as exc:
             log.warning("wikidata.fetch_error", entity=entity.title, qid=qid, error=str(exc))
             return SourceResult()

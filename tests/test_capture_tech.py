@@ -105,9 +105,7 @@ async def test_a_tracked_miss_still_carries_the_search_policy(
 
 
 @pytest.mark.asyncio
-async def test_a_movie_miss_stays_untracked(
-    db: Database, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_a_movie_miss_stays_untracked(db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
     """The other half of the rule, so the fallback can't be over-applied: an unpinned movie
     is an un-enrichable stub and is better surfaced as "not tracked" than silently added."""
 
@@ -144,9 +142,7 @@ def _report_stub(kind: MediaKind) -> Callable[..., Coroutine[Any, Any, RdReport]
 
 
 @pytest.mark.asyncio
-async def test_a_wikidata_hit_pins_the_qid(
-    db: Database, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_a_wikidata_hit_pins_the_qid(db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
     """The other side of the coin — a hit is pinned, so the puller uses the id directly
     instead of searching, and the card can deep-link from it."""
     monkeypatch.setattr(WikidataSource, "search_candidates", _one_candidate)

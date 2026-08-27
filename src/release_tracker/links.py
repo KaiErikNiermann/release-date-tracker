@@ -76,19 +76,19 @@ _SPECS: Final[dict[str, _Spec]] = {
         kind_segment={MediaKind.MOVIE: "movie", MediaKind.TV: "tv"},
     ),
     "igdb": _Spec("IGDB", "https://www.igdb.com/games/{id}", puller="igdb"),
-    "steam_appid": _Spec(
-        "Steam", "https://store.steampowered.com/app/{id}", puller="steam"
-    ),
+    "steam_appid": _Spec("Steam", "https://store.steampowered.com/app/{id}", puller="steam"),
     "wikidata": _Spec("Wikidata", "https://www.wikidata.org/wiki/{id}", puller="wikidata"),
     "gsmarena": _Spec(
         "GSMArena", "https://www.gsmarena.com/model-{id}.php", reason=_LICENCE_DECLINED
     ),
     "techpowerup_gpu": _Spec(
-        "TechPowerUp GPU", "https://www.techpowerup.com/gpu-specs/wd.{id}",
+        "TechPowerUp GPU",
+        "https://www.techpowerup.com/gpu-specs/wd.{id}",
         reason=_LICENCE_DECLINED,
     ),
     "techpowerup_cpu": _Spec(
-        "TechPowerUp CPU", "https://www.techpowerup.com/cpu-specs/_.{id}",
+        "TechPowerUp CPU",
+        "https://www.techpowerup.com/cpu-specs/_.{id}",
         reason=_LICENCE_DECLINED,
     ),
     # The numeric SKU id alone resolves — Intel redirects it to the slugged url. There is no
@@ -101,9 +101,7 @@ _SPECS: Final[dict[str, _Spec]] = {
         reason="no way to search ARK programmatically — open it for the launch date",
     ),
     "imdb": _Spec("IMDb", "https://www.imdb.com/title/{id}/", reason=_NO_STRUCTURE),
-    "metacritic": _Spec(
-        "Metacritic", "https://www.metacritic.com/{id}", reason=_NO_STRUCTURE
-    ),
+    "metacritic": _Spec("Metacritic", "https://www.metacritic.com/{id}", reason=_NO_STRUCTURE),
     "official_website": _Spec("Official site", "{id}", reason=_NO_STRUCTURE),
 }
 

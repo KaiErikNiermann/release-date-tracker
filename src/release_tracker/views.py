@@ -729,9 +729,7 @@ def _source_urls(db: Database, entity_id: str) -> dict[str, str]:
     pages are addressed by slug.
     """
     return {
-        obs.provider: obs.source_url
-        for obs in db.iter_observations(entity_id)
-        if obs.source_url
+        obs.provider: obs.source_url for obs in db.iter_observations(entity_id) if obs.source_url
     }
 
 

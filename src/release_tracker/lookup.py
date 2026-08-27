@@ -545,9 +545,7 @@ async def _tech_lookup(
     top = cands[0] if cands else None
     if top is None or top.score < _MATCH_FLOOR:
         return _tech_report(query, settings, region)
-    return await report_for_candidate(
-        client, query, MediaKind.TECH, top, settings, region=region
-    )
+    return await report_for_candidate(client, query, MediaKind.TECH, top, settings, region=region)
 
 
 def _tech_report(query: str, settings: Settings, region: str | None) -> RdReport:

@@ -127,9 +127,7 @@ def test_a_pinned_intel_ark_sku_deep_links() -> None:
     """ARK has no puller — no API, a client-rendered search page, and no Wikidata property to
     bridge from — so a SKU only ever arrives by hand. When it does, the numeric id alone
     resolves; Intel redirects it to the slugged url."""
-    cpu = Entity.create(
-        "Core Ultra 9 285K", MediaKind.TECH, external_ids={"intel_ark": "241060"}
-    )
+    cpu = Entity.create("Core Ultra 9 285K", MediaKind.TECH, external_ids={"intel_ark": "241060"})
     link = _by_provider(work_sources(cpu))["intel_ark"]
     assert link.access is SourceAccess.LINK
     assert link.url.endswith("/products/sku/241060/specifications.html")

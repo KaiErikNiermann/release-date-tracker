@@ -272,6 +272,6 @@ def test_candidates_tolerate_a_missing_description() -> None:
 
 
 def test_candidates_on_a_miss_are_empty() -> None:
-    """"Poco X7" really does return nothing — the miss is the expected case, not an error."""
+    """ "Poco X7" really does return nothing — the miss is the expected case, not an error."""
     assert parse_candidates({"search": []}, 6) == []
     assert parse_candidates({}, 6) == []

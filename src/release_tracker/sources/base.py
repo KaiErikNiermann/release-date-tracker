@@ -17,9 +17,7 @@ from tenacity import (
 from release_tracker.config import Settings
 from release_tracker.models import CreditRole, Entity, MediaKind, NodeKind, ReleaseObservation
 
-USER_AGENT = (
-    "release-date-tracker/0.1 (+https://github.com/KaiErikNiermann/release-date-tracker)"
-)
+USER_AGENT = "release-date-tracker/0.1 (+https://github.com/KaiErikNiermann/release-date-tracker)"
 DEFAULT_TIMEOUT = httpx.Timeout(20.0, connect=10.0)
 
 
