@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 
 import httpx
 
+from release_tracker.clock import utc_now, utc_today
 from release_tracker.config import Settings
 from release_tracker.db import Database
 from release_tracker.logging import get_logger
@@ -179,7 +179,7 @@ def persist_availability(db: Database, entity: Entity, avail: JustWatchAvailabil
             source_name=f"JustWatch · {avail.earliest_vod_platform}",
             source_quote=where,
             confidence=0.95,
-            fetched_at=datetime.now(UTC),
+            fetched_at=utc_now(),
         )
     )
     return 1
@@ -199,7 +199,7 @@ async def _refresh_offers(
     if entity.season is not None:  # show-level offers can't answer a specific season's digital date
         return
     obs = list(db.iter_observations(entity.id))
-    hint = year_hint([o.release_date for o in obs if o.release_date], datetime.now(UTC).date())
+    hint = year_hint([o.release_date for o in obs if o.release_date], utc_today())
     avail = await justwatch.availability(
         client, entity.title, entity.kind, countries=settings.justwatch_regions, year=hint
     )

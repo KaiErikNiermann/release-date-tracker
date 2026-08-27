@@ -8,11 +8,12 @@ not the HTTP fan-out itself.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import date
 from pathlib import Path
 
 from release_tracker import cli, views
 from release_tracker.capture import entity_for
+from release_tracker.clock import utc_now
 from release_tracker.config import Settings, get_settings
 from release_tracker.db import Database
 from release_tracker.lookup import RdReport
@@ -58,7 +59,7 @@ def _seed(
             certainty=Certainty.CONFIRMED,
             source_tier=SourceTier.AGGREGATOR,
             provider="tmdb",
-            fetched_at=datetime.now(UTC),
+            fetched_at=utc_now(),
         )
     )
     return ent

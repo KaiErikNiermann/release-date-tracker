@@ -18,13 +18,14 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, cast
 
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
+from release_tracker.clock import utc_now
 from release_tracker.config import Settings, secret
 from release_tracker.logging import get_logger
 from release_tracker.models import (
@@ -192,7 +193,7 @@ def collect_batch(
         log.info("extract.batch.pending", batch_id=batch_id, status=batch.status)
         return []
     content = client.files.content(batch.output_file_id).text
-    now = datetime.now(UTC)
+    now = utc_now()
     observations: list[ReleaseObservation] = []
     for line in content.splitlines():
         if not line.strip():

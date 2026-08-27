@@ -11,11 +11,12 @@ Free API key: https://www.themoviedb.org/settings/api
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from typing import Any, cast
 
 import httpx
 
+from release_tracker.clock import utc_now
 from release_tracker.config import Settings, secret
 from release_tracker.logging import get_logger
 from release_tracker.models import (
@@ -126,7 +127,7 @@ class TmdbSource:
                 client, f"{BASE}/movie/{tmdb_id}/release_dates", params={"api_key": key}
             ),
         )
-        now = datetime.now(UTC)
+        now = utc_now()
         observations: list[ReleaseObservation] = []
         for block in cast("list[dict[str, Any]]", payload.get("results", [])):
             region = str(block.get("iso_3166_1", "WW"))
@@ -171,7 +172,7 @@ class TmdbSource:
         if tmdb_id is None:
             return SourceResult()
 
-        now = datetime.now(UTC)
+        now = utc_now()
         observations: list[ReleaseObservation] = []
         url = f"https://www.themoviedb.org/tv/{tmdb_id}"
         air: date | None = None

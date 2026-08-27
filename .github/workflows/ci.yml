@@ -35,6 +35,8 @@ jobs:
         run: poetry run ruff check src tests
       - name: Format check
         run: poetry run ruff format --check src tests
+      - name: Project rules (semgrep)
+        run: poetry run semgrep --config .semgrep/ --error --quiet src tests
       - name: Type-check (strict)
         run: poetry run pyright src tests
 

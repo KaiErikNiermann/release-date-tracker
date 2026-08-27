@@ -8,6 +8,9 @@ poetry run ruff check src
 echo "[pre-push] ruff format --check…"
 poetry run ruff format --check src
 
+echo "[pre-push] semgrep (project rules)…"
+poetry run semgrep --config .semgrep/ --error --quiet src tests
+
 echo "[pre-push] pyright (strict)…"
 poetry run pyright src
 

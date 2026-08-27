@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from release_tracker import views
+from release_tracker.clock import utc_now
 from release_tracker.config import Settings, get_settings
 from release_tracker.db import Database
 from release_tracker.models import (
@@ -48,7 +49,7 @@ def _seed_work(
     ent = Entity.create(title, MediaKind.MOVIE, consumption_state=state)
     db.upsert_entity(ent)
     db.upsert_node(Node(id=ent.id, node_kind=NodeKind.WORK, name=title, owned=True))
-    stamp = fetched_at or datetime.now(UTC)
+    stamp = fetched_at or utc_now()
     db.upsert_observation(
         ReleaseObservation(
             entity_id=ent.id,
@@ -569,7 +570,7 @@ def _retail(entity: Entity, region: str, when: date) -> ReleaseObservation:
         source_name="Wikidata",
         source_url="https://www.wikidata.org/wiki/Q1",
         confidence=0.7,
-        fetched_at=datetime.now(UTC),
+        fetched_at=utc_now(),
     )
 
 

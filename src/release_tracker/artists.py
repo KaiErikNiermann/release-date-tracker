@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, replace
-from datetime import UTC, date, datetime
+from datetime import date
 
 import httpx
 
 from release_tracker import views
+from release_tracker.clock import utc_now, utc_today
 from release_tracker.config import Settings, secret
 from release_tracker.db import Database
 from release_tracker.logging import get_logger
@@ -253,7 +254,7 @@ async def refresh_artist(
                 title=activity.title,
                 url=activity.url,
                 posted_at=activity.posted_at,
-                fetched_at=datetime.now(UTC),
+                fetched_at=utc_now(),
             )
             updated += 1
     return updated
@@ -288,7 +289,7 @@ async def _latest_for(
 
 
 def _utc_today() -> date:
-    return datetime.now(UTC).date()
+    return utc_today()
 
 
 # --- the /rd-artist JSON contract -----------------------------------------

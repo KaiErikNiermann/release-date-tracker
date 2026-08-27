@@ -16,9 +16,10 @@ import sqlite3
 from collections.abc import Generator, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from pathlib import Path
 
+from release_tracker.clock import utc_now
 from release_tracker.models import (
     ArtistLink,
     Certainty,
@@ -216,7 +217,7 @@ class Database:
 
     # -- entities ----------------------------------------------------------
     def upsert_entity(self, entity: Entity) -> None:
-        now = datetime.now(UTC).isoformat()
+        now = utc_now().isoformat()
         with self._tx() as conn:
             conn.execute(
                 """
@@ -281,7 +282,7 @@ class Database:
         with self._tx() as conn:
             cur = conn.execute(
                 "UPDATE entities SET consumption_state = ?, updated_at = ? WHERE id = ?",
-                (state.value, datetime.now(UTC).isoformat(), entity_id),
+                (state.value, utc_now().isoformat(), entity_id),
             )
             return cur.rowcount > 0
 
@@ -290,7 +291,7 @@ class Database:
         with self._tx() as conn:
             conn.execute(
                 "INSERT INTO media_notes (entity_id, body, created_at) VALUES (?, ?, ?)",
-                (entity_id, body, datetime.now(UTC).isoformat()),
+                (entity_id, body, utc_now().isoformat()),
             )
 
     def iter_notes(self, entity_id: str) -> tuple[NoteLine, ...]:
@@ -371,7 +372,7 @@ class Database:
         with self._tx() as conn:
             conn.execute(
                 "UPDATE entities SET external_ids = ?, updated_at = ? WHERE id = ?",
-                (json.dumps(merged), datetime.now(UTC).isoformat(), entity_id),
+                (json.dumps(merged), utc_now().isoformat(), entity_id),
             )
 
     # -- observations ------------------------------------------------------
@@ -446,7 +447,7 @@ class Database:
     # -- graph: nodes ------------------------------------------------------
     def upsert_node(self, node: Node) -> None:
         """Idempotent on id. ``owned`` is sticky-true: re-resolving never un-owns."""
-        now = datetime.now(UTC).isoformat()
+        now = utc_now().isoformat()
         with self._tx() as conn:
             conn.execute(
                 """
@@ -543,7 +544,7 @@ class Database:
         with self._tx() as conn:
             cur = conn.execute(
                 "UPDATE nodes SET followed = ?, updated_at = ? WHERE id = ?",
-                (int(followed), datetime.now(UTC).isoformat(), node_id),
+                (int(followed), utc_now().isoformat(), node_id),
             )
             return cur.rowcount > 0
 
@@ -646,7 +647,7 @@ class Database:
                     "resolve_date": cond.resolve_date.isoformat() if cond.resolve_date else None,
                     "precision": cond.precision.value,
                     "note": cond.note,
-                    "updated_at": datetime.now(UTC).isoformat(),
+                    "updated_at": utc_now().isoformat(),
                 },
             )
 
@@ -733,7 +734,7 @@ def _insert_observation(conn: sqlite3.Connection, obs: ReleaseObservation) -> No
             "source_quote": obs.source_quote,
             "published_at": obs.published_at.isoformat() if obs.published_at else None,
             "confidence": obs.confidence,
-            "fetched_at": (obs.fetched_at or datetime.now(UTC)).isoformat(),
+            "fetched_at": (obs.fetched_at or utc_now()).isoformat(),
             "contingencies": json.dumps(obs.contingencies),
         },
     )
@@ -768,7 +769,7 @@ def _insert_edge(conn: sqlite3.Connection, edge: Edge) -> None:
             "source_tier": int(edge.source_tier),
             "confidence": edge.confidence,
             "owned": int(edge.owned),
-            "fetched_at": (edge.fetched_at or datetime.now(UTC)).isoformat(),
+            "fetched_at": (edge.fetched_at or utc_now()).isoformat(),
         },
     )
 

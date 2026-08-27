@@ -1,0 +1,16 @@
+# Replaces semgrep's built-in ignore list, whose defaults exclude `tests/` — this project
+# deliberately lints its tests, because a copy-pasted helper is exactly the kind of thing
+# that breeds there and only fails on the slow CI runner.
+
+.git/
+.venv/
+venv/
+__pycache__/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+dist/
+build/
+*.egg-info/
+node_modules/
+data/

@@ -16,13 +16,14 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Final
 
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
+from release_tracker.clock import utc_now
 from release_tracker.config import Settings, secret
 from release_tracker.deltas import match_studio, predicted_platform
 from release_tracker.logging import get_logger
@@ -102,7 +103,7 @@ class PlatformStore:
         ).fetchone()
         if row is None:
             return None
-        if datetime.now(UTC) - datetime.fromisoformat(row["resolved_at"]) > self.ttl:
+        if utc_now() - datetime.fromisoformat(row["resolved_at"]) > self.ttl:
             return None
         return str(row["platform"])
 
@@ -116,7 +117,7 @@ class PlatformStore:
                 platform=excluded.platform,
                 resolved_at=excluded.resolved_at
             """,
-            (studio_key, studio_name, platform, datetime.now(UTC).isoformat()),
+            (studio_key, studio_name, platform, utc_now().isoformat()),
         )
         self._conn.commit()
 

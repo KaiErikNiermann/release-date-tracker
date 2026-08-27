@@ -13,12 +13,13 @@ canonical id is missing.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
-from datetime import UTC, datetime
+from datetime import datetime
 
 import httpx
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
+from release_tracker.clock import utc_now
 from release_tracker.config import Settings, secret
 from release_tracker.db import Database
 from release_tracker.deltas import (
@@ -94,7 +95,7 @@ async def enrich_work(
     if graph is None:
         return EnrichSummary(resolved=False)
 
-    now = datetime.now(UTC)
+    now = utc_now()
     provider = _provider(entity.kind)
     summary = EnrichSummary(resolved=True)
 

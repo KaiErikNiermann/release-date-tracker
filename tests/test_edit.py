@@ -8,13 +8,14 @@ mutation lands the right entity/node/edge state.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import UTC, date, datetime
+from datetime import date
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
 from release_tracker import cli, edits
+from release_tracker.clock import utc_now
 from release_tracker.db import Database
 from release_tracker.lookup import RdReport
 from release_tracker.models import (
@@ -453,7 +454,7 @@ def _seed_obs(db: Database, entity_id: str, channel: ReleaseChannel, provider: s
             provider=provider,
             source_name=provider,
             confidence=0.3,
-            fetched_at=datetime.now(UTC),
+            fetched_at=utc_now(),
         )
     )
 
@@ -558,7 +559,7 @@ def test_clear_date_spares_the_pulled_observation(work: tuple[Database, Entity])
             certainty=Certainty.CONFIRMED,
             source_tier=SourceTier.AGGREGATOR,
             provider="tmdb",
-            fetched_at=datetime.now(UTC),
+            fetched_at=utc_now(),
         )
     )
     edits.set_date(db, ent, ReleaseChannel.DIGITAL, "2027")

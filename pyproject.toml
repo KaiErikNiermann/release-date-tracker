@@ -47,6 +47,9 @@ pytest = ">=9.1.1"
 textual-dev = "^1.8.0"
 pytest-asyncio = "^1.4.0"
 radon = "^6.0.1"
+semgrep = "^1.175.0"
+pyyaml = "^6.0.3"
+types-pyyaml = "^6.0.12.20260815"
 
 [build-system]
 requires = ["poetry-core>=2.0"]

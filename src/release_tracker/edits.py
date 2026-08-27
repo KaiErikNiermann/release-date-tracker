@@ -18,8 +18,9 @@ from __future__ import annotations
 
 from collections.abc import Collection
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import date
 
+from release_tracker.clock import utc_now
 from release_tracker.dates_edtf import parse_edtf, to_edtf
 from release_tracker.db import Database
 from release_tracker.models import (
@@ -128,7 +129,7 @@ def set_date(db: Database, entity: Entity, channel: ReleaseChannel, edtf: str) -
             source_name=MANUAL_SOURCE,
             source_quote=canonical,
             confidence=1.0 if confirmed else 0.5,
-            fetched_at=datetime.now(UTC),
+            fetched_at=utc_now(),
         )
     )
     return DateEdit(

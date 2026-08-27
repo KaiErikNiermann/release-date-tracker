@@ -1,0 +1,115 @@
+# Project conventions, restricted to the ones a matcher can judge.
+#
+# The global guidelines contain plenty that is genuinely nuanced — walrus vs plain control flow,
+# `match` vs if/elif, `tuple[T, ...]` vs `list[T]`, enums over magic strings. Those are judgement
+# calls where the right answer depends on what the code means, and a rule that fires on them trains
+# people to ignore the linter. None of them are here.
+#
+# What IS here: conventions where the detection is unambiguous AND the replacement is right almost
+# every time. Anything that failed either test was left out on purpose, and the notable omissions
+# are recorded below with the reason.
+rules:
+  - id: naive-datetime-now
+    languages: [python]
+    severity: ERROR
+    message: >-
+      `datetime.now()` with no tzinfo returns a naive local-time value. Every timestamp this
+      project stores is UTC-aware — `ReleaseObservation.fetched_at`, the cache's `computed_at`,
+      the platform map's `resolved_at` — so a naive value compares equal to none of them and
+      subtracts wrongly by the local offset. Use `clock.utc_now()`, or `clock.utc_today()` for
+      a date.
+    paths:
+      exclude:
+        - "src/release_tracker/clock.py"
+    pattern: datetime.now()
+
+  - id: utcnow-is-deprecated-and-naive
+    languages: [python]
+    severity: ERROR
+    message: >-
+      `datetime.utcnow()` returns a NAIVE datetime holding UTC — the worst combination, because
+      it compares equal to nothing and subtracts wrongly from anything aware. Deprecated since
+      3.12. Use `clock.utc_now()`.
+    pattern-either:
+      - pattern: datetime.utcnow()
+      - pattern: datetime.utcfromtimestamp(...)
+
+  - id: unwrap-credentials-through-the-helper
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Call `config.secret(value)` rather than `.get_secret_value()` directly. The six credentials
+      are `SecretStr` so they cannot leak through a repr or a traceback; routing every unwrap
+      through one helper is what keeps the places a credential escapes into a request greppable.
+      This fired once on real code, in `config_file.coerce`.
+    paths:
+      exclude:
+        - "src/release_tracker/config.py"
+    pattern: $X.get_secret_value()
+
+  - id: secretstr-duck-typed-instead-of-checked
+    languages: [python]
+    severity: ERROR
+    message: >-
+      `hasattr(x, "get_secret_value")` is a hand-rolled isinstance against a type that is
+      imported two lines up. Use `isinstance(x, SecretStr)`, or just call `config.secret(x)`,
+      which already handles None. Found once, in the settings screen.
+    pattern: hasattr($X, "get_secret_value")
+
+  - id: str-on-a-credential-renders-the-mask
+    languages: [python]
+    severity: ERROR
+    message: >-
+      `str()` on a `SecretStr` returns "**********", which type-checks cleanly and silently
+      substitutes a mask for the value. This is not hypothetical — it shipped twice in one
+      afternoon here, once into an Authorization header and once into the config writer, which
+      would have persisted the mask to disk as if it were the key. Use `config.secret(...)`.
+    pattern-either:
+      - pattern: str($X.get_secret_value())
+      - pattern: f"...{$S.tmdb_api_key}..."
+      - pattern: f"...{$S.openai_api_key}..."
+      - pattern: f"...{$S.notion_token}..."
+      - pattern: f"...{$S.twitch_client_id}..."
+      - pattern: f"...{$S.twitch_client_secret}..."
+
+  - id: append-only-loop-should-be-a-comprehension
+    languages: [python]
+    severity: INFO
+    message: >-
+      A loop whose entire body is one `.append()` is a comprehension. The convention reserves
+      explicit loops for bodies with side effects, branching, or multiple statements — this has
+      none of them.
+    patterns:
+      # A loop with any other statement in its body does not match this at all — semgrep
+      # anchors the block, so the multi-statement case needs no exclusion. Writing one
+      # anyway is actively harmful: `...` matches *zero* statements, so a `pattern-not`
+      # ending in `...` cancels the positive pattern and the rule silently never fires.
+      # That is how this rule spent its first draft matching nothing.
+      - pattern: |
+          for $X in $IT:
+              $OUT.append($E)
+      # Grouping into a bucket — `by_channel[obs.channel].append(obs)` — is not a
+      # comprehension, and three of this rule's four original hits were exactly that.
+      # A `pattern-not` on the subscript shape does NOT exclude them (semgrep still binds
+      # $OUT to the whole subscript in the positive pattern); constraining $OUT to a bare
+      # identifier does, and takes the rule from 3 false positives to 0.
+      - metavariable-regex:
+          metavariable: $OUT
+          regex: ^[A-Za-z_][A-Za-z0-9_]*$
+
+# DELIBERATELY ABSENT
+#
+# - A rule against reading `os.environ` outside `config.py`. It looks like a clean layering
+#   rule, but the three sites that do it are all *asking whether a variable shadows the config
+#   file* — `config_file.origins` and `rdt config set`'s warning — which is a question about
+#   the environment itself, not a way of reading a setting. A rule that fires on the only
+#   correct implementations of the thing it is protecting teaches people to ignore it.
+#
+# - A rule against `print()` in library code. The global guidance is about diagnostics, and
+#   this project already routes those through structlog; the remaining `print` calls are a CLI
+#   deliberately writing machine-readable output (`rdt config path` exists to be scripted
+#   against, and Rich would wrap the path). Distinguishing the two needs judgement.
+#
+# - A rule against bare `dict`/`list` annotations. Pyright in strict mode already rejects them,
+#   so a semgrep rule would only duplicate an error the type checker gives with better location
+#   information.

@@ -8,13 +8,14 @@ build instead of being discouraged in a comment.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import date
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
 from release_tracker import cli, query, views
+from release_tracker.clock import utc_now
 from release_tracker.config import get_settings
 from release_tracker.db import Database
 from release_tracker.models import (
@@ -69,7 +70,7 @@ def _work(
                 provider="test",
                 source_name="test",
                 confidence=1.0,
-                fetched_at=datetime.now(UTC),
+                fetched_at=utc_now(),
             )
         ]
     )

@@ -9,7 +9,7 @@ do (the state-toggle flush in particular).
 from __future__ import annotations
 
 import sys
-from datetime import UTC, date, datetime
+from datetime import date
 from itertools import pairwise
 from pathlib import Path
 from typing import TextIO
@@ -18,6 +18,7 @@ import pytest
 from textual.widgets import DataTable, Input, Static
 
 from release_tracker import query, views
+from release_tracker.clock import utc_now
 from release_tracker.config import Settings, get_settings
 from release_tracker.db import Database
 from release_tracker.models import (
@@ -83,7 +84,7 @@ def _seed(db: Database) -> dict[str, Entity]:
                     provider="test",
                     source_name="test",
                     confidence=1.0,
-                    fetched_at=datetime.now(UTC),
+                    fetched_at=utc_now(),
                 )
             ]
         )

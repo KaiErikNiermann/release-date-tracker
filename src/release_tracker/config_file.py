@@ -26,7 +26,14 @@ from typing import Final, Literal
 from pydantic import SecretStr
 from pydantic_settings import DotEnvSettingsSource
 
-from release_tracker.config import ConfigFileError, Settings, config_file_path, env_file_paths
+from release_tracker.config import (
+    ConfigFileError,
+    Settings,
+    config_file_path,
+    env_file_paths,
+    field_name_for,
+    secret,
+)
 
 __all__ = [
     "FIELD_DOCS",
@@ -155,20 +162,16 @@ def coerce(updates: Mapping[str, str]) -> dict[str, TomlScalar]:
     if bad := sorted(name for name in updates if _alias_of(name) is None):
         raise KeyError(f"not a setting: {', '.join(bad)}")
     settings = Settings(**updates)  # type: ignore[arg-type] - alias-keyed, which is the contract
-    by_alias = {
-        field.alias: name
-        for name, field in Settings.model_fields.items()
-        if field.alias is not None
-    }
     out: dict[str, TomlScalar] = {}
     for name in updates:
         alias = _alias_of(name)
-        assert alias is not None  # guarded above
-        value = getattr(settings, by_alias[alias])
+        field = field_name_for(alias) if alias is not None else None
+        assert alias is not None and field is not None  # guarded above
+        value = getattr(settings, field)
         # A credential comes back wrapped, and `str()` on it is "**********" — writing that
         # would persist a mask as if it were the key, and nothing downstream would object.
         if isinstance(value, SecretStr):
-            out[alias] = value.get_secret_value()
+            out[alias] = secret(value) or ""
         else:
             out[alias] = value if _is_scalar(value) else str(value)
     return out

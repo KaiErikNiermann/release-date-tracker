@@ -11,7 +11,7 @@ Nothing here touches the network: the card reaches it through one module-level n
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, date, datetime
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +19,8 @@ import pytest
 from textual.containers import VerticalScroll
 from textual.widgets import DataTable, Static
 
+from conftest import until
+from release_tracker.clock import utc_now
 from release_tracker.config import Settings, get_settings
 from release_tracker.db import Database
 from release_tracker.models import (
@@ -43,18 +45,6 @@ from release_tracker.tui.edit import EditScreen
 TODAY = date(2026, 8, 27)
 
 
-async def _until(pilot: Any, predicate: Any, what: str, timeout: float = 5.0) -> None:
-    """Poll rather than sleep a guessed interval — the Windows runners are much slower."""
-    waited = 0.0
-    while waited < timeout:
-        await pilot.pause()
-        if predicate():
-            return
-        await asyncio.sleep(0.02)
-        waited += 0.02
-    raise AssertionError(f"timed out waiting for {what}")
-
-
 def _add(db: Database, title: str, kind: MediaKind, ids: dict[str, str]) -> Entity:
     ent = Entity.create(title, kind, external_ids=ids).model_copy(
         update={"consumption_state": ConsumptionState.WANT}
@@ -75,7 +65,7 @@ def _add(db: Database, title: str, kind: MediaKind, ids: dict[str, str]) -> Enti
                 source_name="Wikidata",
                 source_url="https://www.wikidata.org/wiki/Q139719408",
                 confidence=0.7,
-                fetched_at=datetime.now(UTC),
+                fetched_at=utc_now(),
             )
         ]
     )
@@ -157,8 +147,8 @@ async def test_update_refreshes_then_opens_the_edit_form(
     async with app.run_test(size=(150, 40)) as pilot:
         card = await _open_card(pilot, app)
         await pilot.press("u")
-        await _until(pilot, lambda: bool(called), "the refresh to run")
-        await _until(pilot, lambda: isinstance(app.screen, EditScreen), "the edit form to open")
+        await until(pilot, lambda: bool(called), "the refresh to run")
+        await until(pilot, lambda: isinstance(app.screen, EditScreen), "the edit form to open")
         assert called == [card.entity.id]
 
 
@@ -178,7 +168,7 @@ async def test_an_errored_refresh_says_so_and_stays_on_the_card(
     async with app.run_test(size=(150, 40)) as pilot:
         card = await _open_card(pilot, app)
         await pilot.press("u")
-        await _until(
+        await until(
             pilot,
             lambda: not card.query_one("#card-body", VerticalScroll).loading,
             "the spinner to clear after the error",
@@ -200,7 +190,7 @@ async def test_a_failed_update_says_so_and_leaves_the_card_usable(
     async with app.run_test(size=(150, 40)) as pilot:
         card = await _open_card(pilot, app)
         await pilot.press("u")
-        await _until(
+        await until(
             pilot,
             lambda: not card.query_one("#card-body", VerticalScroll).loading,
             "the spinner to clear after the failure",
@@ -236,13 +226,13 @@ async def test_a_keystroke_mid_update_does_not_cancel_it(
     async with app.run_test(size=(150, 40)) as pilot:
         card = await _open_card(pilot, app)
         await pilot.press("u")
-        await _until(pilot, started.is_set, "the re-pull to start")
+        await until(pilot, started.is_set, "the re-pull to start")
 
         await pilot.press("right")  # the user fiddles with the state toggle mid-flight
         await pilot.pause()
 
         release.set()
-        await _until(pilot, lambda: bool(finished), "the re-pull to finish despite the keypress")
+        await until(pilot, lambda: bool(finished), "the re-pull to finish despite the keypress")
         assert finished == [card.entity.id]
 
 
@@ -272,7 +262,7 @@ async def test_a_work_with_nothing_automatic_says_so_instead_of_pretending(
                 provider="manual",
                 source_name="Manual (EDTF)",
                 confidence=1.0,
-                fetched_at=datetime.now(UTC),
+                fetched_at=utc_now(),
             )
         ]
     )

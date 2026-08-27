@@ -15,8 +15,10 @@ session and anything monkeypatching the environment afterwards is quietly ignore
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import asyncio
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -32,3 +34,21 @@ def isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
     get_settings.cache_clear()
     yield target
     get_settings.cache_clear()
+
+
+async def until(pilot: Any, predicate: Callable[[], bool], what: str, timeout: float = 5.0) -> None:
+    """Poll for a condition instead of sleeping a guessed interval.
+
+    The Windows runners are several times slower than a local run, so any fixed sleep long
+    enough to be reliable there is dead time everywhere else — and any shorter one is a
+    flake waiting to happen. Shared because three TUI test modules had grown identical
+    copies, which is how one of them ends up with a different timeout nobody notices.
+    """
+    waited = 0.0
+    while waited < timeout:
+        await pilot.pause()
+        if predicate():
+            return
+        await asyncio.sleep(0.02)
+        waited += 0.02
+    raise AssertionError(f"timed out waiting for {what}")

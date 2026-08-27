@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import date
 from pathlib import Path
 
 from release_tracker import views
@@ -13,6 +13,7 @@ from release_tracker.artists import (
     parse_link_spec,
     partition_filmography,
 )
+from release_tracker.clock import utc_now
 from release_tracker.config import get_settings
 from release_tracker.db import Database
 from release_tracker.models import (
@@ -77,7 +78,7 @@ def test_artist_link_roundtrip_and_tiering(tmp_path: Path) -> None:
         title="New video",
         url="watch-url",
         posted_at=date(2026, 6, 10),
-        fetched_at=datetime.now(UTC),
+        fetched_at=utc_now(),
     )
     db.upsert_artist_link(
         ArtistLink(node_id=node.id, platform=SocialPlatform.YOUTUBE, tier=LinkTier.FREE, url="u1b")
@@ -107,7 +108,7 @@ def test_parse_link_spec() -> None:
 def _link(db: Database, node: Node, platform: SocialPlatform, tier: LinkTier, when: date) -> None:
     db.upsert_artist_link(ArtistLink(node_id=node.id, platform=platform, tier=tier, url="u"))
     db.update_link_activity(
-        node.id, platform, title="t", url="latest-url", posted_at=when, fetched_at=datetime.now(UTC)
+        node.id, platform, title="t", url="latest-url", posted_at=when, fetched_at=utc_now()
     )
 
 

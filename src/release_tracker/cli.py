@@ -22,7 +22,7 @@ import io
 import json
 import os
 import sys
-from datetime import UTC, date, datetime
+from datetime import date
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Annotated
@@ -43,7 +43,14 @@ from release_tracker.artists import (
     refresh_artist,
 )
 from release_tracker.capture import CaptureOutcome, run_capture
-from release_tracker.config import Settings, env_file_paths, get_settings, secret
+from release_tracker.clock import utc_now, utc_today
+from release_tracker.config import (
+    Settings,
+    env_file_paths,
+    field_name_for,
+    get_settings,
+    secret,
+)
 from release_tracker.contingency import ResolutionStatus
 from release_tracker.dates_edtf import parse_edtf, to_edtf
 from release_tracker.db import Database
@@ -168,7 +175,7 @@ def _db() -> Database:
 
 
 def _today() -> date:
-    return datetime.now(UTC).date()
+    return utc_today()
 
 
 @seed_app.command("sync")
@@ -1882,7 +1889,7 @@ def edit_contingency(
             provider="manual",
             source_name="Manual (contingency)",
             confidence=1.0 if confirmed else 0.5,
-            fetched_at=datetime.now(UTC),
+            fetched_at=utc_now(),
         )
     )
     db.close()
@@ -2519,7 +2526,7 @@ def doctor() -> None:
     for doc in config_file.FIELD_DOCS:
         if doc.group != "keys":
             continue
-        raw = getattr(settings, _field_for(doc.alias))
+        raw = getattr(settings, field_name_for(doc.alias) or doc.alias, None)
         value = secret(raw) if isinstance(raw, SecretStr) else raw
         shown = config_file.mask(doc.alias, str(value)) if value else ""
         keys.add_row(
@@ -2561,14 +2568,6 @@ def doctor() -> None:
             "\n[dim]Your settings live in a .env. `rdt config migrate` copies them into "
             "the config file, which is what the TUI settings screen writes.[/]"
         )
-
-
-def _field_for(alias: str) -> str:
-    """The attribute behind an alias, so doctor can read a value it only knows by name."""
-    for name, field in Settings.model_fields.items():
-        if field.alias == alias:
-            return name
-    raise KeyError(alias)
 
 
 @config_app.command("path")

@@ -17,6 +17,7 @@ from typing import Any, cast
 import httpx
 
 from release_tracker.cache import TrendCache
+from release_tracker.clock import utc_now, utc_today
 from release_tracker.config import Settings, secret
 from release_tracker.logging import get_logger
 from release_tracker.models import (
@@ -178,7 +179,7 @@ class IgdbSource:
             "list[dict[str, Any]]",
             await post_text(client, RELEASE_DATES_URL, content=body, headers=headers),
         )
-        now = datetime.now(UTC)
+        now = utc_now()
         observations = [
             obs
             for row in rows
@@ -303,7 +304,7 @@ class IgdbSource:
             "list[dict[str, Any]]",
             await post_text(client, GAMES_URL, content=body, headers=headers),
         )
-        today = datetime.now(UTC).date()
+        today = utc_today()
         months: list[int] = []
         for r in rows:
             if str(r.get("id")) == str(exclude):

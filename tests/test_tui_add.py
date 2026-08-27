@@ -16,6 +16,7 @@ import pytest
 from pydantic import SecretStr
 from textual.widgets import Input, OptionList, Static
 
+from conftest import until
 from release_tracker.config import Settings, get_settings
 from release_tracker.db import Database
 from release_tracker.models import Entity, MediaKind
@@ -73,23 +74,6 @@ async def _open_add(app: RdtApp, pilot: Any) -> AddScreen:
     return screen
 
 
-async def _until(pilot: Any, predicate: Any, what: str, timeout: float = 5.0) -> None:
-    """Poll for a condition instead of sleeping a guessed interval.
-
-    The Windows runners are several times slower than a local run, so any fixed sleep long
-    enough to be reliable there is dead time everywhere else — and any shorter one is a
-    flake waiting to happen.
-    """
-    waited = 0.0
-    while waited < timeout:
-        await pilot.pause()
-        if predicate():
-            return
-        await asyncio.sleep(0.02)
-        waited += 0.02
-    raise AssertionError(f"timed out waiting for {what}")
-
-
 def _status_text(screen: AddScreen) -> str:
     return str(screen.query_one("#add-status", Static).content)
 
@@ -98,7 +82,7 @@ async def _search_for(pilot: Any, screen: AddScreen, text: str) -> None:
     screen.query_one("#add-query", Input).focus()
     await pilot.press(*text)
     screen.search(text, None)  # skip the debounce timer; the worker is what we exercise
-    await _until(
+    await until(
         pilot,
         lambda: not screen.query_one("#candidates", OptionList).loading,
         f"the search for {text!r} to settle",
@@ -209,7 +193,7 @@ async def test_a_keystroke_mid_capture_does_not_cancel_the_write(
         screen.search("dune part", None)  # what a keystroke's debounce would fire
         await pilot.pause()
 
-        await _until(
+        await until(
             pilot,
             lambda: slow_capture["finished"],
             "the capture to finish — a search cancelled it",
@@ -231,7 +215,7 @@ async def test_a_running_capture_is_visible_and_the_bar_is_dead(
 
         kind, cand = screen._hits[0]  # pyright: ignore[reportPrivateUsage]
         screen.capture(kind, cand)
-        await _until(pilot, lambda: options.loading, "the capture to show as running")
+        await until(pilot, lambda: options.loading, "the capture to show as running")
 
         assert bar.disabled, "the bar still takes keys that will not be read"
         assert "adding" in _status_text(screen)
@@ -253,7 +237,7 @@ async def test_a_failed_capture_gives_the_screen_back(
 
         kind, cand = screen._hits[0]  # pyright: ignore[reportPrivateUsage]
         screen.capture(kind, cand)
-        await _until(
+        await until(
             pilot,
             lambda: "tmdb is down" in _status_text(screen),
             "the failure to reach the status line",
@@ -310,9 +294,9 @@ async def test_a_device_name_retries_as_tech_when_the_media_dbs_are_empty(
         screen = await _open_add(app, pilot)
         screen.query_one("#add-query", Input).value = "Xiaomi Mix 4"
         await pilot.press("enter")
-        await _until(pilot, lambda: len(asked) >= 2, "the tech retry")
+        await until(pilot, lambda: len(asked) >= 2, "the tech retry")
         assert asked == [None, MediaKind.TECH]
-        await _until(
+        await until(
             pilot,
             lambda: screen.query_one("#candidates", OptionList).option_count == 1,
             "the device to appear",
@@ -340,7 +324,7 @@ async def test_a_film_that_finds_nothing_does_not_retry_as_tech(
         screen = await _open_add(app, pilot)
         screen.query_one("#add-query", Input).value = "Some Unknown Film"
         await pilot.press("enter")
-        await _until(pilot, lambda: "no matches" in _status_text(screen), "the empty result")
+        await until(pilot, lambda: "no matches" in _status_text(screen), "the empty result")
         assert asked == [None]
         # and the miss says how to reach a device, which is the one thing a user can't guess
         assert "kind:tech" in _status_text(screen)

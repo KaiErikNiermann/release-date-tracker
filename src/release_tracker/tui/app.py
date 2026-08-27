@@ -15,7 +15,7 @@ whole source layer is already async httpx.
 from __future__ import annotations
 
 import contextlib
-from datetime import UTC, date, datetime
+from datetime import date
 from typing import ClassVar
 
 import httpx
@@ -23,6 +23,7 @@ from textual.app import App
 from textual.binding import Binding, BindingType
 
 from release_tracker import views
+from release_tracker.clock import utc_today
 from release_tracker.config import Settings, get_settings
 from release_tracker.config_file import migrate_env
 from release_tracker.db import Database
@@ -57,7 +58,7 @@ class RdtApp(App[None]):
         super().__init__()
         self.settings = settings or get_settings()
         self.db = db or Database(self.settings.db_path)
-        self.today = today or datetime.now(UTC).date()
+        self.today = today or utc_today()
         self.snapshot: Snapshot = build_snapshot(self.db, self.settings, self.today)
         self._client: httpx.AsyncClient | None = None
 

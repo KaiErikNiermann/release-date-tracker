@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 from rich.markup import escape
 from rich.text import Text
 from textual import on, work
@@ -26,7 +26,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
 from release_tracker import config_file
-from release_tracker.config import Settings, get_settings, secret
+from release_tracker.config import Settings, field_name_for, get_settings, secret
 from release_tracker.config_file import FIELD_DOCS, FieldDoc
 from release_tracker.credentials import CheckResult, check_tmdb, check_twitch
 from release_tracker.tui.edit import Row
@@ -235,12 +235,9 @@ def _verdict(label: str, result: CheckResult) -> str:
 
 def _current(settings: Settings, alias: str) -> str:
     """The effective value as it is safe to show — masked when it is a credential."""
-    name = next(
-        (field_name for field_name, field in Settings.model_fields.items() if field.alias == alias),
-        None,
-    )
+    name = field_name_for(alias)
     if name is None:
         return ""
     raw = getattr(settings, name)
-    value = secret(raw) if raw is not None and hasattr(raw, "get_secret_value") else raw
+    value = secret(raw) if isinstance(raw, SecretStr) else raw
     return config_file.mask(alias, str(value)) if value else ""

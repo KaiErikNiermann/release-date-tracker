@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Final
 
+from release_tracker.clock import utc_now
 from release_tracker.models import MediaKind
 from release_tracker.trends import Season, StudioTrend
 
@@ -70,7 +71,7 @@ class TrendCache:
         if row is None:
             return None
         computed_at = datetime.fromisoformat(row["computed_at"])
-        if datetime.now(UTC) - computed_at > self.ttl:
+        if utc_now() - computed_at > self.ttl:
             return None
         return _row_to_trend(row)
 
@@ -102,7 +103,7 @@ class TrendCache:
                 "month_conc": trend.month_concentration,
                 "season_mode": trend.season_mode.value if trend.season_mode else None,
                 "season_conc": trend.season_concentration,
-                "now": datetime.now(UTC).isoformat(),
+                "now": utc_now().isoformat(),
             },
         )
         self._conn.commit()

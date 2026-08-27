@@ -12,11 +12,12 @@ https://www.notion.so/my-integrations
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from typing import Any, cast
 
 import httpx
 
+from release_tracker.clock import utc_now
 from release_tracker.config import Settings, secret
 from release_tracker.logging import get_logger
 from release_tracker.models import (
@@ -61,7 +62,7 @@ class NotionSeed:
         }
         bundle = SeedBundle()
         cursor: str | None = None
-        now = datetime.now(UTC)
+        now = utc_now()
         with httpx.Client(timeout=30.0, headers=headers) as client:
             while True:
                 body: dict[str, Any] = {"page_size": 100}

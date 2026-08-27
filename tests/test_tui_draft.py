@@ -10,7 +10,6 @@ Nothing here touches the network — the screen reaches it through module-level 
 
 from __future__ import annotations
 
-import asyncio
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -18,6 +17,7 @@ from typing import Any
 import pytest
 from textual.widgets import Input, OptionList, Static
 
+from conftest import until
 from release_tracker import drafts
 from release_tracker.config import Settings, get_settings
 from release_tracker.db import Database
@@ -83,21 +83,10 @@ def offers_draft(monkeypatch: pytest.MonkeyPatch) -> Draft:
     return draft
 
 
-async def _until(pilot: Any, predicate: Any, what: str, timeout: float = 5.0) -> None:
-    waited = 0.0
-    while waited < timeout:
-        await pilot.pause()
-        if predicate():
-            return
-        await asyncio.sleep(0.02)
-        waited += 0.02
-    raise AssertionError(f"timed out waiting for {what}")
-
-
 async def _search_for(pilot: Any, screen: AddScreen, text: str) -> None:
     screen.query_one("#add-query", Input).value = text
     screen.search(text, None)  # skip the debounce; the worker is what we exercise
-    await _until(
+    await until(
         pilot,
         lambda: not screen.query_one("#candidates", OptionList).loading,
         f"the search for {text!r} to settle",
@@ -154,7 +143,7 @@ async def test_a_synthetic_row_opens_review_rather_than_adding(
         await _search_for(pilot, screen, "Steam Deck 2")
         await pilot.press("down")
         await pilot.press("enter")
-        await _until(pilot, lambda: isinstance(app.screen, DraftScreen), "the review screen")
+        await until(pilot, lambda: isinstance(app.screen, DraftScreen), "the review screen")
         assert app.db.get_entity(Entity.make_id("Steam Deck 2", MediaKind.TECH)) is None
 
 
@@ -222,7 +211,7 @@ async def test_edits_made_in_the_form_are_what_gets_committed(
             category.cycle.action_step(1)
         await pilot.pause()
         await pilot.press("ctrl+s")
-        await _until(pilot, lambda: bool(seen), "the commit")
+        await until(pilot, lambda: bool(seen), "the commit")
 
     (committed,) = seen
     assert committed.category is TechCategory.LAPTOP
@@ -234,7 +223,7 @@ async def test_escape_drops_the_draft_without_writing(app: RdtApp) -> None:
         app.push_screen(DraftScreen(_synthetic()))
         await pilot.pause()
         await pilot.press("escape")
-        await _until(pilot, lambda: not isinstance(app.screen, DraftScreen), "the screen to close")
+        await until(pilot, lambda: not isinstance(app.screen, DraftScreen), "the screen to close")
         assert app.db.get_entity(Entity.make_id("Steam Deck 2", MediaKind.TECH)) is None
 
 
@@ -258,7 +247,7 @@ async def test_e_reviews_a_real_candidate_instead_of_adding_it(
         await _search_for(pilot, screen, "Dune Part Three")
         await pilot.press("down")
         await pilot.press("e")
-        await _until(pilot, lambda: isinstance(app.screen, DraftScreen), "the review screen")
+        await until(pilot, lambda: isinstance(app.screen, DraftScreen), "the review screen")
         review = app.screen
         assert isinstance(review, DraftScreen)
         # It carries the candidate, so committing still goes through the normal capture

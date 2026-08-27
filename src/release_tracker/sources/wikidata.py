@@ -29,11 +29,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from typing import Any, Final, cast
 
 import httpx
 
+from release_tracker.clock import utc_now
 from release_tracker.config import Settings
 from release_tracker.logging import get_logger
 from release_tracker.models import (
@@ -649,7 +650,7 @@ class WikidataSource:
         raw_claims = cast("dict[str, Any]", item).get("claims")
         claims = cast("dict[str, Any]", raw_claims) if isinstance(raw_claims, dict) else {}
 
-        observations = parse_observations(claims, entity, qid, datetime.now(UTC))
+        observations = parse_observations(claims, entity, qid, utc_now())
         external_ids = parse_external_ids(claims)
         log.info(
             "wikidata.item",

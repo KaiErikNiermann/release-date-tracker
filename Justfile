@@ -18,6 +18,15 @@ dev:
 lint:
     poetry run ruff check src tests
 
+# Project rules: conventions a matcher can judge, and the shared helpers not to re-handroll
+semgrep:
+    poetry run semgrep --config .semgrep/ --error --quiet src tests
+
+# Prove every rule still matches something — a pattern that silently stops matching is
+# indistinguishable from a clean tree, which is how half of these shipped broken once.
+semgrep-selftest:
+    poetry run pytest tests/test_semgrep_rules.py -q
+
 # Fix what ruff can fix
 lint-fix:
     poetry run ruff check --fix src tests
@@ -43,7 +52,7 @@ complexity:
     poetry run radon cc src -nb --total-average
 
 # Everything CI runs
-check: lint fmt-check typecheck test
+check: lint semgrep fmt-check typecheck test
 
 # --- Running ---
 

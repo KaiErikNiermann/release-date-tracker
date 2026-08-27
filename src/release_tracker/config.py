@@ -270,6 +270,18 @@ class Settings(BaseSettings):
         return out
 
 
+def field_name_for(alias: str) -> str | None:
+    """The attribute behind an environment-variable name, or None if there isn't one.
+
+    Settings are addressed by alias everywhere outside this module — the config file, the
+    doctor table, the settings screen — so reading one back by name needs this reverse
+    lookup. It had grown three copies, which is two more than a mapping this small deserves.
+    """
+    return next(
+        (name for name, field in Settings.model_fields.items() if field.alias == alias), None
+    )
+
+
 def secret(value: SecretStr | None) -> str | None:
     """Unwrap a credential at the point it is actually used.
 

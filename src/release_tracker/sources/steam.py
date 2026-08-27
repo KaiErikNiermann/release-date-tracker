@@ -11,12 +11,13 @@ These are unofficial storefront endpoints but widely used and unauthenticated.
 from __future__ import annotations
 
 import re
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from typing import Any, cast
 
 import dateparser
 import httpx
 
+from release_tracker.clock import utc_now
 from release_tracker.config import Settings
 from release_tracker.logging import get_logger
 from release_tracker.models import (
@@ -63,7 +64,7 @@ class SteamSource:
         if appid is None:
             return SourceResult()
 
-        now = datetime.now(UTC)
+        now = utc_now()
         observations: list[ReleaseObservation] = []
         # one details call per region to get localized price; release date is the
         # same string but we record it once (region-agnostic) plus per-region price.
@@ -135,20 +136,18 @@ class SteamSource:
                 client, SEARCH_URL, params={"term": query, "cc": region.lower(), "l": "en"}
             ),
         )
-        out: list[Candidate] = []
-        for item in cast("list[dict[str, Any]]", payload.get("items", []))[:limit]:
-            out.append(
-                Candidate(
-                    source=self.name,
-                    id_key="steam_appid",
-                    canonical_id=str(item["id"]),
-                    title=str(item.get("name", "")),
-                    year=None,  # storesearch omits release year
-                    extra=str(item.get("type", "")),
-                    url=f"https://store.steampowered.com/app/{item['id']}",
-                )
+        return [
+            Candidate(
+                source=self.name,
+                id_key="steam_appid",
+                canonical_id=str(item["id"]),
+                title=str(item.get("name", "")),
+                year=None,  # storesearch omits release year
+                extra=str(item.get("type", "")),
+                url=f"https://store.steampowered.com/app/{item['id']}",
             )
-        return out
+            for item in cast("list[dict[str, Any]]", payload.get("items", []))[:limit]
+        ]
 
     async def _details(
         self, client: httpx.AsyncClient, appid: str, region: str

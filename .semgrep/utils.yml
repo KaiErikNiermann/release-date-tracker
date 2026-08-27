@@ -1,0 +1,102 @@
+# Reuse the shared helpers instead of growing another private copy.
+#
+# Every rule here was written against duplication that was actually in the tree, and the count
+# is recorded in the rule's message. That matters: a pattern rule that matches nothing is
+# indistinguishable from a clean codebase, so each of these has a documented answer it found.
+# The duplication is fixed; these keep it fixed.
+#
+# AST-matched, not text-matched — `.append()` on a defaultdict value and `.append()` on a list
+# read identically to a regex and differently to semgrep.
+rules:
+  - id: use-clock-utc-today
+    languages: [python]
+    severity: WARNING
+    message: >-
+      Use `clock.utc_today()`. This expression had five sites, two of them byte-identical
+      private helpers (`artists._utc_today` and `cli._today`), and the whole tracker compares
+      dates against it — a second spelling is how the CLI and the TUI end up disagreeing about
+      what "today" is at 23:00 in a positive offset.
+    paths:
+      exclude:
+        - "src/release_tracker/clock.py"
+    pattern: datetime.now(UTC).date()
+
+  - id: use-clock-utc-now
+    languages: [python]
+    severity: INFO
+    message: >-
+      Prefer `clock.utc_now()` over `datetime.now(UTC)` so the project has one spelling for the
+      current moment. Thirty sites use this; the helper exists so the naive form has an obvious
+      correct replacement rather than a rule that only says "not that".
+    paths:
+      exclude:
+        - "src/release_tracker/clock.py"
+    pattern: datetime.now(UTC)
+
+  - id: use-field-name-for
+    languages: [python]
+    severity: WARNING
+    message: >-
+      Use `config.field_name_for(alias)` rather than walking `Settings.model_fields` again.
+      Settings are addressed by alias everywhere outside `config.py` — the config file, the
+      doctor table, the settings screen — and this reverse lookup had grown three copies in
+      two of those, written three different ways (a for-loop that raises, a dict comprehension,
+      and a `next(...)` with a default).
+    paths:
+      exclude:
+        - "src/release_tracker/config.py"
+    pattern-either:
+      - pattern: |
+          for $NAME, $FIELD in Settings.model_fields.items():
+              ...
+      - pattern: |
+          {$FIELD.alias: $NAME for $NAME, $FIELD in Settings.model_fields.items()}
+      - pattern: |
+          {$FIELD.alias: $NAME for $NAME, $FIELD in Settings.model_fields.items() if ...}
+
+  - id: use-the-shared-until-helper
+    languages: [python]
+    severity: WARNING
+    message: >-
+      Use `until(...)` from `tests/conftest.py` instead of a local copy. Three TUI test modules
+      had byte-identical `_until` helpers; the risk of a copy is not the duplication itself but
+      that one of them quietly acquires a different timeout and only fails on the slow Windows
+      runner.
+    paths:
+      exclude:
+        - "tests/conftest.py"
+    pattern-either:
+      - pattern: |
+          async def _until(...):
+              ...
+      # Renaming the copy does not make it not a copy.
+      - pattern: |
+          async def $F(...):
+              ...
+              raise AssertionError(f"timed out waiting for {$WHAT}")
+
+  - id: write-config-through-the-atomic-writer
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Write the config file through `config_file.set_values` / `write_config`. They replace it
+      atomically and create it 0600 in one step, so an interrupted write cannot leave a partial
+      config and a credential is never briefly world-readable. A plain `open(...).write()` on
+      that path has neither property.
+    paths:
+      # Source only. Every hit outside it was a test hand-writing a deliberately malformed
+      # config to check the error path — which is the rule's own subject matter, written
+      # correctly, and a rule that fires on the tests protecting it teaches people to
+      # ignore it.
+      include:
+        - "src/"
+      exclude:
+        - "src/release_tracker/config_file.py"
+    pattern-either:
+      - pattern: config_file_path().write_text(...)
+      - pattern: $P.write_text(...)
+    pattern-inside: |
+      def $F(...):
+          ...
+          config_file_path()
+          ...
