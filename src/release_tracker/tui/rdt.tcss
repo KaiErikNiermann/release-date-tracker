@@ -99,7 +99,7 @@ EditScreen {
 }
 
 #edit {
-    width: 84;
+    width: 96;
     max-width: 90%;
     height: auto;
     max-height: 90%;
@@ -147,6 +147,15 @@ EditScreen {
 
 .edit-row > Input:focus {
     background: $panel-lighten-1;
+}
+
+/* The right-hand column on a date row: what was pulled, which side is showing, and why.
+   Fixed width so the fields stay aligned as a form; it truncates rather than reflowing,
+   because a date row that grew to two lines would break the ↓/↑ walk. */
+.row-note {
+    width: 46;
+    padding-left: 1;
+    text-overflow: ellipsis;
 }
 
 .note-row {

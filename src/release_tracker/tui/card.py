@@ -7,6 +7,7 @@ and escaping before the debounce fires flushes it, so a fast decision is never l
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, ClassVar
 
 from rich.text import Text
@@ -21,9 +22,9 @@ from textual.widgets import Static
 from release_tracker import render, views
 from release_tracker.links import SourceAccess
 from release_tracker.models import ConsumptionState, Entity
-from release_tracker.pipeline import pull_entity
+from release_tracker.pipeline import refresh_entity
 from release_tracker.tui.cycle import Cycle
-from release_tracker.views import WorkCard
+from release_tracker.views import DateChange, WorkCard
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from release_tracker.tui.app import RdtApp
@@ -197,6 +198,15 @@ class CardScreen(ModalScreen[ConsumptionState | None]):
 
         self.app.push_screen(EditScreen(self.entity, self.card), reread)
 
+    def _open_edit(self, changes: Sequence[DateChange]) -> None:
+        """The edit form, told what a refresh just moved. Same screen `e` opens."""
+        from release_tracker.tui.edit import EditScreen
+
+        def reread(_: None) -> None:
+            self._reread()
+
+        self.app.push_screen(EditScreen(self.entity, self.card, changes), reread)
+
     def _reread(self) -> bool:
         """Re-read the work from the db and repaint. False if it is gone.
 
@@ -214,7 +224,7 @@ class CardScreen(ModalScreen[ConsumptionState | None]):
         return True
 
     def action_update(self) -> None:
-        """Re-pull every source the Sources section marks as automatic."""
+        """Re-pull every source the Sources section marks as automatic, then open the form."""
         if not any(link.access is SourceAccess.AUTO for link in self.card.sources):
             self.app.notify("Nothing here updates automatically — open a link instead.")
             return
@@ -225,7 +235,11 @@ class CardScreen(ModalScreen[ConsumptionState | None]):
     # precisely how the add screen once had a keystroke abort a half-finished write.
     @work(exclusive=True, group="card-update")
     async def _refetch(self) -> None:
-        """Pull the automatic sources again, then repaint from the db.
+        """Run the same refresh ``rdt refresh`` runs, then hand the result to the edit form.
+
+        Deliberately the full thing — Tier-0 *and* the offer scan — rather than the bare pull
+        this used to do. An "update" that quietly skipped a source is the kind of difference
+        nobody notices until a date is wrong, and one card can afford the extra seconds.
 
         The spinner sits on the card body because that is where the new dates land. Every
         failure is caught and shown: a dead provider must leave the card usable, not tear
@@ -234,7 +248,7 @@ class CardScreen(ModalScreen[ConsumptionState | None]):
         body = self.query_one("#card-body", VerticalScroll)
         body.loading = True
         try:
-            await pull_entity(
+            result = await refresh_entity(
                 self.rdt.db, self.rdt.settings, self.entity, client=await self.rdt.http()
             )
         except Exception as exc:
@@ -242,10 +256,17 @@ class CardScreen(ModalScreen[ConsumptionState | None]):
             self.app.notify(f"Update failed: {exc}", severity="error")
             return
         body.loading = False
-        if self._reread():
-            # the row behind the modal is showing the old date until this lands
-            self.rdt.after_edit(self.entity, graph=False)
-            self.app.notify("Updated from the automatic sources.")
+        if result.error is not None:
+            self.app.notify(f"Update failed: {result.error}", severity="error")
+            return
+        if not self._reread():
+            return
+        # the row behind the modal is showing the old date until this lands
+        self.rdt.after_edit(self.entity, graph=False)
+        # Straight into the form rather than a notification. The write has already happened
+        # — a pull can't overwrite a hand-authored date, only outrank it — so this is where
+        # you see what moved, and what is now being shown instead of what you typed.
+        self._open_edit(views.diff_estimates(result.before, result.after))
 
     @property
     def rdt(self) -> RdtApp:

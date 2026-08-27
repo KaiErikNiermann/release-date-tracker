@@ -18,6 +18,7 @@ to learn — except on the note log, whose rows are not text fields, where `d` d
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import date
 from typing import TYPE_CHECKING, ClassVar
 
 from rich.text import Text
@@ -28,14 +29,16 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
-from release_tracker import edits, query, render
+from release_tracker import edits, query, render, views
 from release_tracker.db import Database
+from release_tracker.edits import MANUAL_PROVIDER
 from release_tracker.models import (
     CreditRole,
     DescriptorKind,
     Entity,
     ReleaseChannel,
 )
+from release_tracker.resolve import outranked_manual
 from release_tracker.tui.completing import (
     CompletingInput,
     Suggester,
@@ -43,7 +46,7 @@ from release_tracker.tui.completing import (
     field_suggester,
 )
 from release_tracker.tui.cycle import Cycle
-from release_tracker.views import WorkCard
+from release_tracker.views import DateChange, WorkCard
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from release_tracker.tui.app import RdtApp
@@ -61,6 +64,43 @@ _CHANNELS: tuple[ReleaseChannel, ...] = (
     ReleaseChannel.THEATRICAL_LIMITED,
     ReleaseChannel.TV_BROADCAST,
 )
+
+
+def date_note(
+    pulled: str,
+    mine: str,
+    *,
+    mine_shown: bool = False,
+    reason: str | None = None,
+    moved: str | None = None,
+) -> str:
+    """A date row's right-hand column, as markup. Empty when there is nothing to say.
+
+    Free of the widget on purpose: what a row should say about its two values is a rule
+    about the values, and keeping it here means it can be read and tested as one.
+    """
+    parts: list[str] = []
+    if moved is not None:
+        # What just changed outranks what the value currently is — the latter is on the
+        # left of the row anyway, and a note on every line would bury the ones that moved.
+        parts.append(f"[yellow]moved[/] {moved}")
+    elif pulled:
+        parts.append(f"[dim]pulled[/] {pulled}")
+    if pulled and mine and reason is None:
+        # Only worth marking when there are genuinely two values to choose between — and
+        # only when nothing else is about to say the same thing: a reason is already the
+        # statement that yours is not the one showing, so the marker would be noise.
+        parts.append("[dim]yours is showing[/]" if mine_shown else "[green]◀ showing[/]")
+    if reason is not None:
+        parts.append(f"[green]◀[/] [dim]{reason}[/]")
+    return "  ".join(parts)
+
+
+def _fmt_day(when: date | None) -> str:
+    """A date as the annotation shows it; an absent one reads as a gap, not a blank."""
+    return when.isoformat() if when is not None else "—"
+
+
 _ROLES: tuple[CreditRole, ...] = tuple(CreditRole)
 _KINDS: tuple[DescriptorKind, ...] = tuple(DescriptorKind)
 DATE_HELP = "2026 · 2026-09 · 2026-Q3 · 2026-09-18 · 2027..2029 · ~ approx · ? unsure"
@@ -118,14 +158,29 @@ class TitleRow(Row):
 
 
 class DateRow(Row):
-    """A hand-authored date for one channel, as an EDTF literal.
+    """A hand-authored date for one channel, as an EDTF literal, beside what was pulled.
 
     ``channel`` is None on the add row, where it comes from the picker instead. The field
     holds only what a *person* authored: a pulled date shows as the placeholder, so it is
     visible without being silently frozen into a manual one by an accidental commit.
+
+    The annotation to its right says which of the two the card is actually showing. That
+    is not a stored choice — a pull never deletes what a person typed, so both rows live in
+    the database and :func:`resolve.best_estimates` picks between them on every read. Meeting
+    that silently is confusing (a typed "2026-Q4" loses to a pulled "2026-10-15" on
+    precision), so when the hand-authored one is outranked the row says why.
     """
 
-    def __init__(self, channel: ReleaseChannel | None, edtf: str = "", pulled: str = "") -> None:
+    def __init__(
+        self,
+        channel: ReleaseChannel | None,
+        edtf: str = "",
+        pulled: str = "",
+        *,
+        mine_shown: bool = False,
+        reason: str | None = None,
+        moved: str | None = None,
+    ) -> None:
         picker = None if channel is not None else Cycle([c.value for c in _CHANNELS])
         super().__init__(
             channel.value if channel is not None else "",
@@ -133,6 +188,24 @@ class DateRow(Row):
             picker=picker,
         )
         self.channel = channel
+        self.pulled = pulled
+        self.mine_shown = mine_shown
+        self.reason = reason
+        self.moved = moved
+
+    def annotation(self) -> str:
+        """This row's right-hand column, as markup."""
+        return date_note(
+            self.pulled,
+            self.field.value,
+            mine_shown=self.mine_shown,
+            reason=self.reason,
+            moved=self.moved,
+        )
+
+    def compose(self) -> ComposeResult:
+        yield from super().compose()
+        yield Static(Text.from_markup(self.annotation()), classes="row-note")
 
     @property
     def target(self) -> ReleaseChannel:
@@ -211,10 +284,13 @@ class EditScreen(ModalScreen[None]):
         Binding("escape", "close", "Back to the card", show=False),
     ]
 
-    def __init__(self, entity: Entity, card: WorkCard) -> None:
+    def __init__(self, entity: Entity, card: WorkCard, changes: Sequence[DateChange] = ()) -> None:
         super().__init__()
         self.entity = entity
         self.card = card
+        # What a refresh just moved, when the form was opened by one. Only ever an
+        # annotation: the write already happened, and every prior claim is still on file.
+        self.changes = tuple(changes)
 
     @property
     def rdt(self) -> RdtApp:
@@ -278,11 +354,23 @@ class EditScreen(ModalScreen[None]):
 
         yield Static(Text.from_markup("[bold]Dates[/]"), classes="edit-head")
         authored = edits.manual_dates(self.db, self.entity.id)
+        pulled = views.pulled_estimates(self.db, self.entity, MANUAL_PROVIDER)
+        # Why a hand-authored date is not the one on the card, when it isn't. Nothing was
+        # overwritten to cause that — it was outranked, and the row says on what.
+        reasons = outranked_manual(self.db.iter_observations(self.entity.id), MANUAL_PROVIDER)
+        moved = {
+            change.channel: f"{_fmt_day(change.old)} → {_fmt_day(change.new)}"
+            for change in self.changes
+        }
         for est in self.card.estimates:
+            source = pulled.get(est.channel)
             yield DateRow(
                 est.channel,
                 authored.get(est.channel, ""),
-                pulled=render.fmt_when(est.release_date, est.precision),
+                pulled=render.fmt_when(source.release_date, source.precision) if source else "",
+                mine_shown=est.provider == MANUAL_PROVIDER,
+                reason=reasons.get(est.channel),
+                moved=moved.get(est.channel.value),
             )
         for channel, edtf in authored.items():  # authored on a channel with no estimate yet
             if all(e.channel is not channel for e in self.card.estimates):

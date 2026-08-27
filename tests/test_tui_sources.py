@@ -33,9 +33,11 @@ from release_tracker.models import (
     ReleaseObservation,
     SourceTier,
 )
+from release_tracker.pipeline import RefreshResult
 from release_tracker.tui import card as card_module
 from release_tracker.tui.app import RdtApp
 from release_tracker.tui.card import CardScreen
+from release_tracker.tui.edit import EditScreen
 
 # after the seeded release, so the work lands in the default `is:available` view
 TODAY = date(2026, 8, 27)
@@ -138,25 +140,50 @@ async def test_a_site_that_declines_extraction_is_shown_as_manual(app_db: Path) 
         assert "gsmarena.com/model-14660.php" in manual[0].url, "the exact page, not a search"
 
 
-async def test_update_repulls_and_repaints(app_db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_update_refreshes_then_opens_the_edit_form(
+    app_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refresh has already written by the time you see it, so the useful place to land is
+    the form — where what moved is marked and you can act on it — not a notification."""
     called: list[str] = []
 
-    async def _pull(_db: Any, _settings: Any, entity: Entity, **_k: Any) -> None:
+    async def _refresh(_db: Any, _settings: Any, entity: Entity, **_k: Any) -> RefreshResult:
         called.append(entity.id)
+        return RefreshResult(entity.id, entity.title)
 
-    monkeypatch.setattr(card_module, "pull_entity", _pull)
+    monkeypatch.setattr(card_module, "refresh_entity", _refresh)
 
     app = _app(app_db)
     async with app.run_test(size=(150, 40)) as pilot:
         card = await _open_card(pilot, app)
         await pilot.press("u")
-        await _until(pilot, lambda: bool(called), "the re-pull to run")
+        await _until(pilot, lambda: bool(called), "the refresh to run")
+        await _until(pilot, lambda: isinstance(app.screen, EditScreen), "the edit form to open")
+        assert called == [card.entity.id]
+
+
+async def test_an_errored_refresh_says_so_and_stays_on_the_card(
+    app_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_refresh_one` catches per-entity failures into the result rather than raising, so the
+    error arrives as a field. Dropping the user into a form built on a failed refresh would
+    present stale dates as fresh ones."""
+
+    async def _refresh(_db: Any, _settings: Any, entity: Entity, **_k: Any) -> RefreshResult:
+        return RefreshResult(entity.id, entity.title, error="provider down")
+
+    monkeypatch.setattr(card_module, "refresh_entity", _refresh)
+
+    app = _app(app_db)
+    async with app.run_test(size=(150, 40)) as pilot:
+        card = await _open_card(pilot, app)
+        await pilot.press("u")
         await _until(
             pilot,
             lambda: not card.query_one("#card-body", VerticalScroll).loading,
-            "the spinner to clear",
+            "the spinner to clear after the error",
         )
-        assert called == [card.entity.id]
+        assert isinstance(app.screen, CardScreen)
 
 
 async def test_a_failed_update_says_so_and_leaves_the_card_usable(
@@ -167,7 +194,7 @@ async def test_a_failed_update_says_so_and_leaves_the_card_usable(
     async def _boom(*_a: Any, **_k: Any) -> None:
         raise RuntimeError("provider down")
 
-    monkeypatch.setattr(card_module, "pull_entity", _boom)
+    monkeypatch.setattr(card_module, "refresh_entity", _boom)
 
     app = _app(app_db)
     async with app.run_test(size=(150, 40)) as pilot:
@@ -197,12 +224,13 @@ async def test_a_keystroke_mid_update_does_not_cancel_it(
     release = asyncio.Event()
     finished: list[str] = []
 
-    async def _slow(_db: Any, _settings: Any, entity: Entity, **_k: Any) -> None:
+    async def _slow(_db: Any, _settings: Any, entity: Entity, **_k: Any) -> RefreshResult:
         started.set()
         await release.wait()
         finished.append(entity.id)
+        return RefreshResult(entity.id, entity.title)
 
-    monkeypatch.setattr(card_module, "pull_entity", _slow)
+    monkeypatch.setattr(card_module, "refresh_entity", _slow)
 
     app = _app(app_db)
     async with app.run_test(size=(150, 40)) as pilot:
@@ -252,10 +280,11 @@ async def test_a_work_with_nothing_automatic_says_so_instead_of_pretending(
 
     pulled: list[str] = []
 
-    async def _pull(_db: Any, _settings: Any, entity: Entity, **_k: Any) -> None:
+    async def _refresh(_db: Any, _settings: Any, entity: Entity, **_k: Any) -> RefreshResult:
         pulled.append(entity.id)
+        return RefreshResult(entity.id, entity.title)
 
-    monkeypatch.setattr(card_module, "pull_entity", _pull)
+    monkeypatch.setattr(card_module, "refresh_entity", _refresh)
 
     app = _app(path)
     async with app.run_test(size=(150, 40)) as pilot:
