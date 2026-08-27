@@ -28,6 +28,7 @@ are unit-testable without network.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Any, Final, cast
 
@@ -57,6 +58,8 @@ _ITEM_URL = "https://www.wikidata.org/wiki/{qid}"
 _QID_RE: Final = re.compile(r"^Q\d+$")
 
 _P_PUBLICATION_DATE: Final = "P577"
+_P_BRAND: Final = "P1716"
+_P_INSTANCE_OF: Final = "P31"
 _P_PLACE_OF_PUBLICATION: Final = "P291"
 _P_COUNTRY: Final = "P17"
 
@@ -447,6 +450,122 @@ def parse_candidates(payload: dict[str, Any], limit: int) -> list[Candidate]:
             )
         )
     return out
+
+
+@dataclass(frozen=True, slots=True)
+class Lineage:
+    """What Wikidata knows about the item a speculative entry descends from.
+
+    Only the facts that survive a generation. Brand comes from P1716 and never P176: the
+    Steam Deck's P176 is *Quanta Computer*, its contract manufacturer, which is true and
+    useless — nobody searches for a Quanta handheld.
+    """
+
+    qid: str
+    label: str
+    released: date | None = None
+    brand: str | None = None
+    instance_of: str | None = None
+
+
+def lineage_query(qid: str) -> str:
+    """SPARQL for one item's release date, brand and class, with labels resolved server-side.
+
+    One request instead of the four an API walk would take (item, then a label lookup per
+    referenced QID), which matters because the add screen runs this while the user waits.
+    """
+    return (
+        "SELECT ?date ?brandLabel ?classLabel WHERE {\n"
+        f"  OPTIONAL {{ wd:{qid} wdt:{_P_PUBLICATION_DATE} ?date . }}\n"
+        f"  OPTIONAL {{ wd:{qid} wdt:{_P_BRAND} ?brand . }}\n"
+        f"  OPTIONAL {{ wd:{qid} wdt:{_P_INSTANCE_OF} ?class . }}\n"
+        '  SERVICE wikibase:label { bd:serviceParam wikibase:language "en". }\n'
+        "} LIMIT 1"
+    )
+
+
+def _binding(row: dict[str, Any], name: str) -> str | None:
+    """One SPARQL binding's value, or None when the OPTIONAL didn't match."""
+    cell = row.get(name)
+    if not isinstance(cell, dict):
+        return None
+    value = cast("dict[str, Any]", cell).get("value")
+    return value if isinstance(value, str) and value else None
+
+
+def parse_lineage(payload: dict[str, Any], qid: str, label: str) -> Lineage:
+    """Fold the single result row into a Lineage; every field is optional by design."""
+    results = payload.get("results")
+    rows = cast("dict[str, Any]", results).get("bindings") if isinstance(results, dict) else None
+    row = (
+        cast("dict[str, Any]", cast("list[Any]", rows)[0])
+        if isinstance(rows, list) and rows and isinstance(cast("list[Any]", rows)[0], dict)
+        else {}
+    )
+    released: date | None = None
+    if (raw := _binding(row, "date")) is not None:
+        try:
+            released = date.fromisoformat(raw[:10])
+        except ValueError:  # a BCE or otherwise unrepresentable date — not worth a failure
+            released = None
+    return Lineage(
+        qid=qid,
+        label=label,
+        released=released,
+        brand=_binding(row, "brandLabel"),
+        instance_of=_binding(row, "classLabel"),
+    )
+
+
+async def find_lineage(client: httpx.AsyncClient, stem: str) -> Lineage | None:
+    """Resolve a product-family stem to the item a successor would descend from.
+
+    Best-effort throughout: this only ever *prefills* a draft the user is about to review,
+    so a miss costs an empty field, never a failure. Returns None when Wikidata has never
+    heard of the family, which is the common case for new hardware.
+    """
+    try:
+        payload = cast(
+            "dict[str, Any]",
+            await get_json(
+                client,
+                _API,
+                params={
+                    "action": "wbsearchentities",
+                    "search": stem,
+                    "type": "item",
+                    "language": "en",
+                    "uselang": "en",
+                    "format": "json",
+                    "limit": "1",
+                },
+            ),
+        )
+    except Exception as exc:
+        log.warning("wikidata.lineage_search_error", stem=stem, error=str(exc))
+        return None
+    hits = parse_candidates(payload, limit=1)
+    if not hits:
+        return None
+    qid, label = hits[0].canonical_id, hits[0].title
+    if _QID_RE.fullmatch(qid) is None:  # never interpolate an unvalidated id into SPARQL
+        return None
+    try:
+        claims = cast(
+            "dict[str, Any]",
+            await get_json(
+                client,
+                _SPARQL,
+                params={"query": lineage_query(qid), "format": "json"},
+                headers={"Accept": "application/sparql-results+json"},
+            ),
+        )
+    except Exception as exc:  # the identity alone is still worth having
+        log.warning("wikidata.lineage_claims_error", qid=qid, error=str(exc))
+        return Lineage(qid=qid, label=label)
+    found = parse_lineage(claims, qid, label)
+    log.info("wikidata.lineage", stem=stem, qid=qid, brand=found.brand, released=found.released)
+    return found
 
 
 class WikidataSource:

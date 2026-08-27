@@ -9,10 +9,13 @@ import pytest
 
 from release_tracker.models import Certainty, DatePrecision, Entity, MediaKind, ReleaseChannel
 from release_tracker.sources.wikidata import (
+    Lineage,
     WikidataSource,
+    lineage_query,
     link_query,
     parse_candidates,
     parse_external_ids,
+    parse_lineage,
     parse_link_bindings,
     parse_observations,
     parse_region,
@@ -457,3 +460,54 @@ async def test_a_game_falls_back_to_the_igdb_slug(monkeypatch: pytest.MonkeyPatc
     result = await WikidataSource().pull(cast("Any", None), game, Settings())
     assert 'wdt:P5794 "cyberpunk-2077"' in seen[0]
     assert result.external_ids["wikidata"] == "Q3182559"
+
+
+# --- lineage: the family a speculative entry descends from --------------------------------
+def _lineage_rows(**cells: str) -> dict[str, Any]:
+    return {"results": {"bindings": [{k: {"value": v} for k, v in cells.items()}]}}
+
+
+def test_lineage_query_only_ever_names_a_validated_qid() -> None:
+    """It is interpolated into SPARQL, so the caller validates first — this pins the shape
+    that validation protects."""
+    sparql = lineage_query("Q107542665")
+    assert "wd:Q107542665" in sparql
+    assert "?brandLabel" in sparql and "?classLabel" in sparql
+    assert 'wikibase:language "en"' in sparql
+
+
+def test_parse_lineage_reads_the_row() -> None:
+    found = parse_lineage(
+        _lineage_rows(
+            date="2022-02-25T00:00:00Z",
+            brandLabel="Valve",
+            classLabel="handheld gaming PC model series",
+        ),
+        "Q107542665",
+        "Steam Deck",
+    )
+    assert found == Lineage(
+        qid="Q107542665",
+        label="Steam Deck",
+        released=date(2022, 2, 25),
+        brand="Valve",
+        instance_of="handheld gaming PC model series",
+    )
+
+
+def test_parse_lineage_survives_every_optional_missing() -> None:
+    """Each claim is an OPTIONAL, and plenty of items carry none of them. The identity is
+    the only part that has to be there."""
+    found = parse_lineage({"results": {"bindings": [{}]}}, "Q1", "Thing")
+    assert found == Lineage(qid="Q1", label="Thing")
+
+
+def test_parse_lineage_drops_a_date_it_cannot_represent() -> None:
+    """A BCE or otherwise unrepresentable date is worth losing, not raising over —
+    the lineage is a prefill, and no field on it is load-bearing."""
+    found = parse_lineage(_lineage_rows(date="-0500-01-01T00:00:00Z"), "Q1", "Thing")
+    assert found.released is None
+
+
+def test_parse_lineage_tolerates_an_empty_result() -> None:
+    assert parse_lineage({}, "Q1", "Thing") == Lineage(qid="Q1", label="Thing")
