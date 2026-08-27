@@ -226,6 +226,33 @@ async def _refresh_one(
     return RefreshResult(entity.id, entity.title, before, after)
 
 
+async def refresh_entity(
+    db: Database,
+    settings: Settings,
+    entity: Entity,
+    *,
+    offers: bool = True,
+    enrich: bool = False,
+    client: httpx.AsyncClient | None = None,
+) -> RefreshResult:
+    """Refresh one entity through the same stages ``rdt refresh`` runs, with its before/after.
+
+    The single-card path in the TUI wants exactly what the batch does — a Tier-0 pull *and*
+    the offer scan — because "update" that quietly skipped a source would be the kind of
+    difference nobody discovers until a date is wrong. Sharing ``_refresh_one`` is what keeps
+    the two honest; the defaults here mirror the CLI's.
+    """
+    sem = asyncio.Semaphore(1)
+    if client is not None:
+        return await _refresh_one(
+            client, db, settings, entity, offers=offers, enrich=enrich, sem=sem
+        )
+    async with make_client() as owned:
+        return await _refresh_one(
+            owned, db, settings, entity, offers=offers, enrich=enrich, sem=sem
+        )
+
+
 async def refresh_entities(
     db: Database,
     settings: Settings,

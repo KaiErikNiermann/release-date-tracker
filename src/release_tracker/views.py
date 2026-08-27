@@ -472,6 +472,24 @@ def _collapse_estimates(
     return tuple(sorted(by_slot.values(), key=lambda e: e.release_date or date.max))
 
 
+def pulled_estimates(
+    db: Database, entity: Entity, manual_provider: str
+) -> dict[ReleaseChannel, BestEstimate]:
+    """The best estimate per channel with everything hand-authored held out.
+
+    The edit form needs *both* sides of each date row, and the card's own estimates only
+    carry the winner — which is sometimes the hand-authored one, so labelling it "pulled"
+    would be wrong. Re-resolving over the sources alone is what makes the comparison honest.
+    """
+    sourced = [o for o in db.iter_observations(entity.id) if o.provider != manual_provider]
+    return {
+        est.channel: est
+        for est in _collapse_estimates(
+            best_estimates(sourced), per_region=entity.kind is MediaKind.TECH
+        )
+    }
+
+
 # --- graph -> resolved lines ----------------------------------------------
 def _credit_lines(db: Database, entity_id: str) -> list[CreditLine]:
     edges = db.edges_to(entity_id, RelationKind.CREDITED_ON)
