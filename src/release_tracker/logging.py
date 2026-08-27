@@ -4,9 +4,33 @@ from __future__ import annotations
 
 import logging
 import sys
-from typing import TextIO
+from typing import TextIO, cast
 
 import structlog
+
+
+class _LateStderr:
+    """A stand-in for ``sys.stderr`` that resolves it on every write.
+
+    ``PrintLoggerFactory`` holds whatever object it is given, and with
+    ``cache_logger_on_first_use`` that reference outlives the call that set it. Anything
+    that swaps ``sys.stderr`` for a buffer it later closes — Click's ``CliRunner``, a
+    ``capsys`` teardown — therefore leaves every subsequent log write raising
+    ``ValueError: I/O operation on closed file`` from an unrelated part of the program.
+
+    Binding late costs nothing here because the default sink *is* whatever stderr happens
+    to be. A caller that owns the terminal still passes its own stream explicitly, and that
+    one is held, which is the behaviour ``tui.app.run`` depends on.
+    """
+
+    def write(self, message: str) -> int:
+        return sys.stderr.write(message)
+
+    def flush(self) -> None:
+        sys.stderr.flush()
+
+    def isatty(self) -> bool:
+        return sys.stderr.isatty()
 
 
 def configure_logging(
@@ -22,7 +46,10 @@ def configure_logging(
     in) rebinds ``sys.stderr``, but a logger configured beforehand still holds the real
     one and would paint over the frame. See ``tui.app.run``.
     """
-    sink = stream if stream is not None else sys.stderr
+    # `PrintLoggerFactory` is typed for a full TextIO but only ever calls write/flush (and
+    # `isatty` is ours, below), so the narrow stand-in is cast rather than made to implement
+    # an interface nothing reads.
+    sink: TextIO = stream if stream is not None else cast("TextIO", _LateStderr())
     if json_logs is None:
         json_logs = not sink.isatty()
 
