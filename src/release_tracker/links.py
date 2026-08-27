@@ -26,7 +26,7 @@ from urllib.parse import quote_plus
 
 from release_tracker.models import Entity, MediaKind
 from release_tracker.sources import sources_for
-from release_tracker.tech import CATEGORY_INFO, classify_tech
+from release_tracker.tech import CATEGORY_INFO, category_of
 
 __all__ = [
     "SourceAccess",
@@ -131,7 +131,7 @@ def _search_links(entity: Entity) -> list[SourceLink]:
     though we can't parse them: a person reading GSMArena is exactly what its licence
     contemplates, and it is where the answer actually is.
     """
-    info = CATEGORY_INFO[classify_tech(entity.title)]
+    info = CATEGORY_INFO[category_of(entity)]
     query = quote_plus(entity.title)
     links = [
         SourceLink(

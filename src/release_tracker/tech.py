@@ -24,6 +24,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
 
+from release_tracker.models import Entity
+
 
 class TechCategory(StrEnum):
     """Consumer-tech buckets. ``OTHER`` is the catch-all fallback."""
@@ -244,6 +246,30 @@ def classify_tech(title: str) -> TechCategory:
         if pattern.search(title):
             return category
     return TechCategory.OTHER
+
+
+# Where a hand-picked category is kept. It rides in ``external_ids`` because that is
+# already a free-form per-entity string map — no migration, and `links.work_sources` skips
+# any key it has no formatter for, so this stays inert everywhere that doesn't ask for it.
+CATEGORY_OVERRIDE_KEY: Final = "tech_category"
+
+
+def category_of(entity: Entity) -> TechCategory:
+    """The entity's category: the user's pick if they made one, else read off the title.
+
+    Classification is a regex over the name, which is right often enough to prefill and
+    wrong often enough to need an override — a line can change category between
+    generations (a handheld successor that is really a console), and no amount of pattern
+    tuning sees that coming. An unrecognised stored value falls back rather than raising:
+    the categories are ours to rename, and a stale string is not worth an exception.
+    """
+    raw = entity.external_ids.get(CATEGORY_OVERRIDE_KEY)
+    if raw is not None:
+        try:
+            return TechCategory(raw)
+        except ValueError:
+            pass
+    return classify_tech(entity.title)
 
 
 def tech_info(category: TechCategory) -> TechInfo:
