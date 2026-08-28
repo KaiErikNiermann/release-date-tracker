@@ -15,6 +15,12 @@ matched nothing**, for three separate reasons:
 None of those produce an error. So each rule gets a deliberately broken snippet here, and
 this asserts the rule finds it. The fixture is written to a temp directory rather than
 committed, so it never has to be excluded from ruff, pyright and the real semgrep run.
+
+Linux and macOS only: semgrep ships no Windows binary, and its console script there exits
+without writing anything to stdout rather than failing outright. The rules are enforced in
+CI's lint job and by the pre-push hook, both of which run on Linux, so skipping here costs
+no coverage — it just stops a tool that cannot run from failing a platform it never
+supported.
 """
 
 from __future__ import annotations
@@ -29,6 +35,10 @@ import pytest
 import yaml
 
 RULES_DIR = Path(__file__).resolve().parent.parent / ".semgrep"
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32", reason="semgrep publishes no Windows binary"
+)
 
 # One violation per rule id. The key is the rule the snippet must trip.
 VIOLATIONS: dict[str, str] = {
@@ -82,23 +92,29 @@ def _scan(target: Path) -> dict[str, int]:
     """
     env = dict(os.environ)
     env["PATH"] = f"{Path(sys.executable).parent}{os.pathsep}{env.get('PATH', '')}"
-    result = subprocess.run(  # noqa: S603 - fixed argv, no shell
-        [
-            str(Path(sys.executable).parent / "semgrep"),
-            "--config",
-            str(RULES_DIR),
-            "--quiet",
-            "--json",
-            "--disable-version-check",
-            str(target),
-        ],
-        capture_output=True,
-        text=True,
-        env=env,
-        check=False,
-    )
-    if not result.stdout.strip():
-        pytest.skip(f"semgrep unavailable: {result.stderr.strip()[:200]}")
+    binary = Path(sys.executable).parent / "semgrep"
+    try:
+        result = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            [
+                str(binary),
+                "--config",
+                str(RULES_DIR),
+                "--quiet",
+                "--json",
+                "--disable-version-check",
+                str(target),
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+    except OSError as exc:  # not installed, or not executable on this platform
+        pytest.skip(f"semgrep not runnable: {exc}")
+    # Not `check=True`: semgrep exits non-zero *because* it found something, which is the
+    # whole point here. An empty stdout is the real failure signal.
+    if not (result.stdout or "").strip():
+        pytest.skip(f"semgrep produced no output: {(result.stderr or '').strip()[:200]}")
     payload = json.loads(result.stdout)
     hits: dict[str, int] = {}
     for finding in payload["results"]:
