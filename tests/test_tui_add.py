@@ -16,7 +16,7 @@ import pytest
 from pydantic import SecretStr
 from textual.widgets import Input, OptionList, Static
 
-from conftest import until
+from conftest import until, with_keys
 from release_tracker.config import Settings, get_settings
 from release_tracker.db import Database
 from release_tracker.models import Entity, MediaKind
@@ -319,6 +319,9 @@ async def test_a_film_that_finds_nothing_does_not_retry_as_tech(
 
     monkeypatch.setattr(add_module, "capture_candidates", _search)
     monkeypatch.setattr(RdtApp, "http", _no_client)
+    # This is about routing, not configuration: with no keys the screen would correctly
+    # report the missing ones instead of the miss this test is looking at.
+    app.settings = with_keys(app.settings)
 
     async with app.run_test(size=(120, 30)) as pilot:
         screen = await _open_add(app, pilot)

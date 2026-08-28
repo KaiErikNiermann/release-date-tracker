@@ -15,8 +15,14 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from release_tracker import config_file
-from release_tracker.config import ConfigFileError, Settings, config_file_path, secret
+from release_tracker import config, config_file
+from release_tracker.config import (
+    ConfigFileError,
+    Settings,
+    config_file_path,
+    field_name_for,
+    secret,
+)
 from release_tracker.config_file import (
     FIELD_DOCS,
     known_aliases,
@@ -193,3 +199,27 @@ def test_the_config_path_is_redirectable(monkeypatch: pytest.MonkeyPatch, tmp_pa
     """So a checkout, a test or someone with opinions about directories can move it."""
     monkeypatch.setenv("RDT_CONFIG_FILE", str(tmp_path / "elsewhere.toml"))
     assert config_file_path() == tmp_path / "elsewhere.toml"
+
+
+# --- the suite's own independence ----------------------------------------------------------
+def test_the_suite_does_not_see_the_developers_credentials() -> None:
+    """The guard for a whole class of "passes here, fails in CI".
+
+    Two TUI tests asserted on the add screen's "no matches" line, which is only what it says
+    when the sources are *configured* — so they passed on a machine with a populated
+    `~/.config/rdt/.env` and failed the moment they ran anywhere else. A test that depends on
+    the machine it runs on is not a test, so the baseline is no credentials at all and a test
+    that needs one says so (`conftest.with_keys`).
+    """
+    settings = Settings()
+    present = sorted(
+        alias
+        for alias in config_file.SECRET_ALIASES
+        if getattr(settings, field_name_for(alias) or "", None)
+    )
+    assert present == [], f"the suite is reading real credentials: {present}"
+
+
+def test_the_env_chain_is_detached_from_the_machine() -> None:
+    """...and the reason it cannot: neither `.env` in the chain exists under test."""
+    assert not any(path.exists() for path in config.env_file_paths())

@@ -4,9 +4,14 @@
 anyone who sets a path or a key through the settings screen would start failing unrelated
 tests on their own machine. Every test is pointed at a config file that does not exist.
 
-Only that file is redirected, not the whole config dir: the `.env` chain is hand-authored
-and the app never writes it, and `test_cross_platform` legitimately asserts the *real* XDG
-defaults, which moving `XDG_CONFIG_HOME` would defeat.
+The `.env` chain and the credential environment variables are neutralised too. Without
+that, a developer with keys and a CI runner without them are running different suites: the
+add screen says "no matches" on one and "TMDB_API_KEY is not set" on the other, and two
+tests passed locally for months of nothing while failing the moment they left the machine.
+The baseline is now "nothing configured" everywhere, and a test that needs a key says so.
+
+`XDG_CONFIG_HOME` itself is left alone: `test_cross_platform` legitimately asserts the real
+XDG defaults, which moving it would defeat.
 
 `get_settings` is `lru_cache`d and nothing in the package clears it, so the cache is also
 reset around each test: otherwise the first test to reach it pins that value for the whole
@@ -21,8 +26,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import SecretStr
 
-from release_tracker.config import CONFIG_FILE_ENV, get_settings
+from release_tracker import config, config_file
+from release_tracker.config import CONFIG_FILE_ENV, Settings, get_settings
 
 
 @pytest.fixture(autouse=True)
@@ -31,6 +38,14 @@ def isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
     to exercise the file can write there."""
     target = tmp_path / "config" / "config.toml"
     monkeypatch.setenv(CONFIG_FILE_ENV, str(target))
+    # `Settings` resolves the chain through this function at load time, so patching the
+    # module attribute is what actually detaches it from the developer's ~/.config and from
+    # a .env beside the checkout.
+    absent = tmp_path / "no-env" / ".env"
+    monkeypatch.setattr(config, "env_file_paths", lambda: (absent, absent))
+    monkeypatch.setattr(config_file, "env_file_paths", lambda: (absent, absent))
+    for alias in config_file.SECRET_ALIASES:
+        monkeypatch.delenv(alias, raising=False)
     get_settings.cache_clear()
     yield target
     get_settings.cache_clear()
@@ -52,3 +67,19 @@ async def until(pilot: Any, predicate: Callable[[], bool], what: str, timeout: f
         await asyncio.sleep(0.02)
         waited += 0.02
     raise AssertionError(f"timed out waiting for {what}")
+
+
+def with_keys(settings: Settings) -> Settings:
+    """The same settings with every credential present.
+
+    For a test whose subject is *routing* rather than configuration — "does an unhinted
+    search retry as tech", "does a film query get a synthetic row" — the sources have to be
+    configured, or the screen correctly reports what is missing instead of what was asked.
+    """
+    return settings.model_copy(
+        update={
+            "tmdb_api_key": SecretStr("test-tmdb-key"),
+            "twitch_client_id": SecretStr("test-twitch-id"),
+            "twitch_client_secret": SecretStr("test-twitch-secret"),
+        }
+    )

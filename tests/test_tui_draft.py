@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 from textual.widgets import Input, OptionList, Static
 
-from conftest import until
+from conftest import until, with_keys
 from release_tracker import drafts
 from release_tracker.config import Settings, get_settings
 from release_tracker.db import Database
@@ -126,6 +126,7 @@ async def test_a_film_query_gets_no_synthetic_row(app: RdtApp, nothing_found: No
     """The fallback is tech-only. For a film an empty search means the title was wrong, and
     inventing an entry would bury that instead of surfacing it."""
     del nothing_found
+    app.settings = with_keys(app.settings)  # else the screen reports the missing keys instead
     async with app.run_test(size=(150, 40)) as pilot:
         screen = await _open_add(app, pilot)
         await _search_for(pilot, screen, "Dune 2")
