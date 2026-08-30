@@ -94,12 +94,22 @@ def _slug_of(rows: list[dict[str, Any]]) -> str | None:
     return None
 
 
+# The Twitch app token is a property of the *credentials*, not of any one source instance, and
+# is good for ~60 days. `sources_for()` hands out a shared instance, but several paths build
+# their own (enrich's game_graph, studio_trend), so a per-instance cache made each of them pay a
+# fresh ~0.4s OAuth round trip — two per capture of a game. Cached per client id at module scope
+# so every instance shares one.
+_TOKENS: dict[str, str] = {}
+_TOKEN_LOCK = asyncio.Lock()
+
+
+def forget_tokens() -> None:
+    """Drop cached app tokens (credentials changed, and for tests)."""
+    _TOKENS.clear()
+
+
 class IgdbSource:
     name = "igdb"
-
-    def __init__(self) -> None:
-        self._token: str | None = None
-        self._token_lock = asyncio.Lock()
 
     def supports(self, kind: MediaKind) -> bool:
         return kind is MediaKind.GAME
@@ -123,8 +133,8 @@ class IgdbSource:
             log.warning("igdb.skip", reason=NO_KEYS)
             return None
         # lock so concurrent game pulls fetch the app token exactly once
-        async with self._token_lock:
-            if self._token is None:
+        async with _TOKEN_LOCK:
+            if cid not in _TOKENS:
                 payload = cast(
                     "dict[str, Any]",
                     # Twitch OAuth requires POST (params on the query string)
@@ -146,8 +156,8 @@ class IgdbSource:
                     # in the secret looked exactly like the game not existing.
                     log.warning("igdb.auth_rejected", body=str(payload)[:200])
                     return None
-                self._token = token
-        return cid, self._token
+                _TOKENS[cid] = token
+        return cid, _TOKENS[cid]
 
     async def pull(
         self, client: httpx.AsyncClient, entity: Entity, settings: Settings
