@@ -24,11 +24,15 @@ from release_tracker.sources.base import Candidate
 from release_tracker.tui import add as add_module
 from release_tracker.tui.add import AddScreen
 from release_tracker.tui.app import RdtApp
+from release_tracker.tui.draft import DraftScreen
 
 TODAY = date(2026, 6, 1)
 
 
-def _candidates(*titles: str) -> list[tuple[MediaKind, Candidate]]:
+def _candidates(*titles: str, score: float = 0.8) -> list[tuple[MediaKind, Candidate]]:
+    """Real candidates always carry a score — the matching layer assigns one to every hit —
+    and the add screen reads it to tell a credible match from noise, so the fakes carry one
+    too. Pass a score below `MATCH_FLOOR` to stand in for a weak, wrong-looking match."""
     return [
         (
             MediaKind.MOVIE,
@@ -38,6 +42,7 @@ def _candidates(*titles: str) -> list[tuple[MediaKind, Candidate]]:
                 canonical_id=str(i),
                 title=t,
                 year=2026,
+                score=score,
             ),
         )
         for i, t in enumerate(titles)
@@ -268,6 +273,117 @@ async def test_a_search_that_fails_clears_its_own_spinner(
         assert "no provider" in _status_text(screen)
 
 
+async def test_a_failed_search_still_offers_the_freeform_row(
+    app: RdtApp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dead provider is exactly when the manual escape hatch matters most, so the row is
+    built from the offline half of the inference and still appears."""
+
+    async def _boom(*_a: object, **_k: object) -> list[tuple[MediaKind, Candidate]]:
+        raise RuntimeError("no provider")
+
+    monkeypatch.setattr(add_module, "capture_candidates", _boom)
+
+    async def _no_client(_self: RdtApp) -> None: ...
+
+    monkeypatch.setattr(RdtApp, "http", _no_client)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _open_add(app, pilot)
+        await _search_for(pilot, screen, "dune")
+        assert "no provider" in _status_text(screen)
+        options = screen.query_one("#candidates", OptionList)
+        assert options.option_count == 1
+        assert "dune" in str(options.get_option_at_index(0).prompt)
+
+
+async def test_a_failed_search_does_not_leave_stale_hits_behind(
+    app: RdtApp, offer: list[tuple[MediaKind, Candidate]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one row on screen must be the row that gets acted on. If the failure path left the
+    previous search's hits in place, `enter` on the freeform row would index into them and
+    capture a stale candidate instead of opening the review form."""
+    del offer
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _open_add(app, pilot)
+        await _search_for(pilot, screen, "dune")
+        assert screen.query_one("#candidates", OptionList).option_count == 4  # 3 hits + freeform
+
+        async def _boom(*_a: object, **_k: object) -> list[tuple[MediaKind, Candidate]]:
+            raise RuntimeError("no provider")
+
+        monkeypatch.setattr(add_module, "capture_candidates", _boom)
+        await _search_for(pilot, screen, "something else entirely")
+        assert screen.query_one("#candidates", OptionList).option_count == 1
+        assert screen._hits == []  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_the_freeform_row_sits_under_real_results_too(
+    app: RdtApp, offer: list[tuple[MediaKind, Candidate]]
+) -> None:
+    """A search that found things can still have found the wrong things — so the row is
+    offered quietly rather than withheld."""
+    del offer
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _open_add(app, pilot)
+        await _search_for(pilot, screen, "dune")
+        options = screen.query_one("#candidates", OptionList)
+        assert options.option_count == 4
+        last = str(options.get_option_at_index(3).prompt)
+        assert "none of these" in last
+
+
+async def test_the_freeform_row_reads_its_kind_off_the_matches(
+    app: RdtApp, offer: list[tuple[MediaKind, Candidate]]
+) -> None:
+    """The franchise case, end to end: search a film nobody has listed yet, get the rest of
+    its series back, and the row you would add offers itself as a film."""
+    del offer
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _open_add(app, pilot)
+        await _search_for(pilot, screen, "dune")
+        options = screen.query_one("#candidates", OptionList)
+        assert "as movie" in str(options.get_option_at_index(3).prompt)
+
+
+async def test_matches_too_weak_to_believe_do_not_set_the_kind(
+    app: RdtApp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hits well below the floor are the "obviously different low-confidence match" case —
+    they neither classify the entry nor stop the row reading as a miss."""
+    weak = _candidates("Something Unrelated", score=0.1)
+
+    async def _search(*_a: object, **_k: object) -> list[tuple[MediaKind, Candidate]]:
+        return weak
+
+    async def _no_client(_self: RdtApp) -> None: ...
+
+    monkeypatch.setattr(add_module, "capture_candidates", _search)
+    monkeypatch.setattr(RdtApp, "http", _no_client)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _open_add(app, pilot)
+        await _search_for(pilot, screen, "my own zine")
+        last = str(screen.query_one("#candidates", OptionList).get_option_at_index(1).prompt)
+        assert "nothing matched" in last
+        assert "as other" in last
+
+
+async def test_the_freeform_row_opens_the_review_form(
+    app: RdtApp, offer: list[tuple[MediaKind, Candidate]]
+) -> None:
+    """It is never added outright — everything on it is inferred, so it only opens review."""
+    del offer
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _open_add(app, pilot)
+        await _search_for(pilot, screen, "dune")
+        options = screen.query_one("#candidates", OptionList)
+        options.highlighted = 3
+        options.focus()
+        await pilot.press("enter")
+        await until(pilot, lambda: isinstance(app.screen, DraftScreen), "the review screen")
+
+
 async def test_a_device_name_retries_as_tech_when_the_media_dbs_are_empty(
     app: RdtApp, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -296,9 +412,10 @@ async def test_a_device_name_retries_as_tech_when_the_media_dbs_are_empty(
         await pilot.press("enter")
         await until(pilot, lambda: len(asked) >= 2, "the tech retry")
         assert asked == [None, MediaKind.TECH]
+        # the device, plus the freeform row that now sits under every result set
         await until(
             pilot,
-            lambda: screen.query_one("#candidates", OptionList).option_count == 1,
+            lambda: screen.query_one("#candidates", OptionList).option_count == 2,
             "the device to appear",
         )
 

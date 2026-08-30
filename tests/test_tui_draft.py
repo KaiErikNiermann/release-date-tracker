@@ -122,16 +122,23 @@ async def test_an_unannounced_device_is_offered_as_a_new_entry(
         assert "follows Steam Deck" in row
 
 
-async def test_a_film_query_gets_no_synthetic_row(app: RdtApp, nothing_found: None) -> None:
-    """The fallback is tech-only. For a film an empty search means the title was wrong, and
-    inventing an entry would bury that instead of surfacing it."""
+async def test_a_film_that_matched_nothing_still_says_so(app: RdtApp, nothing_found: None) -> None:
+    """An empty search for a film usually *does* mean the title was wrong, and the freeform row
+    must not bury that — it is offered underneath the warning, not instead of it.
+
+    (This replaces a test that asserted no row at all. Offering one is the deliberate change;
+    keeping the warning is the part of that test's concern which still holds.)
+    """
     del nothing_found
     app.settings = with_keys(app.settings)  # else the screen reports the missing keys instead
     async with app.run_test(size=(150, 40)) as pilot:
         screen = await _open_add(app, pilot)
         await _search_for(pilot, screen, "Dune 2")
-        assert _options(screen) == []
         assert "no matches" in str(screen.query_one("#add-status", Static).content)
+        (row,) = _options(screen)
+        assert "Dune 2" in row
+        # nothing said it was a device or anything else, so it stays deliberately unclassified
+        assert "as other" in row
 
 
 async def test_a_synthetic_row_opens_review_rather_than_adding(

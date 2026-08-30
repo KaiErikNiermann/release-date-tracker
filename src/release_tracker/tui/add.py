@@ -27,7 +27,12 @@ from textual.widgets.option_list import Option
 from release_tracker import drafts, query
 from release_tracker.capture import capture_work
 from release_tracker.drafts import Draft
-from release_tracker.lookup import DETECT_KINDS, capture_candidates, report_for_candidate
+from release_tracker.lookup import (
+    DETECT_KINDS,
+    MATCH_FLOOR,
+    capture_candidates,
+    report_for_candidate,
+)
 from release_tracker.models import Entity, MediaKind
 from release_tracker.sources import unavailable_for
 from release_tracker.sources.base import Candidate
@@ -64,17 +69,15 @@ class AddScreen(ModalScreen[Entity | None]):
         self._initial = initial
         self._timer: Timer | None = None
         self._hits: list[tuple[MediaKind, Candidate]] = []
-        # A device nothing has heard of, offered as its own row below the (empty) hits.
-        # Never auto-added: everything about it is inferred, so it only ever opens review.
-        self._draft: Draft | None = None
+        # The "add it yourself" row, always offered below the hits once a search has run.
+        # Never auto-added: everything on it is inferred, so it only ever opens review.
+        self._freeform: Draft | None = None
         # The key the shown hits came from, so `enter` can tell "act on these" from
         # "you have typed past them" without guessing at the debounce.
         self._shown_key: tuple[str, MediaKind | None] | None = None
         # Session-scoped, so backspacing through a query costs nothing. Deliberately not
         # in the library: a process-global search cache would surprise CLI callers.
-        self._memo: dict[
-            tuple[str, MediaKind | None], tuple[float, list[tuple[MediaKind, Candidate]]]
-        ] = {}
+        self._memo: dict[KeyT, tuple[float, list[tuple[MediaKind, Candidate]], Draft]] = {}
 
     def compose(self) -> ComposeResult:
         with Vertical(id="add"):
@@ -125,17 +128,35 @@ class AddScreen(ModalScreen[Entity | None]):
             self._status("[dim]keep typing…[/]")
             return
         if now:
-            self.search(parsed.text, parsed.kind_hint)
+            self.search(
+                parsed.text,
+                parsed.kind_hint,
+                year_hint=parsed.year_hint,
+                season_hint=parsed.season_hint,
+            )
         else:
             self._timer = self.set_timer(
-                _DEBOUNCE, lambda: self.search(parsed.text, parsed.kind_hint)
+                _DEBOUNCE,
+                lambda: self.search(
+                    parsed.text,
+                    parsed.kind_hint,
+                    year_hint=parsed.year_hint,
+                    season_hint=parsed.season_hint,
+                ),
             )
 
     def _status(self, markup: str) -> None:
         self.query_one("#add-status", Static).update(Text.from_markup(markup))
 
     @work(exclusive=True, group="add-search")
-    async def search(self, text: str, kind_hint: MediaKind | None) -> None:
+    async def search(
+        self,
+        text: str,
+        kind_hint: MediaKind | None,
+        *,
+        year_hint: int | None = None,
+        season_hint: int | None = None,
+    ) -> None:
         """Exclusive within its own group: a newer keystroke cancels this request rather
         than racing it — but never cancels a capture, which is a write."""
         from release_tracker.tui.app import RdtApp
@@ -144,7 +165,7 @@ class AddScreen(ModalScreen[Entity | None]):
         key = (text.lower(), kind_hint)
         cached = self._memo.get(key)
         if cached is not None and time.monotonic() - cached[0] < _MEMO_TTL:
-            self._show(cached[1], key)
+            self._show(cached[1], key, cached[2])
             return
         self._status(f"[dim]searching “{text}”…[/]")
         # Cleared by whoever finishes: `_show` on success, the handler below on failure.
@@ -164,23 +185,36 @@ class AddScreen(ModalScreen[Entity | None]):
                 hits = await capture_candidates(
                     await self.app.http(), text, self.app.settings, kind_hint=MediaKind.TECH
                 )
-            # Still nothing, and the name reads like hardware with a generation on it —
-            # so this is the successor case the tracker exists for. Wikidata cannot know a
-            # device that has not been announced; propose one rather than shrugging.
-            draft = (
-                await drafts.infer_synthetic(await self.app.http(), text)
-                if not hits and (kind_hint is MediaKind.TECH or looks_like_tech(text))
-                else None
+            # What we would write if none of the above is it. Always built, because a search
+            # that found things can still have found the wrong things, and the unannounced
+            # case — a device, a film nobody has listed yet, an album — is the one a release
+            # tracker exists for. The hits feed the inference rather than suppressing it.
+            freeform = await drafts.infer_freeform(
+                await self.app.http(),
+                text,
+                kind_hint=kind_hint,
+                year_hint=year_hint,
+                season_hint=season_hint,
+                hits=hits,
             )
         except Exception as exc:  # a dead provider must not kill the palette
-            self._candidates.loading = False
-            self._status(f"[red]search failed:[/] {exc}")
+            # The escape hatch matters most when the search itself is down, so the row still
+            # appears — from the offline half of the inference. `_show` resets the hit list
+            # with it, which a bare `return` here would leave stale and mis-indexed.
+            self._show(
+                [],
+                key,
+                drafts.prefill(
+                    text, kind_hint=kind_hint, year_hint=year_hint, season_hint=season_hint
+                ),
+                status=f"[red]search failed:[/] {exc}",
+            )
             return
-        self._memo[key] = (time.monotonic(), hits)
+        self._memo[key] = (time.monotonic(), hits, freeform)
         missing = (
             unavailable_for(self._searched_kinds(kind_hint), self.app.settings) if not hits else {}
         )
-        self._show(hits, key, draft, missing)
+        self._show(hits, key, freeform, missing)
 
     def _searched_kinds(self, kind_hint: MediaKind | None) -> tuple[MediaKind, ...]:
         """The kinds this query actually reached, so only their sources are reported on."""
@@ -190,11 +224,13 @@ class AddScreen(ModalScreen[Entity | None]):
         self,
         hits: list[tuple[MediaKind, Candidate]],
         key: KeyT,
-        draft: Draft | None = None,
+        freeform: Draft,
         missing: dict[str, str] | None = None,
+        *,
+        status: str | None = None,
     ) -> None:
         self._hits = hits
-        self._draft = draft
+        self._freeform = freeform
         self._shown_key = key
         options = self._candidates
         options.loading = False
@@ -210,42 +246,59 @@ class AddScreen(ModalScreen[Entity | None]):
                     )
                 )
             )
-        if draft is not None:
-            version = f" {draft.version.token}" if draft.version else ""
+        options.add_option(Option(Text.from_markup(self._freeform_label(freeform, hits))))
+        self._status(status if status is not None else self._search_status(hits, missing, key))
+
+    def _freeform_label(self, draft: Draft, hits: list[tuple[MediaKind, Candidate]]) -> str:
+        """The one row, worded for the situation it is standing in.
+
+        A device with a lineage keeps the fullest form — it is the case with the most inferred
+        and so the most worth stating up front. Otherwise the wording turns on whether anything
+        credible came back: with real matches this is the quiet "none of these", and without
+        them it is the main way forward and says so.
+        """
+        if draft.version is not None:
+            version = f" {draft.version.token}"
             follows = (
                 f"  [dim]follows {draft.predecessor.label}[/]"
                 if draft.predecessor is not None
                 else "  [dim]no lineage found[/]"
             )
-            options.add_option(
-                Option(
-                    Text.from_markup(
-                        f"[bold]{draft.title}[/]  [dim]not announced · track it as new"
-                        f"{version}[/]{follows}"
-                    )
-                )
+            return (
+                f"[bold]{draft.title}[/]  [dim]not announced · track it as new{version}[/]{follows}"
             )
+        kind = f"  [dim]as {draft.kind.value}[/]"
+        if any(cand.score >= MATCH_FLOOR for _, cand in hits):
+            return f"[bold]+ Add “{draft.title}” myself[/]  [dim]— none of these[/]{kind}"
+        return f"[bold]+ Add “{draft.title}” as a new entry[/]  [dim]— nothing matched[/]{kind}"
+
+    def _search_status(
+        self,
+        hits: list[tuple[MediaKind, Candidate]],
+        missing: dict[str, str] | None,
+        key: KeyT,
+    ) -> str:
+        """What the search itself found. The freeform row is *extra* to this line, never a
+        replacement for it — an empty result still has to say why it was empty, or a typo and
+        an unconfigured source both read as "this thing does not exist"."""
         if hits:
-            self._status(
+            return (
                 f"[dim]{len(hits)} candidate(s) · ↓ into the list, enter adds, e reviews first"
                 " · esc back[/]"
             )
-        elif draft is not None:
-            self._status("[yellow]nothing matched[/][dim] — ↓ then enter to review a new entry[/]")
-        elif missing:
+        tail = " [dim]— or add it yourself, last row[/]"
+        if missing:
             # An unconfigured source returns an empty list exactly like a real miss, so
             # without this the answer to "why is Dune not here" is indistinguishable from
             # "Dune does not exist". Name what was never asked.
-            self._status(
-                f"[yellow]nothing matched[/] [dim]— {'; '.join(sorted(missing.values()))}[/]"
-            )
-        else:
-            # Only worth saying when it would actually change the outcome: a hinted search
-            # already scoped itself, and a name we recognised as a device has already been
-            # retried as tech, so telling either to add `kind:tech` sends them nowhere.
-            already_tried = key[1] is not None or looks_like_tech(key[0])
-            hint = "" if already_tried else " [dim]— for a device, add[/] [bold]kind:tech[/]"
-            self._status(f"[yellow]no matches[/]{hint}")
+            named = "; ".join(sorted(missing.values()))
+            return f"[yellow]nothing matched[/] [dim]— {named}[/]{tail}"
+        # Only worth saying when it would actually change the outcome: a hinted search
+        # already scoped itself, and a name we recognised as a device has already been
+        # retried as tech, so telling either to add `kind:tech` sends them nowhere.
+        already_tried = key[1] is not None or looks_like_tech(key[0])
+        hint = "" if already_tried else " [dim]— for a device, add[/] [bold]kind:tech[/]"
+        return f"[yellow]no matches[/]{hint}{tail}"
 
     # --- capturing -----------------------------------------------------------------
     @on(OptionList.OptionSelected, "#candidates")
@@ -253,8 +306,8 @@ class AddScreen(ModalScreen[Entity | None]):
         if 0 <= event.option_index < len(self._hits):
             kind, cand = self._hits[event.option_index]
             self.capture(kind, cand)
-        elif self._draft is not None and event.option_index == len(self._hits):
-            self._review(self._draft)
+        elif self._freeform is not None and event.option_index == len(self._hits):
+            self._review(self._freeform)
 
     def action_review(self) -> None:
         """Open the highlighted row as a draft instead of adding it outright.
@@ -270,8 +323,8 @@ class AddScreen(ModalScreen[Entity | None]):
             kind, cand = self._hits[index]
             parsed = query.parse(self.query_one("#add-query", Input).value)
             self._review(drafts.for_candidate(parsed.text.strip() or cand.title, kind, cand))
-        elif self._draft is not None and index == len(self._hits):
-            self._review(self._draft)
+        elif self._freeform is not None and index == len(self._hits):
+            self._review(self._freeform)
 
     def _review(self, draft: Draft) -> None:
         """Hand off to the review screen and adopt whatever it decides."""
