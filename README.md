@@ -199,12 +199,23 @@ rdt upcoming 'tag:"body horror" year:2026..2028'
   sand dune and a Klaus Schulze album above the film for `dune`. Instead, a query that reads
   as hardware (`Xiaomi Mix 4`, `RTX 5090`, `Steam Deck`) is retried as tech automatically
   when the media DBs come back empty; anything else takes an explicit `kind:tech` (`gadget`
-  and `hardware` alias it), and the no-match line says so
-- **tracking something unannounced** — `Steam Deck 2` matches nothing anywhere, which is the
-  case a release tracker is actually for. When the search comes back empty and the name reads
-  as hardware carrying a generation marker, the trailing marker is stripped, the family is
-  looked up, and the entry is offered as a new one prefilled from its lineage. It can only be
-  added through the review form, because every field on it is a guess
+  and `hardware` alias it), and the no-match line says so — it still names what was missed or
+  never configured, since the freeform row is offered *underneath* that warning, not instead
+  of it
+- **tracking something unannounced** — the last row of the candidate list is always *add it
+  yourself*, because a search that found things can still have found the wrong things, and
+  four of the nine kinds (book, music, podcast, comic) have no source to search at all. It
+  only ever opens the review form, never adds outright, because every field on it is a guess
+- **how much it guesses** — as much as it can defend, and it shows its working. Strongest
+  evidence first: an explicit `kind:`/`year:`/`season:` is your own word and wins outright; a
+  `season:` means a series; otherwise the kind is read off the matches that scored above the
+  match floor *if they all agree* — search a film nobody has listed yet and the rest of its
+  series comes back, which is real evidence about what you are adding. Failing that, a name
+  that reads as hardware is tech, and `Steam Deck 2` additionally strips its generation marker,
+  looks the family up and prefills from the lineage. Nothing at all, and it stays deliberately
+  unclassified rather than confidently wrong. Every rung that fires prints a line saying so on
+  the review form, so a wrong guess is visible and one **←→** from being fixed. Dates are never
+  inferred — a franchise says nothing about when a new entry ships, so only `year:` fills that
 - **/** or **shift+tab** back to the query bar · **ctrl+backspace** delete a word · **s** settings · **r** reload · **q** quit
 
 A half-typed value is shown as what it is about to mean: `is:a` greys `ging` in after the
