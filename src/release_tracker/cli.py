@@ -42,7 +42,7 @@ from release_tracker.artists import (
     parse_link_spec,
     refresh_artist,
 )
-from release_tracker.capture import CaptureOutcome, run_capture
+from release_tracker.capture import CaptureOutcome, run_capture, write_work
 from release_tracker.clock import utc_now, utc_today
 from release_tracker.config import (
     Settings,
@@ -748,10 +748,7 @@ def add(
     title = season_label(name, season) if season is not None else name
     db = _db()
     entity = Entity.create(title, media, season=season, part=part)
-    db.upsert_entity(entity)
-    db.upsert_node(
-        Node(id=entity.id, node_kind=NodeKind.WORK, name=title, owned=True, external_ids={})
-    )
+    write_work(db, entity)
     console.print(f"[green]Added[/] {title} [dim]({media.value})[/]")
     if now:
         summary = asyncio.run(

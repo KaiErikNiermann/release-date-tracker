@@ -31,7 +31,25 @@ from release_tracker.pipeline import pull_entity
 from release_tracker.sources.base import Candidate, make_client
 from release_tracker.titles import season_label
 
-__all__ = ["CaptureOutcome", "capture_work", "entity_for", "run_capture"]
+__all__ = ["CaptureOutcome", "capture_work", "entity_for", "run_capture", "write_work"]
+
+
+def write_work(db: Database, entity: Entity) -> None:
+    """Persist a work: the entity, plus the WORK node that anchors it in the graph.
+
+    Every path that creates a tracked work needs both rows — a bare ``rdt add``, a draft
+    committed from the TUI, and a pinned capture alike — and an entity without its node is
+    invisible to every edge the graph later wants to hang off it. Keyed on ``entity.title``
+    rather than the name the caller typed, because a deduped capture may return an existing
+    entity under its canonical title (see :func:`entity_for`).
+
+    Node ids are left empty here even when the entity has some: ``enrich_work`` re-upserts the
+    node with them once it has actually resolved something.
+    """
+    db.upsert_entity(entity)
+    db.upsert_node(
+        Node(id=entity.id, node_kind=NodeKind.WORK, name=entity.title, owned=True, external_ids={})
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,10 +139,7 @@ async def capture_work(
     if matching.requires_canonical_for_capture(report.kind) and not report.canonical:
         return None
     entity = entity_for(db, name, report, season)
-    db.upsert_entity(entity)
-    db.upsert_node(
-        Node(id=entity.id, node_kind=NodeKind.WORK, name=entity.title, owned=True, external_ids={})
-    )
+    write_work(db, entity)
     if report.canonical:  # only a pinned, resolvable entity has ids to pull dates / enrich from
         async with contextlib.AsyncExitStack() as stack:
             http = client or await stack.enter_async_context(make_client())
