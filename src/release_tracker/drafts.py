@@ -33,6 +33,7 @@ from release_tracker.edits import USER_PROVIDER, set_date
 from release_tracker.logging import get_logger
 from release_tracker.lookup import MATCH_FLOOR, report_for_candidate
 from release_tracker.models import (
+    ConsumptionState,
     Edge,
     Entity,
     MediaKind,
@@ -49,7 +50,7 @@ from release_tracker.tech import (
     classify_tech,
     looks_like_tech,
 )
-from release_tracker.titles import Version, split_version
+from release_tracker.titles import Version, season_label, split_version
 
 __all__ = [
     "PREDECESSOR_KEY",
@@ -279,7 +280,20 @@ async def commit(
         )
         return await capture_work(db, settings, draft.title, report, client=client)
 
-    entity = Entity.create(draft.title, draft.kind, external_ids=_external_ids(draft))
+    # Season coords are titled the way `rdt add --season` titles them, so a season added here
+    # and one added from the CLI land on the same row rather than forking a near-duplicate.
+    title = season_label(draft.title, draft.season) if draft.season is not None else draft.title
+    entity = Entity.create(
+        title,
+        draft.kind,
+        external_ids=_external_ids(draft),
+        season=draft.season,
+        part=draft.part,
+        # Adding something by hand *is* stating an intent, so it starts wanted. Left unset it
+        # could never reach `available` — `bucket_of` gates that on an active state — and the
+        # search path through `capture_work` already sets exactly this.
+        consumption_state=ConsumptionState.WANT,
+    )
     write_work(db, entity)
     if draft.edtf.strip():
         # A bad literal must not lose the entry that was just created — the row is already

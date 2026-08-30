@@ -20,6 +20,7 @@ from release_tracker.config import Settings, get_settings
 from release_tracker.db import Database
 from release_tracker.drafts import PREDECESSOR_KEY, Draft
 from release_tracker.models import (
+    ConsumptionState,
     Entity,
     MediaKind,
     Node,
@@ -210,6 +211,55 @@ async def test_committing_writes_the_entity_and_its_node(db: Database, settings:
     assert entity is not None
     assert db.get_entity(entity.id) is not None
     assert db.get_node(entity.id) is not None
+
+
+async def test_a_hand_added_film_is_written_despite_having_no_canonical_id(
+    db: Database, settings: Settings
+) -> None:
+    """`STRICT_CAPTURE_KINDS` refuses an unpinned film on the *automated* path, where a bad
+    auto-match would mint junk stubs. Adding one deliberately is a different act, and the CLI
+    has always allowed it — so the freeform door must not be narrower than `rdt add`."""
+    entity = await drafts.commit(
+        db,
+        settings,
+        Draft(title="Some Unannounced Film", kind=MediaKind.MOVIE),
+        None,  # type: ignore[arg-type]
+    )
+    assert entity is not None
+    assert db.get_entity(entity.id) is not None
+    assert entity.kind is MediaKind.MOVIE
+    assert entity.external_ids.get("tmdb") is None
+
+
+async def test_a_hand_added_entry_starts_wanted(db: Database, settings: Settings) -> None:
+    """Adding something by hand states an intent. Left unset it could never become
+    `available` — `bucket_of` gates that on an active state — and the search path through
+    `capture_work` already lands on exactly this."""
+    entity = await drafts.commit(
+        db,
+        settings,
+        Draft(title="Some Album", kind=MediaKind.MUSIC),
+        None,  # type: ignore[arg-type]
+    )
+    assert entity is not None
+    assert entity.consumption_state is ConsumptionState.WANT
+
+
+async def test_a_season_draft_is_titled_and_coordinated_like_rdt_add(
+    db: Database, settings: Settings
+) -> None:
+    """A season added here and one added from the CLI must land on the same row, not fork a
+    near-duplicate — so it takes the same canonical title and the same structured coords."""
+    entity = await drafts.commit(
+        db,
+        settings,
+        Draft(title="Pluribus", kind=MediaKind.TV, season=2, part=1),
+        None,  # type: ignore[arg-type]
+    )
+    assert entity is not None
+    assert entity.title == "Pluribus: Season 2"
+    assert (entity.season, entity.part) == (2, 1)
+    assert db.get_entity(entity.id) is not None
 
 
 async def test_the_predecessors_ids_are_never_inherited(db: Database, settings: Settings) -> None:
