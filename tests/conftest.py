@@ -30,6 +30,7 @@ from pydantic import SecretStr
 
 from release_tracker import config, config_file
 from release_tracker.config import CONFIG_FILE_ENV, Settings, get_settings
+from release_tracker.enrich import reset_theme_gate
 from release_tracker.sources.igdb import forget_tokens
 
 
@@ -37,12 +38,15 @@ from release_tracker.sources.igdb import forget_tokens
 def reset_process_caches() -> Iterator[None]:
     """Clear the caches that deliberately outlive a single call, so tests stay order-independent.
 
-    The IGDB app token is shared process-wide to keep an interactive add fast, which would
-    otherwise let one test's state decide another's outcome.
+    Both exist to keep an interactive add fast — a shared IGDB app token, and a latch that stops
+    re-calling an LLM whose key/billing is rejected — and both would otherwise let one test's
+    state decide another's outcome.
     """
     forget_tokens()
+    reset_theme_gate()
     yield
     forget_tokens()
+    reset_theme_gate()
 
 
 @pytest.fixture(autouse=True)

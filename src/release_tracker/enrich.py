@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 
 import httpx
-from openai import AsyncOpenAI
+from openai import APIStatusError, AsyncOpenAI, AuthenticationError, PermissionDeniedError
 from pydantic import BaseModel, Field
 
 from release_tracker.clock import utc_now
@@ -130,7 +130,7 @@ async def enrich_work(
         summary.platforms += 1
 
     if include_themes:
-        for theme in await _llm_themes(settings, entity, graph):
+        for theme in await llm_themes(settings, entity, graph):
             _write_descriptor(
                 db, entity, theme, DescriptorKind.THEME, "openai", SourceTier.MODEL, now
             )
@@ -339,8 +339,48 @@ _THEME_PROMPT = (
 )
 
 
-async def _llm_themes(settings: Settings, entity: Entity, graph: MediaGraph) -> tuple[str, ...]:
-    if not settings.openai_api_key:
+# Error codes that mean the call can never succeed as configured — a rejected key or an
+# unbillable account — as opposed to a blip worth retrying.
+_STANDING_LLM_FAILURES = frozenset(
+    {
+        "insufficient_quota",
+        "credit_balance_exhausted",
+        "billing_hard_limit_reached",
+        "invalid_api_key",
+        "account_deactivated",
+    }
+)
+
+# Set once a standing failure is seen, which switches themes off for the rest of the process.
+_themes_disabled: str | None = None
+
+
+def reset_theme_gate() -> None:
+    """Re-arm theme extraction after a standing failure (new key/credits, and for tests)."""
+    global _themes_disabled  # a process-lifetime latch, deliberately module state
+    _themes_disabled = None
+
+
+def standing_llm_failure(exc: Exception) -> str | None:
+    """Why an LLM call can never succeed as configured, or None if it was a transient blip."""
+    if isinstance(exc, (AuthenticationError, PermissionDeniedError)):
+        return "the API key was rejected"
+    if isinstance(exc, APIStatusError) and {exc.code, exc.type} & _STANDING_LLM_FAILURES:
+        return f"the account cannot be billed ({exc.code or exc.type})"
+    return None
+
+
+async def llm_themes(settings: Settings, entity: Entity, graph: MediaGraph) -> tuple[str, ...]:
+    """Soft thematic tags. Optional by design — any failure yields no themes, never an error.
+
+    Themes sit on the *interactive* add path, so a call that cannot succeed must not be paid
+    for over and over: an exhausted balance costs ~2.5s per add once the SDK's retries are
+    counted, and every later add pays it again. A standing failure therefore latches themes off
+    for the process (see :func:`standing_llm_failure`), and the retry budget is one — losing a
+    few soft tags to a blip is cheaper than making someone wait for them.
+    """
+    global _themes_disabled  # a process-lifetime latch, deliberately module state
+    if not settings.openai_api_key or _themes_disabled is not None:
         return ()
     context = (
         f"Title: {entity.title}\nKind: {entity.kind.value}\n"
@@ -349,7 +389,7 @@ async def _llm_themes(settings: Settings, entity: Entity, graph: MediaGraph) -> 
     )
     try:
         completion = await AsyncOpenAI(
-            api_key=secret(settings.openai_api_key)
+            api_key=secret(settings.openai_api_key), max_retries=1
         ).beta.chat.completions.parse(
             model=settings.openai_model,
             messages=[
@@ -359,7 +399,11 @@ async def _llm_themes(settings: Settings, entity: Entity, graph: MediaGraph) -> 
             response_format=_Themes,
         )
     except Exception as exc:  # network / API / quota — themes are optional, never fatal
-        log.warning("enrich.themes_error", entity=entity.title, error=str(exc))
+        if (reason := standing_llm_failure(exc)) is not None:
+            _themes_disabled = reason
+            log.warning("enrich.themes_disabled", reason=reason, error=str(exc))
+        else:
+            log.warning("enrich.themes_error", entity=entity.title, error=str(exc))
         return ()
     parsed = completion.choices[0].message.parsed
     if parsed is None:
