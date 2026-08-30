@@ -69,8 +69,10 @@ log = get_logger("lookup")
 # The kinds an unhinted search sweeps. Public so a caller can report on exactly the sources
 # that sweep consulted, rather than guessing at them.
 DETECT_KINDS: tuple[MediaKind, ...] = (MediaKind.MOVIE, MediaKind.TV, MediaKind.GAME)
-# below this title-similarity we don't trust the match — caller should web-search.
-_MATCH_FLOOR = 0.4
+# below this title-similarity we don't trust the match — caller should web-search. Public
+# because it is also the line between "these hits describe what you typed" and "these are
+# noise", which is what `drafts.prefill` reads a kind off.
+MATCH_FLOOR = 0.4
 # how far the top candidate's score must lead the runner-up to auto-pick it on the capture
 # (``--track``) path. Within this band the matches are "too close to call" — we refuse to
 # guess and surface the list so the user picks (via --latest / --year / --id). Plain `/rd`
@@ -203,7 +205,7 @@ async def lookup(
             if looks_like_tech(query) and (picked is None or picked[1].score < _TECH_OVERRIDE):
                 return await _tech_lookup(client, query, settings, region)
 
-        if picked is None or picked[1].score < _MATCH_FLOOR:
+        if picked is None or picked[1].score < MATCH_FLOOR:
             return RdReport(
                 query=query,
                 found=False,
@@ -415,7 +417,7 @@ def select_candidate(
     latest: bool = False,
     want_year: int | None = None,
     id_pick: dict[str, str] | None = None,
-    floor: float = _MATCH_FLOOR,
+    floor: float = MATCH_FLOOR,
     dominance: float = _DOMINANCE,
 ) -> CandidatePick:
     """Choose one candidate for capture, or refuse and surface the list.
@@ -545,7 +547,7 @@ async def _tech_lookup(
     """
     cands = await _search_kind(client, query, MediaKind.TECH, settings)
     top = cands[0] if cands else None
-    if top is None or top.score < _MATCH_FLOOR:
+    if top is None or top.score < MATCH_FLOOR:
         return _tech_report(query, settings, region)
     return await report_for_candidate(client, query, MediaKind.TECH, top, settings, region=region)
 
