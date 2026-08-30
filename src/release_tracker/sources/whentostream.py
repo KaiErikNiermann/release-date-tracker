@@ -20,6 +20,7 @@ the skill/LLM to read, not the parser.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -118,18 +119,29 @@ async def hints(
 
     Tries ``<slug>-<year>`` for the canonical year and its neighbours (the article slug's year
     can differ from TMDB's by one). Returns the first article that parses, else None.
+
+    All candidates are fetched **concurrently** but consumed **in offset order**, returning on
+    the first that parses and cancelling the rest. That keeps the serial walk's answer exactly
+    while collapsing its latency: a hit on the canonical year still costs one round trip and no
+    longer waits on the neighbours, and a miss costs one round trip instead of three. Both cases
+    mattered — a miss is common, and a wrong-year slug redirects to the (large) homepage, so the
+    serial walk put ~2s of dead time on the interactive add path.
     """
     if kind is not MediaKind.MOVIE or year is None:
         return None  # the site only covers theatrical films heading to streaming
     slug = slugify(title)
     if not slug:
         return None
-    for offset in _YEAR_OFFSETS:
-        url = f"{_BASE}/{slug}-{year + offset}/"
-        html = await _safe_get(client, url)
-        parsed = parse_article(html, url) if html is not None else None
-        if parsed is not None:
-            return parsed
+    urls = [f"{_BASE}/{slug}-{year + offset}/" for offset in _YEAR_OFFSETS]
+    fetches = [asyncio.ensure_future(_safe_get(client, url)) for url in urls]
+    try:
+        for url, fetch in zip(urls, fetches, strict=True):
+            html = await fetch
+            if html is not None and (parsed := parse_article(html, url)) is not None:
+                return parsed
+    finally:
+        for fetch in fetches:  # a no-op on the ones already done
+            fetch.cancel()
     log.info("whentostream.miss", title=title, year=year)
     return None
 
