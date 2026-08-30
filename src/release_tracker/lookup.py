@@ -331,7 +331,7 @@ async def report_for_candidate(
             notes = (*notes, _collision_note(avail, observations))
             avail = None
         if avail is not None:
-            claims, streaming, predicted, extra = _merge_justwatch(
+            claims, streaming, predicted, extra = merge_justwatch(
                 list(claims), streaming, predicted, avail
             )
             notes = (*notes, *extra)
@@ -679,7 +679,7 @@ def _collision_note(avail: JustWatchAvailability, obs: list[ReleaseObservation])
 
 
 # --- JustWatch merge (real store offers beat estimates / predictions) ----
-def _merge_justwatch(
+def merge_justwatch(
     claims: list[Claim],
     streaming: tuple[str, ...],
     predicted: str | None,
@@ -694,25 +694,37 @@ def _merge_justwatch(
             (c for c in claims if c.label == "Digital" and c.when is not None), None
         )
         where = f"{avail.earliest_vod_platform} ({avail.earliest_vod_country})"
-        if tmdb_digital is not None and tmdb_digital.when is not None and tmdb_digital.when <= jw:
-            # TMDB already has an equal/earlier confirmed digital — keep it, just drop any guess.
+        jw_claim = Claim(
+            f"Digital (earliest · {avail.earliest_vod_country})",
+            jw,
+            DatePrecision.EXACT,
+            "confirmed",
+            0.95,
+            None,
+            f"JustWatch · {where}",
+            avail.earliest_vod_country,
+        )
+        if tmdb_digital is not None and tmdb_digital.when is not None:
+            # TMDB's Digital type is the studio's own date for the market; a store date is derived
+            # from when a *listing* appeared, so it is added beside that date, never over it — one
+            # mis-dated offer would otherwise erase the only piece of ground truth on the report.
+            # Any *guessed* digital still goes: a real store offer settles that much.
             claims = [c for c in claims if not _is_speculative_digital(c)]
-            notes.append(f"JustWatch corroborates digital availability (earliest store: {where}).")
-        else:
-            # JustWatch is the earliest confirmed VOD — it supersedes any TMDB/estimate digital.
-            claims = [c for c in claims if not c.label.startswith("Digital")]
-            claims.append(
-                Claim(
-                    f"Digital (earliest · {avail.earliest_vod_country})",
-                    jw,
-                    DatePrecision.EXACT,
-                    "confirmed",
-                    0.95,
-                    None,
-                    f"JustWatch · {where}",
-                    avail.earliest_vod_country,
+            if jw < tmdb_digital.when:
+                # genuinely earlier in some market — this is the VPN answer, so keep both lines.
+                claims.append(jw_claim)
+                notes.append(
+                    f"JustWatch has it earlier in {avail.earliest_vod_country} "
+                    f"({jw.isoformat()}, {where}) than TMDB's {tmdb_digital.when.isoformat()}."
                 )
-            )
+            else:
+                notes.append(
+                    f"JustWatch corroborates digital availability (earliest store: {where})."
+                )
+        else:
+            # no confirmed digital from TMDB — the store offer is the best evidence there is.
+            claims = [c for c in claims if not c.label.startswith("Digital")]
+            claims.append(jw_claim)
     # Live flatrate homes are ground truth, so a distributor-based prediction is moot — but
     # keep the (region-scoped) `streaming` headline as-is; the full cross-region subscription
     # picture lives in the availability block, region-tagged, rather than flooding one line.
