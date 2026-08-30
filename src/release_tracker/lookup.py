@@ -53,7 +53,7 @@ from release_tracker.resolve import (
     earliest_premiere,
 )
 from release_tracker.sources import justwatch, sources_for, unavailable_for
-from release_tracker.sources.base import Candidate, SourceResult, make_client
+from release_tracker.sources.base import Candidate, Source, SourceResult, make_client
 from release_tracker.sources.ddg import WebInfo, instant_answer
 from release_tracker.sources.igdb import IgdbSource
 from release_tracker.sources.justwatch import JustWatchAvailability
@@ -244,12 +244,18 @@ async def report_for_candidate(
         query, kind, external_ids={cand.id_key: cand.canonical_id}, season=season
     )
 
-    results: list[SourceResult] = []
-    for src in sources_for(kind):
+    # Concurrent, like the batch path in pipeline._pull_entity: every source joins on ids
+    # already pinned on `entity` above, so none of them waits on another's output. Walked
+    # serially this was the whole first second of an interactive add.
+    async def _pull(src: Source) -> SourceResult | None:
         try:
-            results.append(await src.pull(client, entity, settings))
+            return await src.pull(client, entity, settings)
         except Exception as exc:
             log.warning("lookup.pull_error", source=src.name, error=str(exc))
+            return None
+
+    pulled = await asyncio.gather(*(_pull(src) for src in sources_for(kind)))
+    results: list[SourceResult] = [r for r in pulled if r is not None]  # gather keeps order
     observations = [obs for r in results for obs in r.observations]
     canonical: dict[str, str] = {cand.id_key: cand.canonical_id}
     for r in results:
@@ -283,6 +289,12 @@ async def report_for_candidate(
     # JustWatch (film/TV) + When To Stream (movies): fetched concurrently. JustWatch gives the
     # global-earliest real VOD date + live flatrate homes; When To Stream corroborates the US
     # digital window and adds the predicted SVOD-drop date + service.
+    # Stage 1 of the Wikipedia hint is a title search that depends on nothing below, so start
+    # it here and let it ride alongside the offer scan rather than paying for it serially at the
+    # end. `claims` is read pre-merge: a JustWatch date can only *add* to it, so at worst this
+    # mines facets for a title whose only date came from a store — still a sparse-sources case.
+    wiki_task = asyncio.ensure_future(wiki_hints(client, query, want_facets=not claims))
+
     avail: JustWatchAvailability | None = None
     wts: WhenToStreamHints | None = None
     if kind in (MediaKind.MOVIE, MediaKind.TV):
@@ -354,7 +366,7 @@ async def report_for_candidate(
         # matched the title but no dates surfaced — same gap a manual search would fill
         web_info=None if claims else await instant_answer(client, query),
         # always pin the Wikipedia page; mine its facets only when sources were sparse
-        wiki_hints=await wiki_hints(client, query, want_facets=not claims),
+        wiki_hints=await wiki_task,
         availability=avail,
         whentostream=wts,
     )
