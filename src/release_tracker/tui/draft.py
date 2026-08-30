@@ -36,6 +36,12 @@ from release_tracker.tech import TechCategory
 from release_tracker.tui.cycle import Cycle
 from release_tracker.tui.edit import DATE_HELP, Row, TitleRow
 
+
+def _num(value: int | None) -> str:
+    """A coordinate as the form shows it — blank rather than "None" when it is unset."""
+    return "" if value is None else str(value)
+
+
 _KINDS: tuple[MediaKind, ...] = tuple(MediaKind)
 _CATEGORIES: tuple[TechCategory, ...] = tuple(TechCategory)
 
@@ -88,9 +94,11 @@ class DraftScreen(ModalScreen[Entity | None]):
                     (self.draft.category or TechCategory.OTHER).value,
                 )
                 yield Row("date", Input(value=self.draft.edtf, placeholder=DATE_HELP))
+                yield Row("season", Input(value=_num(self.draft.season), placeholder="e.g. 2"))
+                yield Row("part", Input(value=_num(self.draft.part), placeholder="e.g. 1"))
             # Docked as one container — see the note in `edit.py`; docked siblings overlap.
             with Vertical(id="draft-chrome"):
-                yield Static(self._lineage(), id="draft-lineage")
+                yield Static(self._provenance(), id="draft-lineage")
                 yield Static(
                     Text.from_markup(
                         "[dim]↓↑ field · ←→ change · ctrl+s adds it · esc drops it[/]"
@@ -99,22 +107,34 @@ class DraftScreen(ModalScreen[Entity | None]):
                 )
                 yield Static("", id="draft-status")
 
-    def _lineage(self) -> Text:
-        """What the prefill was read off, stated plainly so a wrong guess is visible."""
+    def _provenance(self) -> Text:
+        """Where every prefilled value came from, stated plainly so a wrong guess is visible.
+
+        The whole licence for guessing eagerly. A prefill costs one ←→ to correct *if* you can
+        see it is a guess and what it was read off; unattributed, it is something you have to
+        re-derive to trust, and then it has saved nothing.
+        """
+        lines = [f"[dim]· {reason}[/]" for reason in self.draft.reasons]
+        if (line := self._lineage()) is not None:
+            lines.append(line)
+        return Text.from_markup("\n".join(lines))
+
+    def _lineage(self) -> str | None:
+        """The device line: what family this was positioned against, or that there was none."""
         predecessor = self.draft.predecessor
         if predecessor is None:
-            if self.draft.synthetic:
-                return Text.from_markup(
+            if self.draft.synthetic and self.draft.version is not None:
+                return (
                     "[dim]No lineage found — nothing to infer from, so check the fields above.[/]"
                 )
-            return Text("")
+            return None
         when = f" [dim]({predecessor.released.isoformat()})[/]" if predecessor.released else ""
         what = f"  [dim]{predecessor.instance_of}[/]" if predecessor.instance_of else ""
         maker = f"  [dim]· {predecessor.brand}[/]" if predecessor.brand else ""
-        return Text.from_markup(f"[dim]follows[/] [bold]{predecessor.label}[/]{when}{what}{maker}")
+        return f"[dim]follows[/] [bold]{predecessor.label}[/]{when}{what}{maker}"
 
     def on_mount(self) -> None:
-        self._sync_category()
+        self._sync_rows()
         self.query_one(TitleRow).field.focus()
 
     # --- state ----------------------------------------------------------------------
@@ -129,26 +149,62 @@ class DraftScreen(ModalScreen[Entity | None]):
         commit has nowhere else to look."""
         return next(r for r in self._rows if isinstance(r, _PickerRow) and r.label == label)
 
-    def _sync_category(self) -> None:
-        """Category is a tech-only idea, so the row is only there when the kind is tech."""
-        self.picker("category").display = self.picker("kind").cycle.value == MediaKind.TECH.value
+    def _row(self, label: str) -> Row | _PickerRow:
+        """Any row by label, picker or field alike — what `_KIND_ROWS` hides and shows."""
+        return next(r for r in self._rows if r.label == label)
+
+    # Rows that only make sense for one kind, and the kind that owns them. Category is a tech
+    # idea; season and part are TV coordinates. Driven off one table rather than a branch per
+    # row, so the next kind-specific field is a line here and nothing else.
+    _KIND_ROWS: ClassVar[dict[str, MediaKind]] = {
+        "category": MediaKind.TECH,
+        "season": MediaKind.TV,
+        "part": MediaKind.TV,
+    }
+
+    def _sync_rows(self) -> None:
+        """Show only the rows the chosen kind actually has."""
+        kind = self.picker("kind").cycle.value
+        for label, owner in self._KIND_ROWS.items():
+            self._row(label).display = kind == owner.value
 
     @on(Cycle.Changed)
     def _on_picker(self, event: Cycle.Changed) -> None:
         del event
-        self._sync_category()
+        self._sync_rows()
 
     def _gather(self) -> Draft:
-        """The draft as the form now reads it."""
+        """The draft as the form now reads it.
+
+        A field the current kind does not own is read as unset, never as whatever it held
+        before. Otherwise a `season:2` prefill would survive being re-kinded to `movie` — off
+        screen, so nobody could see it — and land as a coordinate on a film.
+        """
         title = self.query_one(TitleRow).field.value.strip() or self.draft.title
         kind = MediaKind(self.picker("kind").cycle.value)
         category = (
             TechCategory(self.picker("category").cycle.value) if kind is MediaKind.TECH else None
         )
-        date_row = next(r for r in self._rows if isinstance(r, Row) and r.label == "date")
+        tv = kind is MediaKind.TV
         return replace(
-            self.draft, title=title, kind=kind, category=category, edtf=date_row.field.value
+            self.draft,
+            title=title,
+            kind=kind,
+            category=category,
+            edtf=self._value("date"),
+            season=self._coord("season") if tv else None,
+            part=self._coord("part") if tv else None,
         )
+
+    def _value(self, label: str) -> str:
+        row = self._row(label)
+        return row.field.value if isinstance(row, Row) else ""
+
+    def _coord(self, label: str) -> int | None:
+        """A season/part box as a number. Anything that is not one reads as unset — the form
+        has no error channel, and a stray character must not cost the whole entry."""
+        raw = self._value(label).strip()
+        return int(raw) if raw.isdigit() else None
 
     # --- committing -----------------------------------------------------------------
     @on(Input.Submitted)

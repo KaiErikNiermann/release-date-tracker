@@ -226,6 +226,66 @@ async def test_edits_made_in_the_form_are_what_gets_committed(
     assert committed.title == "Steam Deck 2"
 
 
+async def test_the_form_says_why_each_field_was_prefilled(app: RdtApp) -> None:
+    """The whole licence for guessing eagerly. A prefill costs one ←→ to correct *if* you can
+    see it is a guess and what it was read off; unattributed it saves nothing."""
+    async with app.run_test(size=(150, 40)) as pilot:
+        app.push_screen(
+            DraftScreen(
+                Draft(
+                    title="Avengers Doomsday",
+                    kind=MediaKind.MOVIE,
+                    reasons=("kind read off the 2 matches above (all movie)",),
+                )
+            )
+        )
+        await pilot.pause()
+        assert "2 matches above" in str(app.screen.query_one("#draft-lineage", Static).content)
+
+
+async def test_the_coord_rows_belong_to_tv_alone(app: RdtApp) -> None:
+    """Season and part are TV coordinates, shown on the same terms the category row is shown
+    for tech — so a film never offers a field that would mean nothing on it."""
+    async with app.run_test(size=(150, 40)) as pilot:
+        app.push_screen(DraftScreen(Draft(title="Pluribus", kind=MediaKind.TV, season=2)))
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, DraftScreen)
+        assert screen._row("season").display  # pyright: ignore[reportPrivateUsage]
+        kind = screen.picker("kind").cycle
+        while kind.value != MediaKind.MOVIE.value:
+            kind.action_step(1)
+        await pilot.pause()
+        assert not screen._row("season").display  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_a_coord_left_behind_by_a_kind_change_is_not_written(
+    app: RdtApp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hidden-field trap. A `season:2` prefill must not survive being re-kinded to a film
+    off screen, where nobody could see it, and land as a coordinate on a movie."""
+    committed: list[Draft] = []
+
+    async def _commit(*_a: object, **_k: object) -> Entity | None:
+        committed.append(_a[2])  # type: ignore[arg-type]
+        return None
+
+    monkeypatch.setattr(drafts, "commit", _commit)
+
+    async with app.run_test(size=(150, 40)) as pilot:
+        app.push_screen(DraftScreen(Draft(title="Pluribus", kind=MediaKind.TV, season=2, part=1)))
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, DraftScreen)
+        kind = screen.picker("kind").cycle
+        while kind.value != MediaKind.MOVIE.value:
+            kind.action_step(1)
+        await pilot.press("ctrl+s")
+        await until(pilot, lambda: bool(committed), "the commit")
+        assert committed[0].season is None
+        assert committed[0].part is None
+
+
 async def test_escape_drops_the_draft_without_writing(app: RdtApp) -> None:
     async with app.run_test(size=(150, 40)) as pilot:
         app.push_screen(DraftScreen(_synthetic()))

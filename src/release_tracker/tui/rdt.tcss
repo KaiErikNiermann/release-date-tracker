@@ -215,8 +215,19 @@ EditScreen {
     overflow-y: auto;
 }
 
-#draft-lineage, #draft-foot, #draft-status {
+#draft-foot, #draft-status {
     height: 1;
+    color: $text-muted;
+}
+
+/* Provenance is one line per inference that fired, so it has to grow — a prefill nobody can
+   account for is worse than no prefill, and a clipped explanation is the same thing. But it is
+   docked chrome, so unbounded growth pushes the key bar off a short terminal: it scrolls past a
+   share of the window rather than taking the whole thing. */
+#draft-lineage {
+    height: auto;
+    max-height: 20vh;
+    overflow-y: auto;
     color: $text-muted;
 }
 

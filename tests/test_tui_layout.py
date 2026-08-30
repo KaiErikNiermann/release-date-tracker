@@ -130,7 +130,23 @@ async def test_the_draft_form_keeps_its_key_bar(
     path, _ = busy
     app = _app(path)
     async with app.run_test(size=(width, height)) as pilot:
-        app.push_screen(DraftScreen(Draft(title="Steam Deck 2", kind=MediaKind.TECH)))
+        # The *grown* form: conditional coord rows visible and several provenance lines, which
+        # is the shape that actually threatens the docked key bar. A bare draft would not.
+        app.push_screen(
+            DraftScreen(
+                Draft(
+                    title="Pluribus",
+                    kind=MediaKind.TV,
+                    season=2,
+                    part=1,
+                    reasons=(
+                        "kind read off the 3 matches above (all tv)",
+                        "`season:2` means this is a series",
+                        "date from your `year:2027`",
+                    ),
+                )
+            )
+        )
         await pilot.pause()
         await pilot.pause()
         assert _on_screen(app, "#draft-foot", height), f"draft keys off screen at {width}x{height}"
