@@ -27,6 +27,7 @@ from release_tracker.models import (
     RelationKind,
     WorkRelation,
 )
+from release_tracker.sources.base import Candidate
 from release_tracker.sources.wikidata import Lineage
 from release_tracker.tech import CATEGORY_OVERRIDE_KEY, TechCategory, category_of
 
@@ -94,6 +95,108 @@ async def test_a_family_nobody_has_heard_of_still_drafts(no_lineage: None) -> No
     assert draft is not None
     assert draft.predecessor is None
     assert draft.kind is MediaKind.TECH
+
+
+# --- the freeform ladder ----------------------------------------------------------------
+def _hit(title: str, kind: MediaKind, score: float) -> tuple[MediaKind, Candidate]:
+    return kind, Candidate(
+        source="tmdb", id_key="tmdb", canonical_id=title, title=title, score=score
+    )
+
+
+def test_an_explicit_kind_outranks_everything_read_off_the_results() -> None:
+    """The user's own word is not inference and never loses to it."""
+    draft = drafts.prefill(
+        "Doomsday",
+        kind_hint=MediaKind.GAME,
+        hits=[_hit("Doomsday", MediaKind.MOVIE, 0.9)],
+    )
+    assert draft.kind is MediaKind.GAME
+    assert any("kind:game" in reason for reason in draft.reasons)
+
+
+def test_credible_matches_that_agree_set_the_kind() -> None:
+    """The franchise case: the rest of the series is evidence about what you are adding."""
+    draft = drafts.prefill(
+        "Avengers Doomsday",
+        hits=[
+            _hit("Avengers Endgame", MediaKind.MOVIE, 0.72),
+            _hit("Avengers Infinity War", MediaKind.MOVIE, 0.66),
+        ],
+    )
+    assert draft.kind is MediaKind.MOVIE
+    assert any("2 matches above" in reason for reason in draft.reasons)
+
+
+def test_matches_below_the_floor_say_nothing() -> None:
+    """Weak hits are noise. Reading a kind off them is exactly the wrong-prefill case, and
+    they are also what makes the row render as "nothing matched"."""
+    draft = drafts.prefill(
+        "Some Unheard Of Album",
+        hits=[_hit("Some Other Film", MediaKind.MOVIE, 0.2)],
+    )
+    assert draft.kind is MediaKind.OTHER
+    assert draft.reasons == ()
+
+
+def test_a_split_verdict_declines_to_guess() -> None:
+    """A film and a game of the same name cancel out — better unclassified than confidently
+    wrong, because the kind is baked into the entity id."""
+    draft = drafts.prefill(
+        "Tron",
+        hits=[_hit("Tron", MediaKind.MOVIE, 0.9), _hit("Tron", MediaKind.GAME, 0.9)],
+    )
+    assert draft.kind is MediaKind.OTHER
+
+
+def test_a_device_name_falls_to_tech_when_nothing_else_fired() -> None:
+    draft = drafts.prefill("RTX 5090")
+    assert draft.kind is MediaKind.TECH
+    assert draft.category is not TechCategory.OTHER  # classified from the name
+
+
+def test_a_device_name_still_loses_to_credible_matches() -> None:
+    """The lexical guess is the weakest rung: real results outrank a regex over the name."""
+    draft = drafts.prefill(
+        "Steam Deck",
+        hits=[_hit("Steam Deck: The Documentary", MediaKind.MOVIE, 0.8)],
+    )
+    assert draft.kind is MediaKind.MOVIE
+
+
+def test_a_year_annotation_fills_the_date_and_nothing_else_does() -> None:
+    """Dates are never inferred — a franchise says nothing about when a new entry ships."""
+    assert drafts.prefill("Some Film", year_hint=2027).edtf == "2027"
+    assert drafts.prefill("Some Film", hits=[_hit("Some Film 1", MediaKind.MOVIE, 0.9)]).edtf == ""
+
+
+def test_a_season_annotation_implies_a_series_and_carries_the_coord() -> None:
+    draft = drafts.prefill("Pluribus", season_hint=2)
+    assert draft.kind is MediaKind.TV
+    assert draft.season == 2
+
+
+def test_a_season_coord_is_dropped_when_the_kind_is_not_tv() -> None:
+    """Coords are a TV idea; carrying one onto a film would write a meaningless column."""
+    assert drafts.prefill("Some Film", kind_hint=MediaKind.MOVIE, season_hint=2).season is None
+
+
+async def test_the_freeform_ladder_folds_in_a_device_lineage(lineage: None) -> None:
+    """The unannounced-device case is the top rung of the one ladder, not a feature beside
+    it — so it comes back as a single draft carrying both."""
+    del lineage
+    draft = await drafts.infer_freeform(None, "Steam Deck 2")  # type: ignore[arg-type]
+    assert draft.kind is MediaKind.TECH
+    assert draft.predecessor == DECK
+    assert draft.version is not None and draft.version.ordinal == 2
+
+
+async def test_the_freeform_ladder_drafts_what_has_no_lineage_at_all(lineage: None) -> None:
+    """Where the old path returned None and the screen shrugged, there is now still a row."""
+    del lineage
+    draft = await drafts.infer_freeform(None, "Some Unheard Of Album")  # type: ignore[arg-type]
+    assert draft.kind is MediaKind.OTHER
+    assert draft.version is None
 
 
 # --- committing -------------------------------------------------------------------------

@@ -21,22 +21,21 @@ category between generations, and a regex over the name never sees that coming.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
 
 import httpx
 
-from release_tracker.capture import capture_work
+from release_tracker.capture import capture_work, write_work
 from release_tracker.config import Settings
 from release_tracker.db import Database
 from release_tracker.edits import USER_PROVIDER, set_date
 from release_tracker.logging import get_logger
-from release_tracker.lookup import report_for_candidate
+from release_tracker.lookup import MATCH_FLOOR, report_for_candidate
 from release_tracker.models import (
     Edge,
     Entity,
     MediaKind,
-    Node,
-    NodeKind,
     RelationKind,
     ReleaseChannel,
     SourceTier,
@@ -44,7 +43,12 @@ from release_tracker.models import (
 )
 from release_tracker.sources.base import Candidate
 from release_tracker.sources.wikidata import Lineage, find_lineage
-from release_tracker.tech import CATEGORY_OVERRIDE_KEY, TechCategory, classify_tech
+from release_tracker.tech import (
+    CATEGORY_OVERRIDE_KEY,
+    TechCategory,
+    classify_tech,
+    looks_like_tech,
+)
 from release_tracker.titles import Version, split_version
 
 __all__ = [
@@ -52,7 +56,9 @@ __all__ = [
     "Draft",
     "commit",
     "for_candidate",
+    "infer_freeform",
     "infer_synthetic",
+    "prefill",
 ]
 
 log = get_logger("drafts")
@@ -78,6 +84,11 @@ class Draft:
     version: Version | None = None  # the generation marker, when the title carried one
     predecessor: Lineage | None = None  # what it was positioned against
     candidate: Candidate | None = None  # set when this came from a real search hit
+    season: int | None = None  # TV only; structured coords, as `rdt add --season` writes them
+    part: int | None = None  # TV only; the mid-season cut within the season
+    # Why each field looks the way it does, one line per inference that fired. The review
+    # screen prints these verbatim: a prefill nobody can account for is worse than none.
+    reasons: tuple[str, ...] = ()
 
     @property
     def synthetic(self) -> bool:
@@ -93,6 +104,120 @@ def for_candidate(title: str, kind: MediaKind, candidate: Candidate) -> Draft:
         category=classify_tech(title) if kind is MediaKind.TECH else None,
         candidate=candidate,
     )
+
+
+def _consensus_kind(
+    hits: Sequence[tuple[MediaKind, Candidate]],
+) -> tuple[MediaKind, int] | None:
+    """The kind every *credible* hit agrees on, and how many said so — else None.
+
+    The franchise case. Searching a film that has not been listed yet still surfaces the rest
+    of its series, and "the things that actually look like what you typed are all movies" is
+    real evidence about what you are adding. ``Candidate.score`` is already title similarity
+    against the query (:func:`matching.score_candidate`) and is comparable across sources, so
+    ``MATCH_FLOOR`` — the line the capture path already uses for "we don't trust this match" —
+    is exactly the right filter. Hits below it are noise and say nothing; a split verdict
+    (a film and a game of the same name) says nothing either, and we decline rather than guess.
+    """
+    kinds = [kind for kind, cand in hits if cand.score >= MATCH_FLOOR]
+    if not kinds or len(set(kinds)) != 1:
+        return None
+    return kinds[0], len(kinds)
+
+
+def _infer_kind(
+    title: str,
+    kind_hint: MediaKind | None,
+    season_hint: int | None,
+    hits: Sequence[tuple[MediaKind, Candidate]],
+    reasons: list[str],
+) -> MediaKind:
+    """The kind ladder, strongest evidence first, recording why the winning rung fired."""
+    if kind_hint is not None:
+        reasons.append(f"kind from your `kind:{kind_hint.value}`")
+        return kind_hint
+    # `season:` is the user's own word too, so it outranks anything read off the results.
+    if season_hint is not None:
+        reasons.append(f"`season:{season_hint}` means this is a series")
+        return MediaKind.TV
+    if (consensus := _consensus_kind(hits)) is not None:
+        kind, count = consensus
+        plural = "es" if count > 1 else ""
+        reasons.append(f"kind read off the {count} match{plural} above (all {kind.value})")
+        return kind
+    if looks_like_tech(title):
+        reasons.append("the name reads like a device")
+        return MediaKind.TECH
+    return MediaKind.OTHER
+
+
+def prefill(
+    text: str,
+    *,
+    kind_hint: MediaKind | None = None,
+    year_hint: int | None = None,
+    season_hint: int | None = None,
+    hits: Sequence[tuple[MediaKind, Candidate]] = (),
+) -> Draft:
+    """A draft for anything at all, filled in from whatever the query and the results imply.
+
+    This is the always-available door: no canonical id, no version marker and no source
+    coverage required, because four of the nine kinds (book, music, podcast, comic) have no
+    source at all and a tracker that cannot hold an unannounced thing is missing the point.
+
+    Pure and synchronous on purpose. It is the one inference that must still work when the
+    search itself has just failed, and it is the part worth unit-testing rung by rung.
+
+    Deliberately never infers a *date*. The lineage code declines to guess one from successor
+    cadence for good reason (see the module docstring), and a franchise's other entries say
+    even less about when a new one ships — only an explicit ``year:`` fills that field.
+    """
+    title = text.strip()
+    reasons: list[str] = []
+    kind = _infer_kind(title, kind_hint, season_hint, hits, reasons)
+    if year_hint is not None:
+        reasons.append(f"date from your `year:{year_hint}`")
+    return Draft(
+        title=title,
+        kind=kind,
+        category=classify_tech(title) if kind is MediaKind.TECH else None,
+        edtf=str(year_hint) if year_hint is not None else "",
+        season=season_hint if kind is MediaKind.TV else None,
+        reasons=tuple(reasons),
+    )
+
+
+async def infer_freeform(
+    client: httpx.AsyncClient,
+    text: str,
+    *,
+    kind_hint: MediaKind | None = None,
+    year_hint: int | None = None,
+    season_hint: int | None = None,
+    hits: Sequence[tuple[MediaKind, Candidate]] = (),
+) -> Draft:
+    """:func:`prefill`, plus the one inference that needs the network.
+
+    Tech is the only kind with a lineage worth chasing, so when the ladder lands on tech the
+    device path runs on top and folds in the generation marker and the predecessor. One row
+    comes out either way — the unannounced-device case is the richest rung of this ladder,
+    not a feature sitting beside it.
+    """
+    draft = prefill(
+        text,
+        kind_hint=kind_hint,
+        year_hint=year_hint,
+        season_hint=season_hint,
+        hits=hits,
+    )
+    if draft.kind is not MediaKind.TECH:
+        return draft
+    device = await infer_synthetic(client, draft.title)
+    if device is None:  # no generation marker — nothing to look a family up by
+        return draft
+    # The lineage speaks for itself on the review screen (`follows <predecessor>`), so it adds
+    # no reason line here; only the fields it actually filled come across.
+    return replace(draft, version=device.version, predecessor=device.predecessor)
 
 
 async def infer_synthetic(client: httpx.AsyncClient, text: str) -> Draft | None:
@@ -155,10 +280,7 @@ async def commit(
         return await capture_work(db, settings, draft.title, report, client=client)
 
     entity = Entity.create(draft.title, draft.kind, external_ids=_external_ids(draft))
-    db.upsert_entity(entity)
-    db.upsert_node(
-        Node(id=entity.id, node_kind=NodeKind.WORK, name=draft.title, owned=True, external_ids={})
-    )
+    write_work(db, entity)
     if draft.edtf.strip():
         # A bad literal must not lose the entry that was just created — the row is already
         # there and the user can fix the date from the card.
