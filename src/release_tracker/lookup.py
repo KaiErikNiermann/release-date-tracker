@@ -48,6 +48,7 @@ from release_tracker.models import (
 from release_tracker.platforms import learn_predicted_platform
 from release_tracker.resolve import (
     commercial_anchor,
+    confirmed_theatrical_by_region,
     earliest_confirmed_theatrical,
     earliest_premiere,
 )
@@ -291,7 +292,17 @@ async def report_for_candidate(
         jw_season_blocked = season is not None
         jw_task = (
             justwatch.availability(
-                client, cand.title, kind, countries=settings.justwatch_regions, year=cand.year
+                client,
+                cand.title,
+                kind,
+                countries=settings.justwatch_regions,
+                year=cand.year,
+                # per-market cinema dates, so a pre-order listing dated to theatrical day
+                # can't be mistaken for the digital release (see TheatricalFloor).
+                floor=justwatch.TheatricalFloor(
+                    confirmed_theatrical_by_region(observations),
+                    earliest_confirmed_theatrical(observations),
+                ),
             )
             if settings.justwatch_enabled and not jw_season_blocked
             else _none()

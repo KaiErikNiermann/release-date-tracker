@@ -14,6 +14,7 @@ from release_tracker.models import (
 from release_tracker.resolve import (
     best_estimates,
     commercial_anchor,
+    confirmed_theatrical_by_region,
     earliest_confirmed_theatrical,
     earliest_premiere,
     outranked_manual,
@@ -329,3 +330,50 @@ def test_an_unconfirmed_hand_authored_date_loses_on_certainty_first() -> None:
         "manual",
     )
     assert reasons == {ReleaseChannel.PRIMARY: "theirs is confirmed"}
+
+
+# --- per-region theatrical floor -------------------------------------------------------------
+def _theatrical(
+    region: str, when: date, *, certainty: Certainty = Certainty.CONFIRMED
+) -> ReleaseObservation:
+    return ReleaseObservation(
+        entity_id="movie-x",
+        channel=ReleaseChannel.THEATRICAL,
+        region=region,
+        release_date=when,
+        precision=DatePrecision.EXACT,
+        certainty=certainty,
+        source_tier=SourceTier.AGGREGATOR,
+        provider="tmdb",
+        fetched_at=datetime(2026, 6, 1, tzinfo=UTC),
+    )
+
+
+def test_confirmed_theatrical_by_region_keeps_each_markets_earliest() -> None:
+    obs = [
+        _theatrical("ES", date(2026, 6, 17)),
+        _theatrical("US", date(2026, 6, 19)),
+        _theatrical("US", date(2026, 6, 26)),  # a later US row must not win its region
+    ]
+    assert confirmed_theatrical_by_region(obs) == {
+        "ES": date(2026, 6, 17),
+        "US": date(2026, 6, 19),
+    }
+
+
+def test_confirmed_theatrical_by_region_excludes_unconfirmed_and_premieres() -> None:
+    obs = [
+        _theatrical("US", date(2026, 6, 19), certainty=Certainty.ESTIMATED),
+        ReleaseObservation(
+            entity_id="movie-x",
+            channel=ReleaseChannel.PREMIERE,  # a festival showing is not the commercial run
+            region="US",
+            release_date=date(2026, 6, 9),
+            precision=DatePrecision.EXACT,
+            certainty=Certainty.CONFIRMED,
+            source_tier=SourceTier.AGGREGATOR,
+            provider="tmdb",
+            fetched_at=datetime(2026, 6, 1, tzinfo=UTC),
+        ),
+    ]
+    assert confirmed_theatrical_by_region(obs) == {}

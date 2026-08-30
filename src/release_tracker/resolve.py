@@ -105,6 +105,28 @@ def earliest_confirmed_theatrical(obs: Iterable[ReleaseObservation]) -> date | N
     return min(dates) if dates else None
 
 
+def confirmed_theatrical_by_region(obs: Iterable[ReleaseObservation]) -> dict[str, date]:
+    """Earliest *confirmed commercial* theatrical date **per region** — each market's cinema day.
+
+    The per-market view is what :func:`earliest_confirmed_theatrical`'s single global floor cannot
+    give: once a rollout is staggered, an offer dated to a *later* market's cinema day still sits
+    after the global floor and survives it. Storefronts date an offer from when its listing went
+    up, and a listing goes up (as a pre-order) on the local cinema day, so only a region-matched
+    comparison tells that artifact apart from a real VOD date.
+    """
+    out: dict[str, date] = {}
+    for o in obs:
+        if (
+            o.channel in COMMERCIAL_THEATRICAL
+            and o.release_date is not None
+            and o.certainty in _CONFIRMED
+        ):
+            cur = out.get(o.region)
+            if cur is None or o.release_date < cur:
+                out[o.region] = o.release_date
+    return out
+
+
 def score_observation(obs: ReleaseObservation, *, corroboration: int = 1) -> float:
     """Confidence in [0, 1] for a single claim.
 

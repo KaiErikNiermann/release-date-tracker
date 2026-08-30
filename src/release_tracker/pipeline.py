@@ -193,6 +193,10 @@ async def _refresh_offers(
     # deferred imports: the guards live in lookup, which pulls a heavy dependency graph.
     from release_tracker.lookup import justwatch_predates_theatrical, justwatch_year_mismatch
     from release_tracker.matching import year_hint
+    from release_tracker.resolve import (
+        confirmed_theatrical_by_region,
+        earliest_confirmed_theatrical,
+    )
 
     if not settings.justwatch_enabled or entity.kind not in (MediaKind.MOVIE, MediaKind.TV):
         return
@@ -201,7 +205,14 @@ async def _refresh_offers(
     obs = list(db.iter_observations(entity.id))
     hint = year_hint([o.release_date for o in obs if o.release_date], utc_today())
     avail = await justwatch.availability(
-        client, entity.title, entity.kind, countries=settings.justwatch_regions, year=hint
+        client,
+        entity.title,
+        entity.kind,
+        countries=settings.justwatch_regions,
+        year=hint,
+        floor=justwatch.TheatricalFloor(
+            confirmed_theatrical_by_region(obs), earliest_confirmed_theatrical(obs)
+        ),
     )
     if avail is None or justwatch_year_mismatch(avail, hint) is not None:
         return

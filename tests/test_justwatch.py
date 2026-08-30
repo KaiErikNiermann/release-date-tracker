@@ -16,8 +16,10 @@ from release_tracker.models import (
 from release_tracker.sources.justwatch import (
     JustWatchAvailability,
     Offer,
+    TheatricalFloor,
     dedupe,
     earliest_vod,
+    is_listing_artifact,
     parse_from_time,
     parse_offers,
     parse_price,
@@ -105,6 +107,48 @@ def test_earliest_vod_ignores_flatrate_and_undated() -> None:
 def test_earliest_vod_empty_when_no_dated_vod() -> None:
     offers = (Offer("US", "flatrate", "Peacock", "hd", None, "USD", date(2024, 1, 1)),)
     assert earliest_vod(offers) == (None, None, None)
+
+
+# --- theatrical floor: a pre-order listing is not a VOD date --------------------------------
+# Toy Story 5 as JustWatch actually served it (2026-08-30): every Apple TV offer reports its
+# own market's cinema day, two months ahead of the Amazon offers holding the real VOD window.
+_TS5_OFFERS = (
+    Offer("ES", "buy", "Apple TV Store", "sd", 16.99, "EUR", date(2026, 6, 17)),
+    Offer("AU", "buy", "Apple TV Store", "sd", 34.99, "AUD", date(2026, 6, 18)),
+    Offer("US", "buy", "Apple TV Store", "hd", 24.99, "USD", date(2026, 6, 19)),
+    Offer("ES", "buy", "Amazon Video", "sd", 16.99, "EUR", date(2026, 8, 17)),
+    Offer("US", "buy", "Amazon Video", "sd", 24.99, "USD", date(2026, 8, 18)),
+)
+_TS5_FLOOR = TheatricalFloor(
+    {"ES": date(2026, 6, 17), "AU": date(2026, 6, 18), "US": date(2026, 6, 19)},
+    date(2026, 6, 17),
+)
+
+
+def test_earliest_vod_drops_offers_dated_to_their_own_market_premiere() -> None:
+    # without the floor the cinema date wins outright — the bug this guards.
+    assert earliest_vod(_TS5_OFFERS)[0] == date(2026, 6, 17)
+    when, country, platform = earliest_vod(_TS5_OFFERS, _TS5_FLOOR)
+    assert (when, country, platform) == (date(2026, 8, 17), "ES", "Amazon Video")
+
+
+def test_listing_artifact_is_judged_per_market_not_globally() -> None:
+    # US Apple (06-19) postdates the *global* earliest cinema date (ES 06-17), so only the
+    # per-market comparison catches it.
+    us_apple = Offer("US", "buy", "Apple TV Store", "hd", 24.99, "USD", date(2026, 6, 19))
+    assert is_listing_artifact(us_apple, _TS5_FLOOR)
+    assert not is_listing_artifact(us_apple, TheatricalFloor({}, date(2026, 6, 17)))
+
+
+def test_unmapped_market_falls_back_to_the_earliest_cinema_date() -> None:
+    floor = TheatricalFloor({"US": date(2026, 6, 19)}, date(2026, 6, 17))
+    assert floor.for_country("jp") == date(2026, 6, 17)  # unmapped -> global, case-insensitive
+    assert floor.for_country("US") == date(2026, 6, 19)
+
+
+def test_floor_with_no_theatrical_dates_drops_nothing() -> None:
+    # a straight-to-VOD title has no cinema day to compare against — keep every offer.
+    assert earliest_vod(_TS5_OFFERS, TheatricalFloor({}, None))[0] == date(2026, 6, 17)
 
 
 def test_dedupe_keeps_dated_then_cheapest() -> None:

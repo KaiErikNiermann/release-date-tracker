@@ -8,10 +8,12 @@ GraphQL directly hands those back — per country, per platform, per monetizatio
 (Apple TV, Amazon, Google Play, Fandango…) aggregated into one keyless call.
 
 The headline use is *earliest digital + where*: fan the same query across a basket of
-early-window countries and take ``min(availableFromTime)`` over the buy/rent offers — the
-soonest a title can be bought/rented anywhere, and which storefront, so a VPN target falls
-out for free. The detailed offer set also **validates** platform availability against
-ground truth instead of guessing a streaming home from the distributor.
+early-window countries and take the earliest ``availableFromTime`` over the buy/rent
+offers — the soonest a title can be bought/rented anywhere, and which storefront, so a VPN
+target falls out for free. That date is a *listing* date, so the pick is floored by each
+market's cinema day (see :class:`TheatricalFloor`) or a pre-order would win it. The detailed
+offer set also **validates** platform availability against ground truth instead of guessing a
+streaming home from the distributor.
 
 Contract mirrors :mod:`release_tracker.sources.ddg`: best-effort, **never raises** (a miss
 or outage yields ``None`` / an empty offer list), and ``to_dict`` omits empty fields so the
@@ -23,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, cast
@@ -78,6 +81,23 @@ _COUNTRY_LANG: dict[str, str] = {
     "BR": "pt",
     "NL": "nl",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class TheatricalFloor:
+    """The cinema dates a store offer has to postdate before it counts as a real VOD date.
+
+    ``by_country`` is each market's own cinema day; ``earliest`` is the earliest anywhere and
+    stands in for a country with no known theatrical date of its own (the weaker, keep-more-data
+    bound, so an unmapped market never loses a legitimate offer).
+    """
+
+    by_country: Mapping[str, date]
+    earliest: date | None = None
+
+    def for_country(self, country: str) -> date | None:
+        """The cinema day an offer in ``country`` must postdate, or None when nothing is known."""
+        return self.by_country.get(country.upper(), self.earliest)
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,9 +334,33 @@ async def _query_country(
     )
 
 
-def earliest_vod(offers: tuple[Offer, ...]) -> tuple[date | None, str | None, str | None]:
-    """The soonest dated buy/rent offer: (date, country, platform) — the VPN-target answer."""
+def is_listing_artifact(offer: Offer, floor: TheatricalFloor) -> bool:
+    """True when an offer's date is its store *listing* going up, not the buy/rent going live.
+
+    ``availableFromTime`` dates the listing, and a storefront stands the listing up as a pre-order
+    on the film's local cinema day — Apple reports that day verbatim (Toy Story 5: ES 2026-06-17,
+    AU 2026-06-18, US 2026-06-19, each its market's theatrical date exactly), a full two months
+    before the real VOD window its Amazon offers show.
+    """
+    cinema = floor.for_country(offer.country)
+    when = offer.available_from
+    return cinema is not None and when is not None and when <= cinema
+
+
+def earliest_vod(
+    offers: tuple[Offer, ...], floor: TheatricalFloor | None = None
+) -> tuple[date | None, str | None, str | None]:
+    """The soonest dated buy/rent offer: (date, country, platform) — the VPN-target answer.
+
+    A bare ``min`` here reports the *cinema* release as the digital one, because every storefront
+    that pre-orders from theatrical day contributes an offer dated to it. Passing ``floor`` drops
+    those (see :func:`is_listing_artifact`); the cost is a genuine day-and-date VOD release, which
+    is indistinguishable from the artifact on this field alone and which TMDB's Digital type still
+    carries.
+    """
     dated = [o for o in offers if o.monetization in _VOD and o.available_from is not None]
+    if floor is not None:
+        dated = [o for o in dated if not is_listing_artifact(o, floor)]
     if not dated:
         return None, None, None
     best = min(dated, key=lambda o: cast("date", o.available_from))
@@ -331,11 +375,16 @@ async def availability(
     countries: tuple[str, ...],
     year: int | None = None,
     language: str = "en",
+    floor: TheatricalFloor | None = None,
 ) -> JustWatchAvailability | None:
     """Fan the offer query across a country basket; collect offers + the earliest VOD date.
 
     Best-effort: countries that miss or error simply contribute nothing. Returns ``None`` when
     no offer surfaces anywhere (the title isn't on any store yet) so the caller omits the field.
+
+    ``floor`` carries the per-market cinema dates; without it the earliest-VOD pick is a bare
+    ``min`` and a pre-order listing dated to theatrical day will win it. Pass one whenever the
+    caller holds theatrical observations.
     """
     if kind not in _OBJECT_TYPES or not countries:
         return None
@@ -365,7 +414,7 @@ async def availability(
     if obj_id is None or not offers:
         return None
     deduped = tuple(dedupe(offers))
-    earliest, ec, ep = earliest_vod(deduped)
+    earliest, ec, ep = earliest_vod(deduped, floor)
     return JustWatchAvailability(
         object_id=obj_id,
         title=matched_title,
