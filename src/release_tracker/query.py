@@ -78,6 +78,7 @@ _CORE_FIELDS: frozenset[str] = frozenset(
         "year",
         "season",
         "part",
+        "franchise",
     }
 )
 
@@ -95,6 +96,7 @@ _FIELD_ALIASES: dict[str, str] = {
     "title": BARE_FIELD,
     "on": "platform",
     "platforms": "platform",
+    "continuity": "franchise",
     "regions": "region",
     "country": "region",
     "in": "region",
@@ -151,7 +153,7 @@ _IS_FLAGS: frozenset[str] = frozenset(
 )
 _IS_VALUES: frozenset[str] = _IS_BUCKETS | _IS_FLAGS
 
-_NUMERIC_FIELDS: frozenset[str] = frozenset({"year", "season", "part"})
+_NUMERIC_FIELDS: frozenset[str] = frozenset({"year", "season", "part", "franchise"})
 
 
 # --- lexing -------------------------------------------------------------------------------
@@ -456,6 +458,8 @@ def _match_term(term: Term, row: TrackRow) -> bool:
         return _match_num(term.ranges, () if row.season is None else (row.season,))
     if field == "part":
         return _match_num(term.ranges, () if row.part is None else (row.part,))
+    if field == "franchise":
+        return _match_num(term.ranges, () if row.franchise is None else (row.franchise,))
     return True  # pragma: no cover - unreachable while FIELDS and _match_term agree
 
 

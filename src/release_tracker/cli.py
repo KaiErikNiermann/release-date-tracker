@@ -1267,21 +1267,54 @@ def _resolve_to_node(db: Database, ref: str) -> Node | None:
     return nodes[0] if nodes else None
 
 
+def _resolve_to_series(db: Database, ref: str) -> Node | None:
+    """Resolve a reference to the SERIES node it belongs to.
+
+    A renumbering links *series*, not works: "Born Again continues Daredevil" is one fact about
+    the franchise, not one per season. Resolving to the work would hang the offset off a single
+    season and leave every other one of its seasons unable to find the chain.
+
+    Prefers an exact series name, then the series a matching work belongs to, then a substring.
+    """
+    wanted = ref.strip().casefold()
+    series = db.find_nodes(ref, node_kind=NodeKind.SERIES)
+    if exact := [n for n in series if n.name.casefold() == wanted]:
+        return exact[0]
+    for entity in db.find_entities(ref):
+        edges = db.edges_from(entity.id, RelationKind.PART_OF_SERIES)
+        if len(edges) == 1 and (node := db.get_nodes([edges[0].dst_id]).get(edges[0].dst_id)):
+            return node
+    return series[0] if series else None
+
+
 @app.command()
 def relate(
     work: Annotated[str, typer.Argument(help="the derivative work (id or title)")],
     relation: Annotated[str, typer.Argument(help=f"one of: {_WORK_RELATIONS}")],
     other: Annotated[str, typer.Argument(help="the work/franchise it derives from")],
+    after: Annotated[
+        int | None,
+        typer.Option("--after", help="seasons that ran before a `continues` reset"),
+    ] = None,
 ) -> None:
-    """Record cross-media lineage, e.g. `relate "Arcane: Noxus" spinoff "Arcane"`."""
+    """Record cross-media lineage, e.g. `relate "Arcane: Noxus" spinoff "Arcane"`.
+
+    `continues` is the renumbering case — "Daredevil: Born Again" restarts at season 1 while
+    continuing a show that ended at 3. Give it `--after 3` and the franchise position is
+    derived by walking, so nothing has to store a second season number that could go stale.
+    """
     configure_logging()
     try:
         rel = WorkRelation(relation.lower())
     except ValueError:
         raise typer.BadParameter(f"relation must be one of: {_WORK_RELATIONS}") from None
+    if after is not None and rel is not WorkRelation.CONTINUES:
+        raise typer.BadParameter("--after only means something on a `continues` link")
     db = _db()
-    src = _resolve_to_node(db, work)
-    dst = _resolve_to_node(db, other)
+    # A renumbering is a fact about two *series*; every other relation is about two works.
+    resolve_ref = _resolve_to_series if rel is WorkRelation.CONTINUES else _resolve_to_node
+    src = resolve_ref(db, work)
+    dst = resolve_ref(db, other)
     if src is None or dst is None:
         missing = work if src is None else other
         db.close()
@@ -1312,6 +1345,7 @@ def relate(
             dst_id=dst.id,
             relation=RelationKind.DERIVED_FROM,
             role=rel,
+            ordinal=after,
             source_provider="user",
             source_tier=SourceTier.OFFICIAL,
             confidence=1.0,
@@ -1319,7 +1353,12 @@ def relate(
         )
     )
     db.close()
-    console.print(f"[green]Linked[/] {src.name} [dim]({rel.value} of)[/] [bold]{dst.name}[/].")
+    tail = f" [dim]after {after} season(s)[/]" if after is not None else ""
+    console.print(f"[green]Linked[/] {src.name} [dim]({rel.value})[/] [bold]{dst.name}[/]{tail}.")
+    if rel is WorkRelation.CONTINUES and after is None:
+        console.print(
+            "[dim]No season count on the link — pass --after N to derive the franchise position.[/]"
+        )
 
 
 @app.command()
@@ -2248,6 +2287,18 @@ def _render_card(card: views.WorkCard) -> None:
     else:
         series = ""
     console.print(f"[bold]{e.title}[/] [dim]({e.kind.value})[/]{series}")
+    if (fran := card.franchise) is not None:
+        # Its own line, never merged into the native one. "S1 (S4)" reads as a correction,
+        # and neither number is correcting the other — they count within different things.
+        within = f" within {fran.root.name}" if fran.root is not None else ""
+        where = (
+            f"season {fran.season} of {fran.root.name}"
+            if fran.season is not None and fran.root is not None
+            else f"[yellow]chain incomplete[/]{within}"
+        )
+        console.print(f"[bold]Continuity[/] {where}")
+        for reason in fran.reasons:
+            console.print(f"           [dim]{reason}[/]")
     _render([(e.title, e.kind, est) for est in card.estimates])
     if card.credits:
         console.print("[bold]Who[/]")

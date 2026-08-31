@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from typing import Literal
+from typing import Final, Literal
 
 from release_tracker.config import Settings
 from release_tracker.contingency import (
@@ -187,6 +187,8 @@ class TrackRow:
     aliases: tuple[str, ...]
     season: int | None
     part: int | None
+    # continuity position once a renumbering reset is walked back; None when there is none
+    franchise: int | None
     bucket: Bucket  # which consumption surface this lands on — the one partition rule
     freshness: Freshness | None
     has_notes: bool
@@ -237,6 +239,8 @@ class WorkCard:
     season: int | None = None  # this work's season number within its series
     part: int | None = None  # the cut within it, if the season was split
     part_label: str | None = None  # what that cut was called; None reads as "Part"
+    # where this sits once a renumbering reset is walked back through; None when there is none
+    franchise: FranchisePosition | None = None
     derived_from: tuple[RelatedWork, ...] = ()  # what it descends from
     derivatives: tuple[RelatedWork, ...] = ()  # what descends from it
     blockers: tuple[ConditionLine, ...] = ()  # external conditions this work is BLOCKED_BY
@@ -381,6 +385,8 @@ def _track_row(
     estimates = best_estimates(db.iter_observations(entity.id))
     matcher = matcher_from_settings(settings)
     season, part = coords_of(entity) if entity.kind is MediaKind.TV else (None, None)
+    position = franchise_position(db, entity, season)
+    franchise = position.season if position is not None else None
     chan = settings.availability_channel
     # display picks (unfiltered) drive the row + upcoming ordering — nothing is hidden
     if entity.kind is MediaKind.MOVIE:
@@ -429,6 +435,7 @@ def _track_row(
         # existed carry the coordinate only in their title, and `season:3` has to find them
         season=season,
         part=part,
+        franchise=franchise,
         bucket=bucket_of(entity.consumption_state, available_to_me, today),
         freshness=freshness(pivot.fetched_at if pivot else None, today, settings),
         has_notes=has_notes,
@@ -810,6 +817,7 @@ def work_card(db: Database, entity: Entity) -> WorkCard:
         season=season,
         part=part,
         part_label=entity.part_label,
+        franchise=franchise_position(db, entity, season),
         derived_from=tuple(derived_from(db, entity.id)),
         derivatives=tuple(derivatives_of(db, entity.id)),
         blockers=_blocker_lines(db, entity.id),
@@ -981,6 +989,103 @@ class RelatedWork:
 
     node: Node
     relation: WorkRelation
+
+
+@dataclass(frozen=True, slots=True)
+class Continuation:
+    """One hop of a renumbering chain: what it continues, and how much ran before."""
+
+    node: Node
+    seasons_before: int | None  # None = nobody has said, which is not the same as zero
+
+
+@dataclass(frozen=True, slots=True)
+class FranchisePosition:
+    """Where a work sits in continuity order, once a reset is walked back through.
+
+    ``season`` is None whenever the chain cannot be completed — a hop with no stated offset,
+    a loop, or a fork. A number that might be wrong is worse than no number, because the
+    native one beside it is right and the reader cannot tell which to believe.
+    """
+
+    season: int | None
+    # the far end of the chain — the franchise the count belongs to. None when the walk could
+    # not take even one hop (a fork, or a predecessor no longer in the graph), where there is
+    # a reason worth stating but nothing yet to count within.
+    root: Node | None
+    chain: tuple[Continuation, ...]
+    reasons: tuple[str, ...] = ()
+
+
+# A renumbering chain is two or three hops in every real case (Doctor Who's is the longest at
+# 1963 -> 2005 -> 2024). The cap is only there so a cycle cannot spin.
+_MAX_CONTINUITY_DEPTH: Final[int] = 8
+
+
+def continuation_chain(db: Database, node_id: str) -> tuple[tuple[Continuation, ...], str | None]:
+    """Walk a series' `CONTINUES` links back to its root. Returns (chain, refusal reason)."""
+    chain: list[Continuation] = []
+    seen = {node_id}
+    current = node_id
+    for _ in range(_MAX_CONTINUITY_DEPTH):
+        hops = [
+            e
+            for e in db.edges_from(current, RelationKind.DERIVED_FROM)
+            if e.role is WorkRelation.CONTINUES
+        ]
+        if not hops:
+            return tuple(chain), None
+        if len(hops) > 1:
+            nodes = db.get_nodes(e.dst_id for e in hops)
+            names = ", ".join(sorted(n.name for n in nodes.values()))
+            return tuple(chain), f"continues both {names} — a renumbering has one predecessor"
+        hop = hops[0]
+        if hop.dst_id in seen:
+            return tuple(chain), "the continuation chain loops back on itself"
+        node = db.get_nodes([hop.dst_id]).get(hop.dst_id)
+        if node is None:
+            return tuple(chain), "the series it continues is no longer in the graph"
+        seen.add(hop.dst_id)
+        chain.append(Continuation(node, hop.seasons_before))
+        current = hop.dst_id
+    return tuple(chain), f"stopped after {_MAX_CONTINUITY_DEPTH} hops — is this chain a loop?"
+
+
+def franchise_position(
+    db: Database, entity: Entity, season: int | None
+) -> FranchisePosition | None:
+    """A work's season in continuity order, or None when there is no reset to walk back.
+
+    None is the common and correct answer: TMDB folds most revivals into the original show —
+    Twin Peaks: The Return is S3 of one id, Samurai Jack's revival is S5, Futurama's are
+    seasons of id 615 — and inventing a second number there would manufacture a distinction
+    the source does not make.
+    """
+    if season is None:
+        return None
+    series = db.edges_from(entity.id, RelationKind.PART_OF_SERIES)
+    if len(series) != 1:
+        return None
+    chain, refusal = continuation_chain(db, series[0].dst_id)
+    if not chain and refusal is None:
+        return None
+    root = chain[-1].node if chain else None
+    if refusal is not None:
+        return FranchisePosition(None, root, chain, (refusal,))
+    missing = [c for c in chain if c.seasons_before is None]
+    if missing:
+        names = ", ".join(c.node.name for c in missing)
+        return FranchisePosition(
+            None,
+            root,
+            chain,
+            (f"no season count on the link to {names} — set it with `rdt relate … --after N`",),
+        )
+    before = sum(c.seasons_before or 0 for c in chain)
+    hops = " ← ".join(c.node.name for c in chain)
+    return FranchisePosition(
+        season + before, root, chain, (f"{before} seasons before, via {hops} · you said so",)
+    )
 
 
 def derived_from(db: Database, node_id: str) -> list[RelatedWork]:

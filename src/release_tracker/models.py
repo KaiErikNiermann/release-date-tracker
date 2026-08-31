@@ -403,6 +403,12 @@ class WorkRelation(enum.StrEnum):
     # read backwards, which `derivatives_of` already gives you, unlike PREQUEL which is a
     # genuinely different relation rather than a direction.
     SUCCESSOR = "successor"
+    # A continuation that restarts the count: "Daredevil: Born Again" -> "Marvel's Daredevil".
+    # Its own member because the *numbering resets*, so two season counts coexist over one
+    # continuity — which SEQUEL (a separate work) and SUCCESSOR (a product replacing a
+    # product) do not describe. `Edge.ordinal` on this edge carries how many seasons ran
+    # before the hop, which is what makes the franchise position derivable by walking.
+    CONTINUES = "continues"
     REMAKE = "remake"
     REMASTER = "remaster"
     TIE_IN = "tie_in"  # an art book / soundtrack / companion -> the work
@@ -520,6 +526,32 @@ class Edge(BaseModel):
     confidence: float = 0.7
     owned: bool = False  # the user asserted this edge (vs resolved from the world)
     fetched_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def _ordinal_belongs_to_its_relation(self) -> Edge:
+        """``ordinal`` means two different things, so it may only carry one of them.
+
+        On ``PART_OF_SERIES`` it is a season number; on a ``CONTINUES`` link it is how many
+        seasons ran before the reset. Anywhere else it is meaningless, and letting it be set
+        would leave the franchise walk reading a number that was never about seasons.
+        """
+        allowed = self.relation is RelationKind.PART_OF_SERIES or (
+            self.relation is RelationKind.DERIVED_FROM and self.role is WorkRelation.CONTINUES
+        )
+        if self.ordinal is not None and not allowed:
+            raise ValueError(f"ordinal has no meaning on a {self.relation.value} edge")
+        return self
+
+    @property
+    def seasons_before(self) -> int | None:
+        """Seasons that ran before this continuation, or None when nobody has said.
+
+        Absence is not zero: zero is the claim "nothing ran before", and reading a missing
+        offset as zero would silently renumber a franchise from its reboot.
+        """
+        if self.role is not WorkRelation.CONTINUES:
+            return None
+        return self.ordinal
 
     @property
     def id(self) -> str:

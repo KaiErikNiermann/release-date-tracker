@@ -171,9 +171,25 @@ rdt upcoming 'tag:"body horror" year:2026..2028'
 | `region:` / `in:` | a market something is streamable in at all |
 | `year:` | any release year — `2026`, `2020..2026`, `>=2026`, `<2030` |
 | `season:` `part:` | season / mid-season coords — set with `rdt add --season N [--part N]`, `rdt edit part`, or **s** in the add palette |
+| `franchise:` / `continuity:` | season counted across a reboot's renumbering (see below) |
 
 `is:` is a different axis from `state:`: the *bucket* `watched` spans
 `watched|dropped|skipped`, while the *state* `watched` is only one of them.
+
+A **reboot that restarts the count** carries two season numbers at once. "Daredevil: Born
+Again" is season 1 of itself and the 4th of Daredevil's continuity, and TMDB models the two as
+separate shows because that is what `/tv/{id}/season/{n}` has to resolve against. Say so once,
+between the *series*, and the position is derived by walking:
+
+```
+rdt relate "Daredevil: Born Again" continues "Marvel's Daredevil" --after 3
+```
+
+`season:` keeps meaning the show's own number — it is what the puller depends on, and giving it
+two meanings would make it ambiguous exactly where it must not be. `franchise:` is the second
+ordering beside it. One link covers every season of the continuation, chains compose (Doctor
+Who's 2024 → 2005 → 1963), and a chain that cannot be completed reports why instead of guessing
+a number: a missing `--after` is not read as zero.
 
 `on:netflix@us` and `on:netflix region:us` are **not** the same question. The second is a
 conjunction of two independent row predicates — *has a Netflix edge* and *has a US edge* — so
