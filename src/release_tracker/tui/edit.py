@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import date
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, Literal
 
 from rich.text import Text
 from textual import on
@@ -36,9 +36,11 @@ from release_tracker.models import (
     CreditRole,
     DescriptorKind,
     Entity,
+    MediaKind,
     ReleaseChannel,
 )
 from release_tracker.resolve import outranked_manual
+from release_tracker.titles import DEFAULT_PART_LABEL, slice_suffix
 from release_tracker.tui.completing import (
     CompletingInput,
     Suggester,
@@ -167,6 +169,33 @@ class _CompletingRow(Row):
 class TitleRow(Row):
     def __init__(self, title: str) -> None:
         super().__init__("title", Input(value=title))
+
+
+def _num(value: int | None) -> str:
+    """A coordinate as a form field: blank means unset, not zero."""
+    return "" if value is None else str(value)
+
+
+class CoordRow(Row):
+    """One of a work's series coordinates: season, part, or the word that part goes by.
+
+    All three commit through the same `edits.set_coords`, because they are one fact — a
+    position within a series — and writing them separately would let the entity coord and the
+    series edge disagree about it. Blank means unset; on the label it means "Part", which is
+    what a cut is called when nobody said otherwise.
+    """
+
+    def __init__(self, field: Literal["season", "part", "part label"], value: str) -> None:
+        placeholder = DEFAULT_PART_LABEL if field == "part label" else "e.g. 2"
+        super().__init__(field, Input(value=value, placeholder=placeholder))
+        self.field_name = field
+
+
+class SeriesRow(_CompletingRow):
+    """The series a work sits in — the thing its season number is counted within."""
+
+    def __init__(self, name: str, suggester: Suggester) -> None:
+        super().__init__("series", CompletingInput(suggester, value=name, placeholder="a series…"))
 
 
 class DateRow(Row):
@@ -390,6 +419,17 @@ class EditScreen(ModalScreen[None]):
                 yield DateRow(channel, edtf)
         yield DateRow(None)
 
+        # TV only: a season on a film is a mistake, not a coordinate, and the same gate is
+        # already applied by the add and review screens.
+        if self.entity.kind is MediaKind.TV:
+            yield Static(Text.from_markup("[bold]Series[/]"), classes="edit-head")
+            yield SeriesRow(
+                self.card.series[0] if self.card.series else "", self._suggester("series")
+            )
+            yield CoordRow("season", _num(self.card.season))
+            yield CoordRow("part", _num(self.card.part))
+            yield CoordRow("part label", self.entity.part_label or "")
+
         yield Static(Text.from_markup("[bold]Who[/]"), classes="edit-head")
         for credit in self.card.credits:
             yield CreditRow(
@@ -473,6 +513,8 @@ class EditScreen(ModalScreen[None]):
                 self._add_tag(row, value)
             case PlatformRow():
                 self._platform(row, value)
+            case CoordRow() | SeriesRow():
+                self._coords(row, value)
             case NoteAddRow():
                 self._add_note(row, value)
             case _:  # pragma: no cover - every row type is handled above
@@ -488,6 +530,41 @@ class EditScreen(ModalScreen[None]):
             Text.from_markup(f"[bold]{value}[/]  [dim]edit[/]")
         )
         self._after(graph=True, message=f"renamed to [bold]{value}[/]")
+
+    def _coords(self, row: Row, value: str) -> None:
+        """Write the whole coordinate, reading the other rows for the parts this one isn't.
+
+        One write rather than three: the entity coord and the series edge are two halves of
+        the same fact, and `set_coords` is the only thing that keeps them in step.
+        """
+
+        def field(name: str) -> str:
+            found = next((r for r in self.query(Row) if r.label == name), None)
+            return found.field.value.strip() if found is not None else ""
+
+        def number(name: str) -> int | None:
+            raw = value if row.label == name else field(name)
+            return int(raw) if raw.isdigit() else None
+
+        series = value if row.label == "series" else field("series")
+        label = value if row.label == "part label" else field("part label")
+        try:
+            self.entity = edits.set_coords(
+                self.db,
+                self.entity,
+                season=number("season"),
+                part=number("part"),
+                part_label=label or None,
+                series=series or None,
+            )
+        except edits.NoSeriesError as exc:
+            row.settle(row.original)
+            self._say(f"[yellow]{exc}[/]")
+            return
+        row.settle(value)
+        coord = slice_suffix(self.entity.part, self.entity.part_label)
+        where = f"S{self.entity.season}" if self.entity.season is not None else ""
+        self._after(graph=True, message=f"set to [bold]{f'{where} {coord}'.strip() or '—'}[/]")
 
     def _date(self, row: DateRow, value: str) -> None:
         if not value:
