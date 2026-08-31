@@ -157,7 +157,7 @@ def wcw_cells(
     what makes that matter: without it the two names this column has room for could both be
     markets the reader cannot get to, which reads as "available" and is not.
     """
-    platforms = sorted(row.platforms, key=lambda p: not p.live_in(home))
+    platforms = sorted(row.platforms, key=lambda p: p.rank(home))
     return (
         ", ".join(row.who[:who]) or "[dim]—[/]",
         ", ".join(p.name if p.live_in(home) else f"{p.name}[yellow]*[/]" for p in platforms[:where])

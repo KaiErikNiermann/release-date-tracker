@@ -224,3 +224,32 @@ def test_an_unscoped_platform_is_reachable_from_anywhere() -> None:
     network = PlatformLine("Showtime", predicted=False)
     assert network.live_in({"DE"})
     assert PlatformLine("Hulu", predicted=False, regions=("US",)).live_in({"DE"}) is False
+
+
+# --- display order ------------------------------------------------------------------------
+def test_a_reachable_offer_outranks_an_unscoped_network() -> None:
+    """The column answers "where can I watch this" — an offer beats an attribution."""
+    from release_tracker.views import PlatformLine
+
+    network = PlatformLine("Showtime", predicted=False)
+    offer = PlatformLine("Netflix", predicted=False, regions=("US",))
+    assert sorted([network, offer], key=lambda p: p.rank({"US"}))[0].name == "Netflix"
+
+
+def test_a_platform_you_cannot_reach_sorts_behind_an_unscoped_one() -> None:
+    """Live only in markets the reader has no access to is the least useful thing to show."""
+    from release_tracker.views import PlatformLine
+
+    network = PlatformLine("Showtime", predicted=False)
+    elsewhere = PlatformLine("U-NEXT", predicted=False, regions=("JP",))
+    ordered = sorted([elsewhere, network], key=lambda p: p.rank({"DE"}))
+    assert [p.name for p in ordered] == ["Showtime", "U-NEXT"]
+
+
+def test_a_prediction_never_displaces_a_fact() -> None:
+    """The column truncates, so a guess sorting above a sourced answer would hide it."""
+    from release_tracker.views import PlatformLine
+
+    guess = PlatformLine("Hulu", predicted=True, regions=("US",))
+    fact = PlatformLine("U-NEXT", predicted=False, regions=("JP",))
+    assert sorted([guess, fact], key=lambda p: p.rank({"US"}))[0].name == "U-NEXT"

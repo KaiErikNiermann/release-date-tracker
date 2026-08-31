@@ -112,6 +112,24 @@ class PlatformLine:
     regions: tuple[str, ...] = ()  # ISO-2s, sorted
     providers: tuple[str, ...] = ()  # tmdb / justwatch / model — provenance for the card
 
+    def reach_in(self, home: Iterable[str]) -> int:
+        """How many of ``home``'s markets this platform is known to cover (0 when unscoped)."""
+        return len(frozenset(self.regions) & frozenset(home))
+
+    def rank(self, home: Iterable[str]) -> tuple[int, int, int, str]:
+        """Display order for a truncated list, most useful first.
+
+        The column answers *where can I watch this*, so a market-verified offer outranks an
+        unscoped attribution: a network says who aired it, an offer says where to press play.
+        Ordering is therefore reachable-here, then unscoped (still true, just unlocated), then
+        somewhere you cannot get to — and predictions after all three, since a guess must
+        never displace a fact off the end of a two-name column.
+        """
+        home = frozenset(home)
+        covered = self.reach_in(home)
+        tier = 0 if covered else (1 if not self.regions else 2)
+        return (int(self.predicted), tier, -covered, self.name.casefold())
+
     def live_in(self, regions: Iterable[str]) -> bool:
         """True when this platform is live in any of ``regions`` — or is unscoped.
 
@@ -542,7 +560,10 @@ def _platform_lines(db: Database, entity_id: str) -> list[PlatformLine]:
         PlatformLine(name, all(tiers), node_id, tuple(sorted(regions)), tuple(sorted(providers)))
         for node_id, (name, regions, providers, tiers) in grouped.items()
     ]
-    lines.sort(key=lambda p: (p.predicted, p.name.casefold()))
+    # A stable, home-independent order so the model is deterministic; the display order that
+    # actually matters is `PlatformLine.rank`, which the renderers apply with the reader's
+    # own markets in hand.
+    lines.sort(key=lambda p: (p.predicted, -len(p.regions), p.name.casefold()))
     return lines
 
 
