@@ -25,18 +25,23 @@ from __future__ import annotations
 
 import enum
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from typing import Final
 
 __all__ = [
+    "MIN_SHARED_CAST",
+    "TOP_CAST",
+    "DidYouMean",
     "SeasonRef",
     "SeasonStanding",
     "SeasonVerdict",
     "ShowShape",
     "ShowStance",
+    "Successor",
     "check_season",
     "pending_seasons",
+    "rank_successors",
     "stance_of",
 ]
 
@@ -225,3 +230,96 @@ def check_season(
         highest=shape.highest,
         reasons=tuple(reasons),
     )
+
+
+# How deep to compare casts. Measured at 25: the depth where Dexter's four shared names with
+# New Blood still separate cleanly from Dexter's Laboratory's zero.
+TOP_CAST: Final[int] = 25
+# One shared name is enough to offer. Doctor Who 2005 -> 2024 shares exactly one, because the
+# entire cast turns over at a regeneration, and it is unmistakably a continuation.
+MIN_SHARED_CAST: Final[int] = 1
+
+
+@dataclass(frozen=True, slots=True)
+class Successor:
+    """A show that might carry the season the base one does not."""
+
+    title: str
+    key: str  # the source id, so accepting one can pin it
+    year: int | None
+    seasons: int
+    shared_cast: int
+    reasons: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class DidYouMean:
+    """What fell short, and what else might carry the season that was asked for.
+
+    A list a human picks from, never an answer. Computing the mapping was tried three ways and
+    each failed: a word-aligned prefix filter drops the base show itself ("Marvel's Daredevil"
+    is not prefixed by "daredevil"); token-sharing admits strangers ("Dexter's Laboratory"
+    passes a prefix test on "dexter" and contributes four seasons to a cumulative count); and
+    same-named eras (Doctor Who 1963/2005/2024) are genuinely ambiguous. Counting cumulatively
+    answers "daredevil season 4" with "Marvel's Daredevil season 1".
+    """
+
+    verdict: SeasonVerdict
+    offer: tuple[Successor, ...]
+    reasons: tuple[str, ...] = ()
+
+    @property
+    def after(self) -> int:
+        """The offset a ``continues`` edge would record: seasons the base show ran."""
+        return self.verdict.highest
+
+    def native(self, successor: Successor) -> int | None:
+        """The asked-for season renumbered onto a successor, or None if it lands below one."""
+        landed = self.verdict.season - self.after
+        return landed if landed >= 1 and landed <= max(successor.seasons, landed) else None
+
+
+def rank_successors(
+    base_title: str,
+    candidates: Sequence[Successor],
+    *,
+    min_shared: int = MIN_SHARED_CAST,
+) -> tuple[tuple[Successor, ...], tuple[str, ...]]:
+    """Order same-named shows by how much of the base show's cast they carry.
+
+    Cast overlap is the one signal measured to separate a continuation from a stranger that
+    merely shares a name: against Dexter, New Blood shares four names and Resurrection three,
+    while Dexter's Laboratory shares none. The cheaper signals were tried and are worse —
+    ranking by debut date, shared title words and vote count puts a zero-vote "Dexter Procter"
+    above New Blood.
+
+    A candidate sharing nobody is dropped and *said*, not silently omitted: the reader asked a
+    question and deserves to know the pool was narrowed.
+    """
+    kept: list[Successor] = []
+    dropped: list[Successor] = []
+    for cand in candidates:
+        (kept if cand.shared_cast >= min_shared else dropped).append(cand)
+
+    ranked = tuple(
+        replace(c, reasons=(*c.reasons, *_successor_reasons(c, base_title)))
+        for c in sorted(kept, key=lambda c: (-c.shared_cast, -(c.year or 0)))
+    )
+    reasons: list[str] = []
+    if dropped:
+        names = ", ".join(f"“{c.title}”" for c in dropped)
+        reasons.append(f"{names} share no cast with “{base_title}” — not offered")
+    return ranked, tuple(reasons)
+
+
+def _successor_reasons(cand: Successor, base_title: str) -> tuple[str, ...]:
+    shared = (
+        f"{cand.shared_cast} of the top {TOP_CAST} cast also appear in “{base_title}”"
+        if cand.shared_cast > 1
+        else f"one shared name with “{base_title}”"
+    )
+    if cand.shared_cast > 1:
+        return (shared,)
+    # A whole cast really does turn over — Doctor Who recasts the lead every era — so one name
+    # is offered rather than dismissed, and flagged rather than trusted.
+    return (shared, "a single overlap can be a coincidence — worth checking this one")

@@ -15,12 +15,15 @@ from datetime import date
 import pytest
 
 from release_tracker.seasons import (
+    DidYouMean,
     SeasonRef,
     SeasonStanding,
     ShowShape,
     ShowStance,
+    Successor,
     check_season,
     pending_seasons,
+    rank_successors,
     stance_of,
 )
 
@@ -168,3 +171,58 @@ def test_the_quote_is_the_sources_own_title() -> None:
     assert "“Mine”" in check_season(shape, 2, TODAY, show="Mine").reasons[0]
     nameless = ShowShape(None, "Returning Series", (_s(1, "2025-11-06", 9),), 1)
     assert "this show" in check_season(nameless, 2, TODAY).reasons[0]
+
+
+# --- which show carries the season the base one does not ----------------------------------------
+def _succ(title: str, shared: int, *, year: int = 2020, seasons: int = 1) -> Successor:
+    return Successor(title, title, year, seasons, shared)
+
+
+def test_shared_cast_orders_the_offer() -> None:
+    """The measured Dexter numbers. Cheaper signals were tried and are worse: ranking by debut,
+    shared title words and vote count puts a zero-vote "Dexter Procter" above New Blood."""
+    ranked, _ = rank_successors(
+        "Dexter",
+        [
+            _succ("Dexter: Original Sin", 1),
+            _succ("Dexter: New Blood", 4),
+            _succ("Dexter: Resurrection", 3),
+        ],
+    )
+    assert [s.title for s in ranked] == [
+        "Dexter: New Blood",
+        "Dexter: Resurrection",
+        "Dexter: Original Sin",
+    ]
+
+
+def test_a_stranger_is_dropped_and_named() -> None:
+    """Dexter's Laboratory shares nobody. Silently omitting it would leave the reader unable to
+    tell a narrowed pool from an empty one."""
+    ranked, reasons = rank_successors(
+        "Dexter", [_succ("Dexter: New Blood", 4), _succ("Dexter's Laboratory", 0)]
+    )
+    assert [s.title for s in ranked] == ["Dexter: New Blood"]
+    assert "Dexter's Laboratory" in reasons[0]
+    assert "share no cast" in reasons[0]
+
+
+def test_a_single_overlap_is_offered_but_flagged() -> None:
+    """Doctor Who 2005 -> 2024 shares exactly one name, because the whole cast turns over at a
+    regeneration — and it is unmistakably a continuation."""
+    (only,), _ = rank_successors("Doctor Who", [_succ("Doctor Who (2024)", 1)])
+    assert only.shared_cast == 1
+    assert any("coincidence" in r for r in only.reasons)
+
+
+def test_the_offset_is_the_base_shows_last_season() -> None:
+    """What a `continues` edge would record, and what renumbers the ask onto the successor."""
+    ask = DidYouMean(check_season(_DAREDEVIL, 4, TODAY), (_succ("Born Again", 5, seasons=2),))
+    assert ask.after == 3
+    assert ask.native(ask.offer[0]) == 1  # season 4 of the continuity is Born Again's first
+
+
+def test_a_season_below_the_offset_has_no_landing() -> None:
+    """Asking for season 2 of a franchise whose base ran three cannot land on the successor."""
+    ask = DidYouMean(check_season(_DAREDEVIL, 2, TODAY), (_succ("Born Again", 5, seasons=2),))
+    assert ask.native(ask.offer[0]) is None

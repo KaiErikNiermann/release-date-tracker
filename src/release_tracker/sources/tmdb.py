@@ -30,7 +30,7 @@ from release_tracker.models import (
     ReleaseObservation,
     SourceTier,
 )
-from release_tracker.seasons import SeasonRef, ShowShape, check_season
+from release_tracker.seasons import TOP_CAST, SeasonRef, ShowShape, check_season
 from release_tracker.slices import Episode
 from release_tracker.sources.base import (
     Candidate,
@@ -507,6 +507,27 @@ class TmdbSource:
             and (when := _parse_tmdb_date(raw.get("air_date"))) is not None
         ]
         return tuple(sorted(dated, key=lambda e: e.number))
+
+    async def tv_cast(self, client: httpx.AsyncClient, key: str, tmdb_id: str) -> frozenset[str]:
+        """Top-billed cast of a show, as TMDB person ids.
+
+        ``/aggregate_credits`` rather than ``/credits``: the aggregate rolls a recurring actor
+        up across every season, which is what makes an overlap with a continuation stable
+        instead of depending on which season happened to be sampled.
+
+        One call per candidate, so it is only ever made behind a deliberate trigger — never on
+        the ordinary search path.
+        """
+        detail = cast(
+            "dict[str, Any] | None",
+            await get_json_absentable(
+                client, f"{BASE}/tv/{tmdb_id}/aggregate_credits", params={"api_key": key}
+            ),
+        )
+        if detail is None:
+            return frozenset()
+        people = cast("list[dict[str, Any]]", detail.get("cast") or [])[:TOP_CAST]
+        return frozenset(str(p["id"]) for p in people if p.get("id") is not None)
 
     async def tv_shape(self, client: httpx.AsyncClient, key: str, tmdb_id: str) -> ShowShape:
         """What TMDB lists for a show: its seasons, and whether it says more are coming.
