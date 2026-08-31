@@ -666,6 +666,14 @@ async def test_an_out_of_range_season_is_captured_and_reported(
         lambda _s, msg, **_k: said.append(str(msg)),  # type: ignore[misc]
     )
 
+    # silence the module logger: structlog's PrintLogger writes to a stderr pytest's capture
+    # may have closed by the time the full suite reaches here (the same order-dependent flake
+    # `test_tmdb_seasons` guards against).
+    def _quiet(*_a: object, **_k: object) -> None:
+        return None
+
+    monkeypatch.setattr(add_module.log, "info", _quiet)
+
     async with app.run_test(size=(120, 40)) as pilot:
         screen = await _open(app, pilot, "yellowjackets season:4")
         options = screen.query_one("#candidates", OptionList)
