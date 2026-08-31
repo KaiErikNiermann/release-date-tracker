@@ -234,6 +234,15 @@ we hold no market for (a broadcast network) answers `on:showtime` but never `on:
   their air dates and pick one. The whole-show row stays first either way, and a one-season
   show declines rather than opening a picker with nothing to choose. Either path lands the
   same row `rdt add --season 2` would
+- **adding one part of a season** — **→** on a season opens it into the release blocks its
+  episode air dates imply, and every level stays selectable: the whole show, a whole season, or
+  one cut. Nothing is forced. No source models an intra-season split — TMDB carries Money
+  Heist "Part 1-5" and Cobra Kai S6's three drops as plain numbered seasons — so this reads the
+  one signal that *is* sourced, the gaps between episodes, measured against the season's own
+  cadence rather than a fixed number of days. It proposes and shows its working; a season that
+  did not split still opens, to a row saying so. The *word* a cut was sold under is only ever
+  read back from what you typed (`arcane noxus act 1`), never guessed from outside — unstated,
+  it reads as "Part", and the review form is where you change it
 - **tracking something unannounced** — the last row of the candidate list is always *add it
   yourself*, because a search that found things can still have found the wrong things, and
   four of the nine kinds (book, music, podcast, comic) have no source to search at all. It

@@ -30,6 +30,7 @@ from release_tracker.models import (
     ReleaseObservation,
     SourceTier,
 )
+from release_tracker.slices import Episode
 from release_tracker.sources.base import (
     Candidate,
     Credit,
@@ -474,6 +475,28 @@ class TmdbSource:
             summary=str(detail["overview"]) if detail.get("overview") else None,
             is_anime=is_anime(detail, genres),
         )
+
+    async def tv_episodes(
+        self, client: httpx.AsyncClient, key: str, tmdb_id: str, season: int
+    ) -> tuple[Episode, ...]:
+        """One season's dated episodes, in order — the split detector's only input.
+
+        No new endpoint: ``_pull_tv`` already fetches this exact payload for the season's own
+        ``air_date`` and throws the episode list away. Undated episodes are dropped here
+        rather than downstream, because an episode with no date carries no signal about where
+        a season broke.
+        """
+        detail = cast(
+            "dict[str, Any]",
+            await get_json(client, f"{BASE}/tv/{tmdb_id}/season/{season}", params={"api_key": key}),
+        )
+        dated = [
+            Episode(number, when)
+            for raw in cast("list[dict[str, Any]]", detail.get("episodes") or [])
+            if isinstance(number := raw.get("episode_number"), int)
+            and (when := _parse_tmdb_date(raw.get("air_date"))) is not None
+        ]
+        return tuple(sorted(dated, key=lambda e: e.number))
 
     async def tv_seasons(
         self, client: httpx.AsyncClient, key: str, tmdb_id: str

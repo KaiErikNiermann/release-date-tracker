@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import re
 import time
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 from typing import ClassVar
 
 from rich.text import Text
@@ -37,6 +38,7 @@ from release_tracker.lookup import (
     report_for_candidate,
 )
 from release_tracker.models import Entity, MediaKind
+from release_tracker.slices import SliceProposal, SliceScan, scan_slices
 from release_tracker.sources import unavailable_for
 from release_tracker.sources.base import Candidate
 from release_tracker.sources.tmdb import SeasonRef, TmdbSource
@@ -119,20 +121,76 @@ _MEMO_TTL = 120.0
 
 
 @dataclass(frozen=True, slots=True)
-class _SeasonList:
-    """The picker's state: whose seasons these are, and what TMDB listed.
+class ShowRow:
+    """The whole show — always first, always selectable, never forced."""
+
+
+@dataclass(frozen=True, slots=True)
+class SeasonRow:
+    season: SeasonRef
+    scan: SliceScan | None  # None until this season has been looked at
+    expanded: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class SliceRow:
+    season: SeasonRef
+    proposal: SliceProposal
+
+
+PickRow = ShowRow | SeasonRow | SliceRow
+
+
+@dataclass(frozen=True, slots=True)
+class SeasonPicker:
+    """The picker's state: whose seasons these are, and which are opened to their cuts.
 
     Rendered into the same OptionList rather than a new modal — the pick has to come back to
     `AddScreen.capture` either way, and a second screen would need its own copy of that.
+
+    ``rows`` is the *only* place a row index means anything. The flat version worked out
+    season-from-index arithmetically, which cannot survive a second level: expansion and
+    display would each have their own idea of what row 4 is, and they would drift.
     """
 
     kind: MediaKind
     candidate: Candidate
     seasons: tuple[SeasonRef, ...]
+    scans: Mapping[int, SliceScan] = field(default_factory=dict[int, SliceScan])
+    expanded: frozenset[int] = frozenset()
 
-    def at(self, index: int) -> SeasonRef | None:
-        """The season a row index selects; ``None`` for row 0, the whole-show row."""
-        return self.seasons[index - 1] if 1 <= index <= len(self.seasons) else None
+    @property
+    def rows(self) -> tuple[PickRow, ...]:
+        out: list[PickRow] = [ShowRow()]
+        for season in self.seasons:
+            scan = self.scans.get(season.number)
+            is_open = season.number in self.expanded
+            out.append(SeasonRow(season, scan, is_open))
+            if is_open and scan is not None and scan.split:
+                out.extend(SliceRow(season, p) for p in scan.proposals)
+        return tuple(out)
+
+    def at(self, index: int) -> PickRow | None:
+        rows = self.rows
+        return rows[index] if 0 <= index < len(rows) else None
+
+    def with_scan(self, season: int, scan: SliceScan) -> SeasonPicker:
+        return replace(self, scans={**self.scans, season: scan}, expanded=self.expanded | {season})
+
+    def collapsed(self, season: int) -> SeasonPicker:
+        return replace(self, expanded=self.expanded - {season})
+
+
+def _is_named(season: SeasonRef) -> bool:
+    """Does TMDB carry a real name for this season, rather than a restatement of its number?
+
+    "Murder House", "Night Country", "Mugen Train Arc" are names worth offering. "Season 4"
+    and Stranger Things' "Stranger Things 4" are not — they say what the number already says.
+    """
+    name = season.name.strip().casefold()
+    return (
+        bool(name) and name != f"season {season.number}" and not name.endswith(f" {season.number}")
+    )
 
 
 def _coord_tail(season: int | None, part: int | None = None, label: str | None = None) -> str:
@@ -157,6 +215,10 @@ class AddScreen(ModalScreen[Entity | None]):
         Binding("k", "highlight(-1)", "Up", show=False),
         Binding("e", "review", "Review before adding", show=False),
         Binding("s", "seasons", "Browse this show's seasons", show=False),
+        # Only meaningful inside the picker; inert elsewhere, like `e` on the bar.
+        Binding("right", "expand", "Open a season's cuts", show=False),
+        Binding("space", "expand", "Open a season's cuts", show=False),
+        Binding("left", "collapse", "Close a season's cuts", show=False),
         Binding("slash", "focus_query", "Search", show=False),
         Binding("tab", "move_focus(1)", "Focus next", show=False),
         Binding("shift+tab", "move_focus(-1)", "Focus previous", show=False),
@@ -177,7 +239,7 @@ class AddScreen(ModalScreen[Entity | None]):
         # in the library: a process-global search cache would surprise CLI callers.
         self._memo: dict[KeyT, tuple[float, list[tuple[MediaKind, Candidate]], Draft]] = {}
         # Set while the list is showing a show's seasons instead of the search hits.
-        self._seasons: _SeasonList | None = None
+        self._seasons: SeasonPicker | None = None
         self._season_memo: dict[str, tuple[SeasonRef, ...]] = {}
 
     def compose(self) -> ComposeResult:
@@ -460,39 +522,120 @@ class AddScreen(ModalScreen[Entity | None]):
         if len([x for x in seasons if not x.specials]) <= 1:
             self._status(f"[dim]“{cand.title}” has one season — the row is the whole thing[/]")
             return
-        self._seasons = _SeasonList(kind, cand, seasons)
-        self._show_seasons()
-
-    def _show_seasons(self) -> None:
-        """Render the season rows: the whole show first, then each season."""
-        sl = self._seasons
-        if sl is None:
-            return
         # Specials are listed by TMDB but are not what anyone means by "season"; reachable
         # deliberately via `season:0`, not by sitting in the middle of this list.
-        wanted = [x for x in sl.seasons if not x.specials]
-        self._seasons = _SeasonList(sl.kind, sl.candidate, tuple(wanted))
+        self._seasons = SeasonPicker(kind, cand, tuple(x for x in seasons if not x.specials))
+        self._show_seasons()
+
+    def _show_seasons(self, *, keep: int | None = None) -> None:
+        """Render the picker: the whole show, its seasons, and any opened season's cuts."""
+        picker = self._seasons
+        if picker is None:
+            return
         options = self._candidates
         options.clear_options()
-        options.add_option(
-            Option(
-                Text.from_markup(
-                    f"[bold]◂ {sl.candidate.title}[/]  [dim]the whole show · stays the default[/]"
-                )
-            )
-        )
-        for season in wanted:
-            when = season.air_date.isoformat() if season.air_date else "[dim]—[/]"
-            eps = f"[dim]{season.episodes} ep[/]" if season.episodes else ""
-            options.add_option(
-                Option(Text.from_markup(f"  [bold]Season {season.number}[/]  {when}  {eps}"))
-            )
-        options.highlighted = 0
+        for row in picker.rows:
+            options.add_option(Option(Text.from_markup(self._pick_label(picker, row))))
+        options.highlighted = keep if keep is not None and keep < options.option_count else 0
         options.focus()
-        self._status(
-            f"[dim]{len(wanted)} seasons of[/] [bold]{sl.candidate.title}[/]"
-            " [dim]· enter adds one, e reviews first, s or esc back[/]"
+        self._status(self._picker_status(picker))
+
+    def _pick_label(self, picker: SeasonPicker, row: PickRow) -> str:
+        """One row, at whichever level it sits."""
+        match row:
+            case ShowRow():
+                title = picker.candidate.title
+                return f"[bold]◂ {title}[/]  [dim]the whole show · stays the default[/]"
+            case SeasonRow(season=season, scan=scan, expanded=is_open):
+                when = season.air_date.isoformat() if season.air_date else "[dim]—[/]"
+                eps = f"[dim]{season.episodes} ep[/]" if season.episodes else ""
+                # A name TMDB actually carries is worth offering — "Murder House", "Night
+                # Country", "Mugen Train Arc" — but only when it is one, not "Season 4".
+                named = f"  [cyan]{season.name}[/]" if _is_named(season) else ""
+                cuts = ""
+                if scan is not None and scan.split:
+                    cuts = f"  [cyan]{len(scan.proposals)} cuts[/]"
+                elif scan is not None:
+                    cuts = "  [dim]no split found[/]"
+                marker = "▾" if is_open else "▸"
+                return f"  {marker} [bold]Season {season.number}[/]{named}  {when}  {eps}{cuts}"
+            case SliceRow(proposal=proposal):
+                when = proposal.starts.isoformat()
+                return (
+                    f"      [bold]Part {proposal.index}[/]  {when}"
+                    f"  [dim]{proposal.episodes} ep · from ep {proposal.first_episode}[/]"
+                )
+
+    def _picker_status(self, picker: SeasonPicker) -> str:
+        """What the picker is showing, and — when a season is open — why it says what it does."""
+        head = (
+            f"[dim]{len(picker.seasons)} seasons of[/] [bold]{picker.candidate.title}[/]"
+            " [dim]· → opens a season, enter adds what is highlighted, e reviews, esc back[/]"
         )
+        opened = [s for s in picker.expanded if (scan := picker.scans.get(s)) and scan.reasons]
+        if not opened:
+            return head
+        scan = picker.scans[max(opened)]
+        return head + "".join(f"\n[dim]· {r}[/]" for r in scan.reasons)
+
+    def action_expand(self) -> None:
+        """Open the highlighted season to the release blocks its air dates imply."""
+        picker = self._seasons
+        index = self._candidates.highlighted
+        if picker is None or index is None:
+            return
+        row = picker.at(index)
+        if not isinstance(row, SeasonRow):
+            return
+        if row.scan is not None:  # already looked at — just re-open it
+            self._seasons = replace(picker, expanded=picker.expanded | {row.season.number})
+            self._show_seasons(keep=index)
+            return
+        self.load_slices(row.season, index)
+
+    def action_collapse(self) -> None:
+        """Close the highlighted season back to one row."""
+        picker = self._seasons
+        index = self._candidates.highlighted
+        if picker is None or index is None:
+            return
+        match picker.at(index):
+            case SeasonRow(season=season):
+                self._seasons = picker.collapsed(season.number)
+            case SliceRow(season=season):
+                self._seasons = picker.collapsed(season.number)
+            case _:
+                return
+        self._show_seasons(keep=index)
+
+    @work(exclusive=True, group="add-slices")
+    async def load_slices(self, season: SeasonRef, index: int) -> None:
+        """Fetch one season's episodes and read its release blocks off their air dates.
+
+        Its own worker group again: this must not be cancelled by a keystroke that opens the
+        next season, and must never cancel a capture.
+        """
+        from release_tracker.tui.app import RdtApp
+
+        assert isinstance(self.app, RdtApp)
+        picker = self._seasons
+        key = secret(self.app.settings.tmdb_api_key)
+        if picker is None or not key:
+            return
+        self._candidates.loading = True
+        try:
+            episodes = await TmdbSource().tv_episodes(
+                await self.app.http(), key, picker.candidate.canonical_id, season.number
+            )
+        except Exception as exc:
+            self._candidates.loading = False
+            self._status(f"[red]could not read that season:[/] {exc}")
+            return
+        self._candidates.loading = False
+        # A season that did *not* split still opens, to a row saying so. "We looked and there
+        # is no split" is worth a keystroke, and a row that refuses to open reads as broken.
+        self._seasons = picker.with_scan(season.number, scan_slices(episodes))
+        self._show_seasons(keep=index)
 
     def _close_seasons(self) -> None:
         """Back to the search hits, exactly as they were."""
@@ -502,11 +645,23 @@ class AddScreen(ModalScreen[Entity | None]):
         self._candidates.focus()
 
     # --- capturing -----------------------------------------------------------------
+    @staticmethod
+    def _picked(row: PickRow | None) -> tuple[int | None, int | None, tuple[str, ...]]:
+        """The (season, part, why) a picker row stands for. Show row = no coordinate at all."""
+        match row:
+            case SeasonRow(season=season):
+                return season.number, None, (f"season {season.number} picked from the list",)
+            case SliceRow(season=season, proposal=proposal):
+                why = f"part {proposal.index} of season {season.number}, picked from the list"
+                return season.number, proposal.index, (why,)
+            case _:
+                return None, None, ()
+
     @on(OptionList.OptionSelected, "#candidates")
     def _on_pick(self, event: OptionList.OptionSelected) -> None:
-        if (sl := self._seasons) is not None:
-            season = sl.at(event.option_index)
-            self.capture(sl.kind, sl.candidate, season=season.number if season else None)
+        if (picker := self._seasons) is not None:
+            season, part, _ = self._picked(picker.at(event.option_index))
+            self.capture(picker.kind, picker.candidate, season=season, part=part)
         elif 0 <= event.option_index < len(self._hits):
             kind, cand = self._hits[event.option_index]
             self.capture(kind, cand)
@@ -523,17 +678,22 @@ class AddScreen(ModalScreen[Entity | None]):
         index = self._candidates.highlighted
         if index is None:
             return
-        if (sl := self._seasons) is not None:
-            season = sl.at(index)
+        if (picker := self._seasons) is not None:
+            row = picker.at(index)
+            season, part, why = self._picked(row)
+            # A proposed cut carries the detector's working into the review form, where
+            # `DraftScreen._provenance` already prints it verbatim — that is the whole
+            # "propose, never assert" contract, and it needs no new machinery.
+            if isinstance(row, SliceRow) and (scan := picker.scans.get(row.season.number)):
+                why = (*why, *scan.reasons)
             self._review(
                 drafts.for_candidate(
-                    sl.candidate.title,
-                    sl.kind,
-                    sl.candidate,
-                    season=season.number if season else None,
-                    reasons=(f"season {season.number} picked from the show's season list",)
-                    if season
-                    else (),
+                    picker.candidate.title,
+                    picker.kind,
+                    picker.candidate,
+                    season=season,
+                    part=part,
+                    reasons=why,
                 )
             )
             return
@@ -564,7 +724,14 @@ class AddScreen(ModalScreen[Entity | None]):
         self.app.push_screen(DraftScreen(draft), done)
 
     @work(exclusive=True, group="add-capture")
-    async def capture(self, kind: MediaKind, cand: Candidate, *, season: int | None = None) -> None:
+    async def capture(
+        self,
+        kind: MediaKind,
+        cand: Candidate,
+        *,
+        season: int | None = None,
+        part: int | None = None,
+    ) -> None:
         """Report on the *chosen* candidate then persist — no second search.
 
         Its own worker group. Sharing the default one with `search` meant a keystroke
@@ -578,7 +745,7 @@ class AddScreen(ModalScreen[Entity | None]):
         # An explicit pick off the season list is an act on this screen, so it outranks
         # whatever the bar says; the bar still supplies the coord on the ordinary path.
         season = (season if season is not None else typed.season) if kind is MediaKind.TV else None
-        cut = typed.part if kind is MediaKind.TV else None
+        cut = (part if part is not None else typed.part) if kind is MediaKind.TV else None
         tail = _coord_tail(season, cut, typed.part_label)
         self._busy(True, f"[dim]adding “{cand.title}”{tail} — pulling dates…[/]")
         client = await self.app.http()
@@ -592,7 +759,7 @@ class AddScreen(ModalScreen[Entity | None]):
                 typed.text,
                 report,
                 season=season,
-                part=typed.part if kind is MediaKind.TV else None,
+                part=cut,
                 part_label=typed.part_label if kind is MediaKind.TV else None,
                 client=client,
             )

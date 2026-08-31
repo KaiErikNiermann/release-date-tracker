@@ -20,10 +20,11 @@ from release_tracker import drafts
 from release_tracker.config import get_settings
 from release_tracker.db import Database
 from release_tracker.models import Entity, MediaKind
+from release_tracker.slices import Episode, SliceProposal, SliceScan
 from release_tracker.sources.base import Candidate
 from release_tracker.sources.tmdb import SeasonRef
 from release_tracker.tui import add as add_module
-from release_tracker.tui.add import AddScreen, resolve
+from release_tracker.tui.add import AddScreen, SeasonPicker, SeasonRow, SliceRow, resolve
 from release_tracker.tui.app import RdtApp
 from release_tracker.tui.draft import DraftScreen
 
@@ -394,3 +395,194 @@ def test_an_inferred_cut_says_so() -> None:
     """The label is never guessed from outside the user's own words, so when it *is* read
     off them that has to be visible — it is the only provenance there is."""
     assert any("act 1" in r.casefold() for r in resolve("arcane noxus act 1").reasons)
+
+
+# --- the drill-down picker -------------------------------------------------------------------
+def _picker(*numbers: int) -> SeasonPicker:
+    import datetime as _dt
+
+    return SeasonPicker(
+        MediaKind.TV,
+        _show()[0][1],
+        tuple(SeasonRef(n, f"Season {n}", _dt.date(2020 + n, 1, 1), 10) for n in numbers),
+    )
+
+
+def _scan(*blocks: int) -> SliceScan:
+    import datetime as _dt
+
+    first = 1
+    proposals: list[SliceProposal] = []
+    for i, size in enumerate(blocks, start=1):
+        proposals.append(
+            SliceProposal(i, first, first + size - 1, _dt.date(2024, i, 1), None if i == 1 else 90)
+        )
+        first += size
+    return SliceScan(tuple(proposals), cadence_days=0, threshold_days=21, reasons=("why",))
+
+
+def test_rows_are_the_only_place_an_index_means_anything() -> None:
+    """Expansion and display cannot drift, because they read the same derived list."""
+    picker = _picker(1, 2, 3)
+    assert [type(r).__name__ for r in picker.rows] == [
+        "ShowRow",
+        "SeasonRow",
+        "SeasonRow",
+        "SeasonRow",
+    ]
+
+    opened = picker.with_scan(2, _scan(5, 5, 5))
+    assert [type(r).__name__ for r in opened.rows] == [
+        "ShowRow",
+        "SeasonRow",
+        "SeasonRow",
+        "SliceRow",
+        "SliceRow",
+        "SliceRow",
+        "SeasonRow",
+    ]
+    # the cuts sit under *their* season, not at the end
+    assert isinstance(opened.at(3), SliceRow)
+    assert opened.at(3).season.number == 2  # type: ignore[union-attr]
+    assert isinstance(opened.at(6), SeasonRow)
+
+
+def test_collapsing_restores_the_flat_list() -> None:
+    picker = _picker(1, 2).with_scan(2, _scan(5, 5))
+    assert len(picker.rows) == 5
+    assert len(picker.collapsed(2).rows) == 3
+
+
+def test_a_season_with_no_split_expands_to_no_extra_rows() -> None:
+    """It still *opens* — "we looked and there is no split" is worth a keystroke, and a row
+    that refuses to open is indistinguishable from a broken one."""
+    picker = _picker(1).with_scan(1, _scan(10))
+    assert len(picker.rows) == 2
+    assert 1 in picker.expanded
+
+
+def test_every_level_is_selectable_and_none_is_forced() -> None:
+    """Show, season and cut all resolve to a coordinate — the show to no coordinate at all."""
+    picker = _picker(1, 2).with_scan(2, _scan(5, 5))
+    picked = [AddScreen._picked(picker.at(i)) for i in range(len(picker.rows))]  # pyright: ignore[reportPrivateUsage]
+    assert picked[0][:2] == (None, None)  # the whole show
+    assert picked[1][:2] == (1, None)  # a whole season
+    assert picked[3][:2] == (2, 1)  # a cut of season 2
+    assert picked[4][:2] == (2, 2)
+
+
+@pytest.mark.parametrize(
+    ("name", "number", "named"),
+    [
+        ("Murder House", 1, True),
+        ("Night Country", 4, True),
+        ("Season 4", 4, False),
+        ("Stranger Things 4", 4, False),
+    ],
+)
+def test_only_a_real_season_name_is_offered(name: str, number: int, named: bool) -> None:
+    """ "Murder House" is a name; "Season 4" restates the number and says nothing."""
+    import datetime as _dt
+
+    from release_tracker.tui.add import _is_named  # pyright: ignore[reportPrivateUsage]
+
+    assert _is_named(SeasonRef(number, name, _dt.date(2024, 1, 1), 8)) is named
+
+
+@pytest.fixture
+def episodes(monkeypatch: pytest.MonkeyPatch) -> dict[int, tuple[Episode, ...]]:
+    """Answer `tv_episodes` from a table keyed by season, with no network."""
+    table: dict[int, tuple[Episode, ...]] = {}
+
+    async def _tv_episodes(
+        _self: object, _c: object, _k: str, _id: str, season: int
+    ) -> tuple[Episode, ...]:
+        return table.get(season, ())
+
+    monkeypatch.setattr(add_module.TmdbSource, "tv_episodes", _tv_episodes)
+    return table
+
+
+def _binge(*blocks: tuple[str, int]) -> tuple[Episode, ...]:
+    """A season dropped in all-at-once blocks: (drop date, episode count)."""
+    import datetime as _dt
+
+    days = [_dt.date.fromisoformat(when) for when, count in blocks for _ in range(count)]
+    return tuple(Episode(n, day) for n, day in enumerate(days, start=1))
+
+
+async def test_right_opens_a_season_into_its_proposed_cuts(
+    app: RdtApp,
+    tv_hit: list[str],
+    listed: dict[str, tuple[SeasonRef, ...]],
+    episodes: dict[int, tuple[Episode, ...]],
+) -> None:
+    """Cobra Kai S6's shape: three drops months apart."""
+    listed["117488"] = _seasons(1, 2)
+    episodes[2] = _binge(("2024-07-18", 5), ("2024-11-15", 5), ("2025-02-13", 5))
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _open(app, pilot, "yellowjackets")
+        await _press_s(app, pilot, screen)
+        options = screen.query_one("#candidates", OptionList)
+        options.highlighted = 2  # row 0 = show, 1 = S1, 2 = S2
+        screen.action_expand()
+        await until(pilot, lambda: options.option_count > 3, "the season to open")
+        rows = _rows(screen)
+    assert any("Part 1" in r for r in rows)
+    assert any("Part 3" in r for r in rows)
+    assert any("3 cuts" in r for r in rows)
+
+
+async def test_a_season_that_did_not_split_still_opens_and_says_so(
+    app: RdtApp,
+    tv_hit: list[str],
+    listed: dict[str, tuple[SeasonRef, ...]],
+    episodes: dict[int, tuple[Episode, ...]],
+) -> None:
+    listed["117488"] = _seasons(1, 2)
+    episodes[1] = _binge(("2025-03-04", 9))
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _open(app, pilot, "yellowjackets")
+        await _press_s(app, pilot, screen)
+        screen.query_one("#candidates", OptionList).highlighted = 1
+        screen.action_expand()
+        await until(
+            pilot,
+            lambda: any("no split found" in r for r in _rows(screen)),
+            "the no-split row",
+        )
+
+
+async def test_picking_a_cut_captures_the_season_and_the_part(
+    app: RdtApp,
+    tv_hit: list[str],
+    listed: dict[str, tuple[SeasonRef, ...]],
+    episodes: dict[int, tuple[Episode, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The point of the drill-down: row N under season M adds (M, N)."""
+    listed["117488"] = _seasons(1, 2)
+    episodes[2] = _binge(("2024-07-18", 5), ("2024-11-15", 5))
+    seen: list[tuple[int | None, int | None]] = []
+
+    async def _report(*_a: object, **_k: object) -> object:
+        return object()
+
+    async def _capture(*_a: object, **kw: object) -> Entity:
+        seen.append((kw.get("season"), kw.get("part")))  # type: ignore[arg-type]
+        return Entity.create("Yellowjackets: Season 2, Part 2", MediaKind.TV, season=2, part=2)
+
+    monkeypatch.setattr(add_module, "report_for_candidate", _report)
+    monkeypatch.setattr(add_module, "capture_work", _capture)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _open(app, pilot, "yellowjackets")
+        await _press_s(app, pilot, screen)
+        options = screen.query_one("#candidates", OptionList)
+        options.highlighted = 2
+        screen.action_expand()
+        await until(pilot, lambda: options.option_count > 3, "the season to open")
+        options.highlighted = 4  # show, S1, S2, cut 1, cut 2
+        await pilot.press("enter")
+        await until(pilot, lambda: bool(seen), "the capture")
+    assert seen == [(2, 2)]
