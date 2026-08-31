@@ -50,7 +50,7 @@ from release_tracker.tech import (
     classify_tech,
     looks_like_tech,
 )
-from release_tracker.titles import Version, season_label, split_version
+from release_tracker.titles import Version, slice_title, split_version
 
 __all__ = [
     "PREDECESSOR_KEY",
@@ -87,6 +87,7 @@ class Draft:
     candidate: Candidate | None = None  # set when this came from a real search hit
     season: int | None = None  # TV only; structured coords, as `rdt add --season` writes them
     part: int | None = None  # TV only; the mid-season cut within the season
+    part_label: str | None = None  # what that cut was called — "Part"/"Act"/"Vol"
     # Why each field looks the way it does, one line per inference that fired. The review
     # screen prints these verbatim: a prefill nobody can account for is worse than none.
     reasons: tuple[str, ...] = ()
@@ -104,6 +105,7 @@ def for_candidate(
     *,
     season: int | None = None,
     part: int | None = None,
+    part_label: str | None = None,
     reasons: tuple[str, ...] = (),
 ) -> Draft:
     """A draft standing in for a search hit, so review and capture share one path.
@@ -120,6 +122,7 @@ def for_candidate(
         candidate=candidate,
         season=season if tv else None,
         part=part if tv else None,
+        part_label=part_label if tv else None,
         reasons=reasons if tv and season is not None else (),
     )
 
@@ -305,18 +308,20 @@ async def commit(
             report,
             season=draft.season,
             part=draft.part,
+            part_label=draft.part_label,
             client=client,
         )
 
     # Season coords are titled the way `rdt add --season` titles them, so a season added here
     # and one added from the CLI land on the same row rather than forking a near-duplicate.
-    title = season_label(draft.title, draft.season) if draft.season is not None else draft.title
+    title = slice_title(draft.title, draft.season, draft.part, draft.part_label)
     entity = Entity.create(
         title,
         draft.kind,
         external_ids=_external_ids(draft),
         season=draft.season,
         part=draft.part,
+        part_label=draft.part_label,
         # Adding something by hand *is* stating an intent, so it starts wanted. Left unset it
         # could never reach `available` — `bucket_of` gates that on an active state — and the
         # search path through `capture_work` already sets exactly this.

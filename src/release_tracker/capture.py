@@ -29,7 +29,7 @@ from release_tracker.lookup import (
 from release_tracker.models import ConsumptionState, Entity, MediaKind, Node, NodeKind
 from release_tracker.pipeline import pull_entity
 from release_tracker.sources.base import Candidate, make_client
-from release_tracker.titles import season_label
+from release_tracker.titles import slice_title
 
 __all__ = ["CaptureOutcome", "capture_work", "entity_for", "run_capture", "write_work"]
 
@@ -67,7 +67,12 @@ class CaptureOutcome:
 
 
 def entity_for(
-    db: Database, name: str, report: RdReport, season: int | None, part: int | None = None
+    db: Database,
+    name: str,
+    report: RdReport,
+    season: int | None,
+    part: int | None = None,
+    part_label: str | None = None,
 ) -> Entity:
     """The entity to upsert for a capture — reusing an existing one keyed by canonical id.
 
@@ -96,7 +101,7 @@ def entity_for(
                 )
         title = base_title
     else:
-        title = season_label(base_title, season)
+        title = slice_title(base_title, season, part, part_label)
     return Entity.create(
         title,
         report.kind,
@@ -104,6 +109,7 @@ def entity_for(
         consumption_state=ConsumptionState.WANT,
         season=season,
         part=part,
+        part_label=part_label,
     )
 
 
@@ -115,6 +121,7 @@ async def capture_work(
     *,
     season: int | None = None,
     part: int | None = None,
+    part_label: str | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> Entity | None:
     """Capture a looked-up title into the tracker — always, whenever we know its kind.
@@ -144,7 +151,7 @@ async def capture_work(
         return None
     if matching.requires_canonical_for_capture(report.kind) and not report.canonical:
         return None
-    entity = entity_for(db, name, report, season, part)
+    entity = entity_for(db, name, report, season, part, part_label)
     write_work(db, entity)
     if report.canonical:  # only a pinned, resolvable entity has ids to pull dates / enrich from
         async with contextlib.AsyncExitStack() as stack:

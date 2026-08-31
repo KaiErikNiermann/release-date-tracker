@@ -31,6 +31,7 @@ from release_tracker.models import (
 from release_tracker.sources.base import Candidate
 from release_tracker.sources.wikidata import Lineage
 from release_tracker.tech import CATEGORY_OVERRIDE_KEY, TechCategory, category_of
+from release_tracker.titles import slice_title
 
 DECK = Lineage(
     qid="Q107542665",
@@ -249,7 +250,12 @@ async def test_a_season_draft_is_titled_and_coordinated_like_rdt_add(
     db: Database, settings: Settings
 ) -> None:
     """A season added here and one added from the CLI must land on the same row, not fork a
-    near-duplicate — so it takes the same canonical title and the same structured coords."""
+    near-duplicate — so it takes the same canonical title and the same structured coords.
+
+    Asserted against `slice_title` rather than a literal, because that is the actual
+    invariant: whatever the canonical format is, both paths must generate it. The part has
+    to reach the title, or two cuts of one season collapse onto the same id.
+    """
     entity = await drafts.commit(
         db,
         settings,
@@ -257,9 +263,26 @@ async def test_a_season_draft_is_titled_and_coordinated_like_rdt_add(
         None,  # type: ignore[arg-type]
     )
     assert entity is not None
-    assert entity.title == "Pluribus: Season 2"
+    assert entity.title == slice_title("Pluribus", 2, 1)
+    assert entity.title == "Pluribus: Season 2, Part 1"
     assert (entity.season, entity.part) == (2, 1)
     assert db.get_entity(entity.id) is not None
+
+
+async def test_two_cuts_of_one_season_are_two_rows(db: Database, settings: Settings) -> None:
+    """The collision: both used to title as "Show: Season 5" and the second overwrote the first."""
+    made = [
+        await drafts.commit(
+            db,
+            settings,
+            Draft(title="Stranger Things", kind=MediaKind.TV, season=5, part=n),
+            None,  # type: ignore[arg-type]
+        )
+        for n in (1, 2)
+    ]
+    assert all(e is not None for e in made)
+    assert made[0].id != made[1].id  # type: ignore[union-attr]
+    assert len([e for e in db.iter_entities() if e.season == 5]) == 2
 
 
 async def test_the_predecessors_ids_are_never_inherited(db: Database, settings: Settings) -> None:

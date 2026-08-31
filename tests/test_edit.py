@@ -614,3 +614,74 @@ def test_removing_something_that_is_not_there_is_not_an_error(
     db, ent = work
     assert edits.remove_credits(db, ent, ["person:nobody"]) == 0
     assert edits.remove_tags(db, ent, []) == 0
+
+
+# --- slice coordinates ----------------------------------------------------------------------
+@pytest.fixture
+def db(tmp_path: Path) -> Iterator[Database]:
+    """A bare db — these exercise `edits.set_coords` directly, not through Typer."""
+    store = Database(tmp_path / "coords.db")
+    yield store
+    store.close()
+
+
+def _tv(db: Database, title: str, **kw: object) -> Entity:
+    entity = Entity.create(title, MediaKind.TV, **kw)  # type: ignore[arg-type]
+    db.upsert_entity(entity)
+    return entity
+
+
+def _series_edge(db: Database, entity: Entity) -> Edge:
+    (edge,) = db.edges_from(entity.id, RelationKind.PART_OF_SERIES)
+    return edge
+
+
+def test_set_coords_writes_the_entity_and_the_edge(db: Database) -> None:
+    """Both, deliberately: the puller resolves a season off the entity coord while the series
+    walk reads the edge, and letting them drift is how a season pulls one date and lists
+    under another."""
+    entity = _tv(db, "Pluribus: Season 2")
+    edits.set_coords(db, entity, season=2, part=1, part_label="Act", series="Pluribus")
+
+    stored = db.get_entity(entity.id)
+    assert stored is not None
+    assert (stored.season, stored.part, stored.part_label) == (2, 1, "Act")
+    edge = _series_edge(db, entity)
+    assert (edge.ordinal, edge.part, edge.part_label) == (2, 1, "Act")
+    assert edge.owned
+
+
+def test_a_cut_above_the_season_grid_is_legal(db: Database) -> None:
+    """The "Arcane: Noxus (Act 1)" shape — the split *is* the numbering, not a slice of one."""
+    entity = _tv(db, "Arcane: Noxus (Act 1)")
+    edits.set_coords(db, entity, season=None, part=1, part_label="Act", series="Arcane: Noxus")
+    edge = _series_edge(db, entity)
+    assert (edge.ordinal, edge.part) == (None, 1)
+
+
+def test_set_coords_needs_a_series_when_there_is_none(db: Database) -> None:
+    with pytest.raises(edits.NoSeriesError):
+        edits.set_coords(db, _tv(db, "Pluribus: Season 2"), season=2)
+
+
+def test_set_coords_refuses_to_guess_between_two_series(db: Database) -> None:
+    """`edges[0]` silently picked one, which is also what made --series unusable."""
+    entity = _tv(db, "Crossover: Season 1")
+    for name in ("Series A", "Series B"):
+        edits.set_coords(db, entity, season=1, series=name)
+    with pytest.raises(edits.NoSeriesError):
+        edits.set_coords(db, entity, season=2)
+    # naming one resolves it
+    edits.set_coords(db, entity, season=2, series="Series A")
+
+
+def test_a_coordinate_can_be_cleared(db: Database) -> None:
+    """`upsert_entity` COALESCEs the coords so a pull cannot wipe them — which also means an
+    upsert alone can never clear one. An explicit edit is the caller that means "unset"."""
+    entity = _tv(db, "Show: Season 5, Part 1")
+    edits.set_coords(db, entity, season=5, part=1, part_label="Part", series="Show")
+    edits.set_coords(db, entity, season=5, part=None, series="Show")
+
+    stored = db.get_entity(entity.id)
+    assert stored is not None
+    assert (stored.season, stored.part, stored.part_label) == (5, None, None)

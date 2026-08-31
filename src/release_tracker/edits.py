@@ -23,6 +23,7 @@ from datetime import date
 from release_tracker.clock import utc_now
 from release_tracker.dates_edtf import parse_edtf, to_edtf
 from release_tracker.db import Database
+from release_tracker.logging import get_logger
 from release_tracker.models import (
     ORG_ROLES,
     Certainty,
@@ -45,6 +46,7 @@ __all__ = [
     "MANUAL_SOURCE",
     "USER_PROVIDER",
     "DateEdit",
+    "NoSeriesError",
     "add_credit",
     "add_platform",
     "add_tag",
@@ -54,8 +56,11 @@ __all__ = [
     "remove_platforms",
     "remove_tags",
     "rename",
+    "set_coords",
     "set_date",
 ]
+
+log = get_logger("edits")
 
 MANUAL_PROVIDER = "manual"  # observation provenance: a person typed this
 MANUAL_SOURCE = "Manual (EDTF)"
@@ -76,6 +81,77 @@ class DateEdit:
 
 
 # --- the work itself ----------------------------------------------------------------------
+class NoSeriesError(LookupError):
+    """A work has no series edge and the caller named no series to make one."""
+
+
+def set_coords(
+    db: Database,
+    entity: Entity,
+    *,
+    season: int | None,
+    part: int | None = None,
+    part_label: str | None = None,
+    series: str | None = None,
+) -> Entity:
+    """Set a work's (season, part) position within its series, on the edge and the entity.
+
+    Both, deliberately. The puller resolves a season off the *entity* coord
+    (``tmdb._pull_tv`` via ``coords_of``) while the series walk reads the *edge* — letting
+    them drift is how a season pulls one date and lists under another.
+
+    ``season=None`` with a ``part`` is legal and is the Arcane: Noxus shape: a cut that sits
+    above the season grid rather than inside one.
+
+    Raises :class:`NoSeriesError` when there is no edge to update and no ``series`` to make one.
+    """
+    edges = db.edges_from(entity.id, RelationKind.PART_OF_SERIES)
+    nodes = db.get_nodes(e.dst_id for e in edges)
+    # A named series selects its own edge or creates one; it must never fall back to "the
+    # first edge", or naming a *second* series would silently re-point the first. Unnamed,
+    # a sole edge is unambiguous and anything else is a question for the caller.
+    if series is not None:
+        wanted = series.strip()
+        chosen = next(
+            (e for e in edges if (n := nodes.get(e.dst_id)) is not None and n.name == wanted), None
+        )
+    else:
+        chosen = edges[0] if len(edges) == 1 else None
+    if chosen is not None:
+        dst_id, provider, tier = chosen.dst_id, chosen.source_provider, chosen.source_tier
+    elif series is not None:
+        node = Node.create(NodeKind.SERIES, series.strip(), owned=True)
+        db.upsert_node(node)
+        dst_id, provider, tier = node.id, USER_PROVIDER, SourceTier.OFFICIAL
+    elif edges:
+        names = ", ".join(sorted(n.name for n in nodes.values()))
+        raise NoSeriesError(f"{entity.title} is in several series ({names}) — pass one")
+    else:
+        raise NoSeriesError(f"{entity.title} has no series link — name one to create it")
+
+    db.upsert_edge(
+        Edge(
+            src_id=entity.id,
+            dst_id=dst_id,
+            relation=RelationKind.PART_OF_SERIES,
+            ordinal=season,
+            part=part,
+            part_label=part_label,
+            source_provider=provider,
+            source_tier=tier,
+            confidence=1.0,
+            owned=True,
+        )
+    )
+    updated = entity.model_copy(update={"season": season, "part": part, "part_label": part_label})
+    db.upsert_entity(updated)
+    # `upsert_entity` COALESCEs the coords so a stateless pull cannot wipe them, which also
+    # means it cannot *clear* one. An explicit edit is the one caller that means "unset".
+    db.clear_coords(entity.id, season=season is None, part=part is None)
+    log.info("edits.coords", entity=entity.title, season=season, part=part, label=part_label)
+    return updated
+
+
 def rename(db: Database, entity: Entity, title: str) -> Entity:
     """Retitle a work, keeping the old title as a search alias.
 

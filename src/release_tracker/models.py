@@ -235,6 +235,10 @@ class Entity(BaseModel):
     # to `split_season(title)`/`extract_part(title)` only when they're None (back-compat shorthand).
     season: int | None = None
     part: int | None = None
+    # What the showrunners called the cut — "Part"/"Act"/"Vol", or the whole name for a slice
+    # that has one instead of an index ("Reze Arc"). Free text: no source models a slice at
+    # all, so the vocabulary is whatever the marketing used. None reads as "Part".
+    part_label: str | None = None
 
     @staticmethod
     def make_id(title: str, kind: MediaKind) -> str:
@@ -505,6 +509,7 @@ class Edge(BaseModel):
     role: CreditRole | WorkRelation | None = None
     ordinal: int | None = None  # the season number for PART_OF_SERIES, if any
     part: int | None = None  # the mid-season cut (Part/Volume/Cour N) within a season
+    part_label: str | None = None  # the word that cut was sold under; None reads as "Part"
     # ISO-2 the relation holds in, for AVAILABLE_ON. None means unscoped, *not* worldwide:
     # a broadcast network genuinely has no market, and claiming "WW" for an unknown scope is
     # exactly the everywhere-lie this field exists to remove.
@@ -533,6 +538,9 @@ class Edge(BaseModel):
             self.role.value if self.role else "",
             self.source_provider,
         )
+        # `part`/`part_label` stay out, like `region` on every other relation: they describe
+        # one edge, they do not distinguish two facts. Folding either in would move the id of
+        # every PART_OF_SERIES edge already stored and duplicate the lot on the next enrich.
         if self.relation is RelationKind.AVAILABLE_ON and self.region:
             parts = (*parts, self.region)
         return hashlib.sha1("|".join(parts).encode()).hexdigest()  # noqa: S324

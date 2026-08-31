@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS entities (
     consumption_state TEXT NOT NULL DEFAULT 'unset',
     season          INTEGER,
     part            INTEGER,
+    part_label      TEXT,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
 );
@@ -106,6 +107,7 @@ CREATE TABLE IF NOT EXISTS edges (
     role            TEXT,
     ordinal         INTEGER,
     part            INTEGER,
+    part_label      TEXT,
     region          TEXT,
     source_provider TEXT NOT NULL,
     source_url      TEXT,
@@ -188,6 +190,8 @@ class Database:
             self._conn.execute("ALTER TABLE edges ADD COLUMN part INTEGER")
         if "region" not in edge_cols:
             self._conn.execute("ALTER TABLE edges ADD COLUMN region TEXT")
+        if "part_label" not in edge_cols:
+            self._conn.execute("ALTER TABLE edges ADD COLUMN part_label TEXT")
         entity_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(entities)")}
         if "consumption_state" not in entity_cols:
             self._conn.execute(
@@ -197,6 +201,8 @@ class Database:
             self._conn.execute("ALTER TABLE entities ADD COLUMN season INTEGER")
         if "part" not in entity_cols:
             self._conn.execute("ALTER TABLE entities ADD COLUMN part INTEGER")
+        if "part_label" not in entity_cols:
+            self._conn.execute("ALTER TABLE entities ADD COLUMN part_label TEXT")
         node_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(nodes)")}
         if "followed" not in node_cols:
             self._conn.execute("ALTER TABLE nodes ADD COLUMN followed INTEGER NOT NULL DEFAULT 0")
@@ -225,11 +231,11 @@ class Database:
             conn.execute(
                 """
                 INSERT INTO entities (id, title, kind, aliases, external_ids,
-                    notion_page_id, notes, watch, consumption_state, season, part,
+                    notion_page_id, notes, watch, consumption_state, season, part, part_label,
                     created_at, updated_at)
                 VALUES (:id, :title, :kind, :aliases, :external_ids,
                     :notion_page_id, :notes, :watch, :consumption_state, :season, :part,
-                    :now, :now)
+                    :part_label, :now, :now)
                 ON CONFLICT(id) DO UPDATE SET
                     title=excluded.title,
                     kind=excluded.kind,
@@ -248,6 +254,7 @@ class Database:
                     -- COALESCE keeps any previously-set value rather than wiping it.
                     season=COALESCE(excluded.season, entities.season),
                     part=COALESCE(excluded.part, entities.part),
+                    part_label=COALESCE(excluded.part_label, entities.part_label),
                     updated_at=:now
                 """,
                 {
@@ -262,6 +269,7 @@ class Database:
                     "consumption_state": entity.consumption_state.value,
                     "season": entity.season,
                     "part": entity.part,
+                    "part_label": entity.part_label,
                     "now": now,
                 },
             )
@@ -694,6 +702,22 @@ class Database:
             )
         ]
 
+    def clear_coords(self, entity_id: str, *, season: bool = False, part: bool = False) -> None:
+        """Null out a coordinate that an edit deliberately unset.
+
+        `upsert_entity` COALESCEs season/part so a stateless pull cannot wipe a coord it
+        never knew about — which also means an upsert can never *clear* one. A hand edit is
+        the one caller that genuinely means "there is no season here any more".
+        """
+        columns = [c for c, wanted in (("season", season), ("part", part)) if wanted]
+        if not columns:
+            return
+        sets = ", ".join(f"{c} = NULL" for c in columns)
+        if part:
+            sets += ", part_label = NULL"
+        with self._tx() as conn:
+            conn.execute(f"UPDATE entities SET {sets} WHERE id = ?", (entity_id,))  # noqa: S608
+
     def delete_edges(self, src_id: str, relation: RelationKind, providers: tuple[str, ...]) -> int:
         """Drop an entity's edges of one relation for the providers about to rewrite them.
 
@@ -777,13 +801,15 @@ def _insert_observation(conn: sqlite3.Connection, obs: ReleaseObservation) -> No
 def _insert_edge(conn: sqlite3.Connection, edge: Edge) -> None:
     conn.execute(
         """
-        INSERT INTO edges (id, src_id, dst_id, relation, role, ordinal, part, region,
-            source_provider, source_url, source_tier, confidence, owned, fetched_at)
-        VALUES (:id, :src_id, :dst_id, :relation, :role, :ordinal, :part, :region,
-            :source_provider, :source_url, :source_tier, :confidence, :owned, :fetched_at)
+        INSERT INTO edges (id, src_id, dst_id, relation, role, ordinal, part, part_label,
+            region, source_provider, source_url, source_tier, confidence, owned, fetched_at)
+        VALUES (:id, :src_id, :dst_id, :relation, :role, :ordinal, :part, :part_label,
+            :region, :source_provider, :source_url, :source_tier, :confidence, :owned,
+            :fetched_at)
         ON CONFLICT(id) DO UPDATE SET
             ordinal=COALESCE(excluded.ordinal, edges.ordinal),
             part=COALESCE(excluded.part, edges.part),
+            part_label=COALESCE(excluded.part_label, edges.part_label),
             region=COALESCE(excluded.region, edges.region),
             source_url=COALESCE(excluded.source_url, edges.source_url),
             source_tier=excluded.source_tier,
@@ -799,6 +825,7 @@ def _insert_edge(conn: sqlite3.Connection, edge: Edge) -> None:
             "role": edge.role.value if edge.role else None,
             "ordinal": edge.ordinal,
             "part": edge.part,
+            "part_label": edge.part_label,
             "region": edge.region,
             "source_provider": edge.source_provider,
             "source_url": edge.source_url,
@@ -856,6 +883,7 @@ def _row_to_edge(row: sqlite3.Row) -> Edge:
         role=_parse_role(relation, row["role"]),
         ordinal=row["ordinal"],
         part=row["part"],
+        part_label=row["part_label"],
         region=row["region"],
         source_provider=row["source_provider"],
         source_url=row["source_url"],
@@ -879,6 +907,7 @@ def _row_to_entity(row: sqlite3.Row) -> Entity:
         consumption_state=ConsumptionState(row["consumption_state"]),
         season=row["season"],
         part=row["part"],
+        part_label=row["part_label"],
     )
 
 

@@ -98,7 +98,7 @@ from release_tracker.sources.base import Candidate, make_client
 from release_tracker.sources.ddg import WebInfo, instant_answer
 from release_tracker.sources.justwatch import JustWatchAvailability
 from release_tracker.sources.whentostream import WhenToStreamHints
-from release_tracker.titles import season_label
+from release_tracker.titles import slice_suffix, slice_title
 
 app = typer.Typer(add_completion=False, help="Free-first release date tracker.")
 seed_app = typer.Typer(help="Manage the entity watchlist (seed).")
@@ -731,6 +731,10 @@ def add(
     part: Annotated[
         int | None, typer.Option(help="mid-season cut (Part/Vol/Cour N) within the season")
     ] = None,
+    part_label: Annotated[
+        str | None,
+        typer.Option("--part-label", help="what that cut is called — Part (default)/Act/Vol/..."),
+    ] = None,
     now: Annotated[bool, typer.Option("--now", help="resolve + enrich immediately")] = False,
     no_themes: Annotated[
         bool, typer.Option("--no-themes", help="skip LLM theme extraction")
@@ -740,14 +744,16 @@ def add(
 
     With --season N the entry is titled 'Show: Season N' and carries structured season/part
     coords, so enrichment auto-links it to the series with a 'Season N of Show' subtitle.
+    Adding --part K titles it 'Show: Season N, Part K' — the part has to reach the title or
+    two cuts of one season collapse onto the same id.
     """
     configure_logging()
     settings = get_settings()
     # --season implies a TV season unless the caller said otherwise
     media = MediaKind(kind) if kind else (MediaKind.TV if season is not None else MediaKind.OTHER)
-    title = season_label(name, season) if season is not None else name
+    title = slice_title(name, season, part, part_label)
     db = _db()
-    entity = Entity.create(title, media, season=season, part=part)
+    entity = Entity.create(title, media, season=season, part=part, part_label=part_label)
     write_work(db, entity)
     console.print(f"[green]Added[/] {title} [dim]({media.value})[/]")
     if now:
@@ -1689,9 +1695,15 @@ def edit_unplatform(
 @edit_app.command("part")
 def edit_part(
     ref: Annotated[str, typer.Argument(help="the work (id or title)")],
-    season: Annotated[int, typer.Argument(help="the season number")],
+    season: Annotated[
+        int | None, typer.Argument(help="the season number; omit for a cut above the season grid")
+    ] = None,
     part: Annotated[
         int | None, typer.Argument(help="the mid-season cut (Part/Vol/Cour N), if split")
+    ] = None,
+    label: Annotated[
+        str | None,
+        typer.Option("--label", help="what the cut is called — Part (default)/Act/Vol/..."),
     ] = None,
     series: Annotated[
         str | None,
@@ -1702,43 +1714,29 @@ def edit_part(
 
     Updates the existing part_of_series edge in place; pass --series to create the
     link when a now-known split first attaches the work to a franchise.
+
+    A part with no season is legal — that is a cut sitting *above* the season grid, the
+    "Arcane: Noxus (Act 1)" shape, where the split is the numbering rather than a slice of one.
     """
     configure_logging()
+    if season is None and part is None:
+        console.print("[yellow]Nothing to set[/] — give a season, a part, or both.")
+        raise typer.Exit(1)
     db = _db()
     entity = _edit_entity(db, ref)
     if entity is None:
         raise typer.Exit(1)
-    existing = db.edges_from(entity.id, RelationKind.PART_OF_SERIES)
-    if existing:
-        base = existing[0]
-        dst_id, provider, tier = base.dst_id, base.source_provider, base.source_tier
-    elif series is not None:
-        node = Node.create(NodeKind.SERIES, series, owned=True)
-        db.upsert_node(node)
-        dst_id, provider, tier = node.id, "user", SourceTier.OFFICIAL
-    else:
+    try:
+        edits.set_coords(db, entity, season=season, part=part, part_label=label, series=series)
+    except edits.NoSeriesError as exc:
         db.close()
-        console.print(f'[yellow]{entity.title}[/] has no series link — pass --series "<name>".')
-        raise typer.Exit(1)
-    db.upsert_edge(
-        Edge(
-            src_id=entity.id,
-            dst_id=dst_id,
-            relation=RelationKind.PART_OF_SERIES,
-            ordinal=season,
-            part=part,
-            source_provider=provider,
-            source_tier=tier,
-            confidence=1.0,
-            owned=True,
-        )
-    )
-    # keep the structured coord on the entity in sync with the edge, so the puller's
-    # season resolution stays authoritative (not dependent on title parsing).
-    db.upsert_entity(entity.model_copy(update={"season": season, "part": part}))
+        console.print(f'[yellow]{exc}[/] — pass --series "<name>".')
+        raise typer.Exit(1) from exc
     db.close()
-    coord = f"S{season}" + (f" Pt{part}" if part is not None else "")
-    console.print(f"[green]Set[/] {entity.title} → [bold]{coord}[/]")
+    coord = f"S{season}" if season is not None else ""
+    if cut := slice_suffix(part, label):
+        coord = f"{coord} {cut}".strip()
+    console.print(f"[green]Set[/] {entity.title} → [bold]{coord or '—'}[/]")
 
 
 @edit_app.command("date")
