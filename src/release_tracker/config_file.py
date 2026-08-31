@@ -91,6 +91,7 @@ FIELD_DOCS: Final[tuple[FieldDoc, ...]] = (
     FieldDoc("RDT_JUSTWATCH", "sources", "scan JustWatch for streaming offers"),
     FieldDoc("RDT_JUSTWATCH_REGIONS", "sources", "which markets to scan"),
     FieldDoc("RDT_WHENTOSTREAM", "sources", "corroborate digital dates with WhenToStream"),
+    FieldDoc("RDT_RANKING", "sources", "smart | classic — let ratings break search-result ties"),
     FieldDoc("RDT_REGIONS", "preferences", "regions to prioritise, most wanted first"),
     FieldDoc("RDT_AVAILABILITY_CHANNEL", "preferences", "what counts as available to you"),
     FieldDoc("RDT_PLATFORMS", "preferences", "platforms you can play on"),

@@ -173,6 +173,24 @@ rdt upcoming 'tag:"body horror" year:2026..2028'
 | `season:` `part:` | season / mid-season coords — set with `rdt add --season N [--part N]`, `rdt edit part`, or **s** in the add palette |
 | `franchise:` / `continuity:` | season counted across a reboot's renumbering (see below) |
 
+### Which match comes first
+
+Title similarity alone cannot separate `Hollow Knight Silksong` from `Hollow Knight: Silksong` —
+normalisation strips the colon, both score exactly 1.000, and whichever the API returned first
+wins. IGDB returns the fan demake. So an audience signal breaks ties the title cannot: TMDB vote
+counts, IGDB ratings and pre-release hype, log-scaled so the distinction that counts is *some*
+audience versus none.
+
+It can only reorder inside the band the code already calls too close to tell apart, so an exact
+match on something obscure is never buried under a popular near-miss. It is also kept out of
+`Candidate.score`, which means "how well the title matches" and is read as exactly that by the
+match floor, the dominance gate and the kind consensus.
+
+`RDT_RANKING=classic` orders by title alone. **Both modes flag a hit that looks off** — a mod, a
+port, an update, an edition of another game, or one with no audience at all — from fields the
+source itself asserts, never from a guess about the entry (a Game Boy Color release is suspicious
+for a 2025 game and ordinary for a retro one, and no rule tells those apart).
+
 `is:` is a different axis from `state:`: the *bucket* `watched` spans
 `watched|dropped|skipped`, while the *state* `watched` is only one of them.
 

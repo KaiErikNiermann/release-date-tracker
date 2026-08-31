@@ -211,6 +211,13 @@ class Settings(BaseSettings):
     # adds the predicted subscription-drop date + service. Best-effort; on by default.
     whentostream_enabled: bool = Field(default=True, alias="RDT_WHENTOSTREAM")
 
+    # How search results are ordered. `smart` lets an audience signal (TMDB vote counts, IGDB
+    # ratings/hype) break ties the title cannot — without it "Hollow Knight Silksong" and
+    # "Hollow Knight: Silksong" normalise to the same string, score identically, and whichever
+    # the API happened to return first wins. `classic` orders by title match alone, for anyone
+    # who would rather type the exact name; both modes still flag a hit that looks off.
+    ranking: Literal["smart", "classic"] = Field(default="smart", alias="RDT_RANKING")
+
     # --- consumption / availability ---
     # which release channel decides "available to me": digital (can't do theatrical),
     # theatrical, or any (soonest). Drives the upcoming/available split.
@@ -249,6 +256,13 @@ class Settings(BaseSettings):
     @property
     def justwatch_regions(self) -> tuple[str, ...]:
         return tuple(r.strip().upper() for r in self.justwatch_regions_raw.split(",") if r.strip())
+
+    @property
+    def popularity_weight(self) -> float:
+        """How far an audience signal may reorder search results; 0 in classic mode."""
+        from release_tracker.matching import POPULARITY_WEIGHT
+
+        return POPULARITY_WEIGHT if self.ranking == "smart" else 0.0
 
     @property
     def provider_regions(self) -> tuple[str, ...]:

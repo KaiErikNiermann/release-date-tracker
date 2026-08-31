@@ -2379,7 +2379,9 @@ def _candidate_table(title: str, cands: list[Candidate]) -> Table:
             c.source,
             c.id_key,
             c.canonical_id,
-            c.title,
+            # The caveat rides on the title, not in its own column: it qualifies *this* row,
+            # and a column would imply every row has one to compare.
+            c.title + (f"\n[yellow]⚠ {' · '.join(c.caveats)}[/]" if c.caveats else ""),
             str(c.year) if c.year else "—",
             c.extra or "",
         )

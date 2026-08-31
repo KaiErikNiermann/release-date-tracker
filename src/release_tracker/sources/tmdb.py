@@ -39,6 +39,7 @@ from release_tracker.sources.base import (
     SourceResult,
     get_json,
     pinned_id,
+    prominence,
 )
 from release_tracker.titles import coords_of, search_title
 
@@ -301,7 +302,8 @@ class TmdbSource:
                 else (int(date_str[:4]) if date_str[:4].isdigit() else None)
             )
             overview = str(r.get("overview") or "")
-            pop = r.get("popularity")
+            votes = r.get("vote_count")
+            votes = float(votes) if isinstance(votes, (int, float)) else 0.0
             out.append(
                 Candidate(
                     source=self.name,
@@ -312,7 +314,11 @@ class TmdbSource:
                     release_date=rel_date,
                     extra=(overview[:70] + "…") if len(overview) > 70 else overview,
                     url=f"https://www.themoviedb.org/{media}/{r['id']}",
-                    popularity=float(pop) if isinstance(pop, (int, float)) else 0.0,
+                    # Vote count, not TMDB's `popularity`: popularity is a volatile trending
+                    # figure that spikes on release week, while votes accumulate and answer the
+                    # question actually being asked — has anyone heard of this.
+                    popularity=prominence(votes),
+                    caveats=("no ratings",) if not votes else (),
                 )
             )
         return out

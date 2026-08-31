@@ -309,6 +309,12 @@ class AddScreen(ModalScreen[Entity | None]):
 
         assert isinstance(self.app, RdtApp)
         text, kind_hint, key = typed.text, typed.kind, typed.key
+        if kind_hint is None and typed.season is not None:
+            # A season is a TV idea, and `rdt add --season` and the draft ladder both already
+            # read it that way. Without it the unhinted sweep buries the shows: "daredevil
+            # season 4" returned the 2003 film, two games and Senor Daredevil (1926), and
+            # neither Daredevil series appeared at all.
+            kind_hint = MediaKind.TV
         cached = self._memo.get(key)
         if cached is not None and time.monotonic() - cached[0] < _MEMO_TTL:
             self._show(cached[1], key, cached[2])
@@ -386,6 +392,10 @@ class AddScreen(ModalScreen[Entity | None]):
         for kind, cand in hits:
             year = f" [dim]({cand.year})[/]" if cand.year else ""
             extra = f"  [dim]{cand.extra[:60]}[/]" if cand.extra else ""
+            # Never suppresses the row — a caveat is something to notice, not a verdict. It is
+            # what keeps classic ranking honest: the order stays title-only, but a hit with no
+            # audience at all still says so.
+            warn = f"\n      [yellow]⚠ {' · '.join(cand.caveats)}[/]" if cand.caveats else ""
             # only on a series: a season means nothing on a film, and printing it there
             # would advertise a coordinate the capture is (correctly) about to drop.
             coord = (
@@ -397,7 +407,7 @@ class AddScreen(ModalScreen[Entity | None]):
                 Option(
                     Text.from_markup(
                         f"[bold]{cand.title}[/]{coord}{year}  [dim]{kind.value} · {cand.id_key}"
-                        f":{cand.canonical_id} · {cand.score:.2f}[/]{extra}"
+                        f":{cand.canonical_id} · {cand.score:.2f}[/]{extra}{warn}"
                     )
                 )
             )

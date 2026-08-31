@@ -85,3 +85,18 @@ def test_resolvable_and_strict_are_not_the_same_question() -> None:
 
     assert is_resolvable(MediaKind.BOOK) is False
     assert requires_canonical_for_capture(MediaKind.BOOK) is False
+
+
+def test_a_canonical_match_scores_full_against_a_qualified_title() -> None:
+    """`candidates_for` asks the sources for `search_title(entity.title)` but used to score
+    against the *raw* title, so a row called "The Boys: Season 5" scored its own canonical
+    match ("The Boys") at 0.64 — a perfect hit permanently marked as mediocre, dragging the
+    whole qualified-title band down toward MATCH_FLOOR and destroying the dominance gap.
+    """
+    from release_tracker.titles import search_title
+
+    query = search_title("The Boys: Season 5")
+    cand = Candidate(source="tmdb", id_key="tmdb", canonical_id="1", title="The Boys")
+    assert score_candidate(query, None, cand, MediaKind.TV) == 1.0
+    # what it used to be scored as, for contrast
+    assert score_candidate("The Boys: Season 5", None, cand, MediaKind.TV) < 0.7

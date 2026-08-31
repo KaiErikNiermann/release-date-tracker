@@ -36,7 +36,7 @@ from release_tracker.deltas import (
     precise_from_coarse,
 )
 from release_tracker.logging import get_logger
-from release_tracker.matching import score_candidate
+from release_tracker.matching import rank_candidate
 from release_tracker.models import (
     Certainty,
     DatePrecision,
@@ -393,7 +393,13 @@ async def _search_kind(
 ) -> list[Candidate]:
     from release_tracker.matching import candidates_for
 
-    return await candidates_for(client, Entity.create(query, kind), settings, limit=5)
+    return await candidates_for(
+        client,
+        Entity.create(query, kind),
+        settings,
+        limit=5,
+        weight=settings.popularity_weight,
+    )
 
 
 async def _detect(
@@ -409,13 +415,12 @@ async def _detect(
     best: tuple[MediaKind, Candidate] | None = None
     for kind in DETECT_KINDS:
         for cand in await _search_kind(client, query, kind, settings):
-            key = (score_candidate(query, None, cand, kind), cand.popularity)
+            key = (rank_candidate(cand, weight=settings.popularity_weight), cand.popularity)
             if best_key is None or key > best_key:
                 best_key, best = key, (kind, cand)
     if best is None or best_key is None:
         return None
     kind, cand = best
-    cand.score = best_key[0]
     return kind, cand
 
 
@@ -510,19 +515,25 @@ async def capture_candidates(
     """Ranked ``(kind, candidate)`` matches for the capture path: one kind when hinted, else a
     cross-kind sweep. Mirrors what :func:`lookup` searches but returns the whole list (not just
     the winner) so the caller can disambiguate before persisting."""
-    from release_tracker.matching import candidates_for
+    from release_tracker.matching import candidates_for, rank_candidate
 
     kinds = (kind_hint,) if kind_hint is not None else DETECT_KINDS
 
     async def for_kind(kind: MediaKind) -> list[tuple[MediaKind, Candidate]]:
-        found = await candidates_for(client, Entity.create(query, kind), settings, limit=limit)
+        found = await candidates_for(
+            client,
+            Entity.create(query, kind),
+            settings,
+            limit=limit,
+            weight=settings.popularity_weight,
+        )
         return [(kind, c) for c in found]
 
     # An unhinted sweep is three independent kind searches; running them concurrently turns
     # what was a chain of round trips into roughly one, which is what makes type-ahead viable.
     batches = await asyncio.gather(*(for_kind(k) for k in kinds))
     out = [pair for batch in batches for pair in batch]
-    out.sort(key=lambda kc: kc[1].score, reverse=True)
+    out.sort(key=lambda kc: rank_candidate(kc[1], weight=settings.popularity_weight), reverse=True)
     return out
 
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date
+from typing import Final
 
 import httpx
 
@@ -97,6 +98,27 @@ def score_candidate(
     return round(0.75 * sim + 0.25 * year_score, 3)
 
 
+# How far prominence may reorder a list. Deliberately `lookup._DOMINANCE`: that is already
+# the codebase's line for "these scores are too close to tell apart", and it is exactly where
+# an audience signal should get to decide. Outside the band a better title match always wins,
+# so an exact hit on an obscure thing is never buried under a popular near-miss.
+POPULARITY_WEIGHT: Final[float] = 0.15
+
+
+def rank_candidate(cand: Candidate, *, weight: float = POPULARITY_WEIGHT) -> float:
+    """The ordering key: how well it matches, nudged by whether anyone has heard of it.
+
+    Kept apart from :attr:`Candidate.score`, which means "how well the *title* matches" and is
+    read as that by `MATCH_FLOOR`, `select_candidate`'s dominance band and `drafts`' kind
+    consensus. Folding an audience signal into it would quietly change what all three mean —
+    and `drafts` documents in prose that a score is comparable across sources, which only
+    holds while it is one similarity measure and nothing else.
+
+    ``weight=0`` is the classic ordering: title similarity alone.
+    """
+    return cand.score + weight * cand.popularity
+
+
 def build_worklist(db: Database, today: date, *, include_released: bool = False) -> list[Entity]:
     """Entities that are resolvable, not yet pinned, and (by default) still upcoming."""
     out: list[Entity] = []
@@ -116,6 +138,7 @@ async def candidates_for(
     *,
     hint_year: int | None = None,
     limit: int = 6,
+    weight: float = POPULARITY_WEIGHT,
 ) -> list[Candidate]:
     """Query every Tier-0 source supporting this kind, score and rank candidates."""
     query = search_title(entity.title)
@@ -136,6 +159,10 @@ async def candidates_for(
     batches = await asyncio.gather(*(search(src) for src in sources_for(entity.kind)))
     ranked = [cand for found in batches for cand in found]
     for cand in ranked:
-        cand.score = score_candidate(entity.title, hint_year, cand, entity.kind)
-    ranked.sort(key=lambda c: c.score, reverse=True)
+        # Scored against the *same* string the sources were asked for. Scoring the raw title
+        # instead meant a row called "The Boys: Season 5" scored its own canonical match
+        # ("The Boys") at 0.64 — a perfect hit permanently marked as a mediocre one, dragging
+        # the whole qualified-title band down toward MATCH_FLOOR.
+        cand.score = score_candidate(query, hint_year, cand, entity.kind)
+    ranked.sort(key=lambda c: rank_candidate(c, weight=weight), reverse=True)
     return ranked

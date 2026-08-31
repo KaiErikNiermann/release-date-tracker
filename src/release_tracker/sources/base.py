@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Protocol, runtime_checkable
@@ -29,6 +30,18 @@ class Credit:
     role: CreditRole
     name: str
     source_id: str | None = None  # source-native id, collapses the node across works
+
+
+def prominence(count: float, *, ceiling: float = 10_000.0) -> float:
+    """Squash an unbounded engagement count into 0..1, log-scaled.
+
+    Log because the interesting distinction is *some* audience versus none — 5000 ratings
+    against 1000 says far less than 1000 against 0, which is exactly the gap between a real
+    release and a fan entry nobody has touched.
+    """
+    if count <= 0:
+        return 0.0
+    return min(1.0, math.log10(1.0 + count) / math.log10(1.0 + ceiling))
 
 
 @dataclass(slots=True, frozen=True)
@@ -93,8 +106,17 @@ class Candidate:
     release_date: date | None = None
     extra: str = ""  # disambiguators: media type, platforms, slug...
     url: str | None = None
-    score: float = 0.0  # filled by the matching layer
-    popularity: float = 0.0  # source-native popularity, used only to break ties
+    score: float = 0.0  # filled by the matching layer: how well the *title* matches
+    # 0..1 prominence, normalised by the source so figures from different APIs are
+    # comparable. Breaks ties between candidates the title cannot separate — which is the
+    # whole Silksong problem: "Hollow Knight Silksong" and "Hollow Knight: Silksong"
+    # normalise to the same string and score identically, so without this the API's own
+    # result order decides, and it puts the fan demake first.
+    popularity: float = 0.0
+    # Why this hit might not be the thing the reader meant, in plain words ("a mod of another
+    # game", "no ratings or hype"). Rendered beside the row; never hides it — a caveat is
+    # something to notice, not a verdict.
+    caveats: tuple[str, ...] = ()
 
 
 @runtime_checkable

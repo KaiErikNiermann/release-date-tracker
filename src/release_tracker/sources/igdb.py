@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, date, datetime
-from typing import Any, cast
+from typing import Any, Final, cast
 
 import httpx
 
@@ -39,6 +39,7 @@ from release_tracker.sources.base import (
     pinned_id,
     post_json,
     post_text,
+    prominence,
 )
 from release_tracker.trends import StudioTrend, compute_trend, narrow_coarse
 
@@ -106,6 +107,46 @@ _TOKEN_LOCK = asyncio.Lock()
 def forget_tokens() -> None:
     """Drop cached app tokens (credentials changed, and for tests)."""
     _TOKENS.clear()
+
+
+def _as_count(value: object) -> float:
+    """An IGDB engagement count, or 0 — the field is absent far more often than it is zero."""
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
+
+
+# IGDB's own `game_types`, and what each means for someone who typed a bare title. Only the
+# ones that are a *derivative of another game* are named: a remake, remaster or expanded game
+# is a primary work people search for by name, so they carry no caveat.
+_DERIVATIVE_TYPES: Final[dict[int, str]] = {
+    1: "downloadable content for another game",
+    2: "an expansion of another game",
+    3: "a bundle, not the game itself",
+    4: "a standalone expansion",
+    5: "a mod of another game",
+    6: "one episode of another game",
+    7: "one season of another game",
+    11: "a port of another game",
+    12: "a fork of another game",
+    13: "an add-on pack",
+    14: "an update to another game",
+}
+
+
+def caveats_for(row: dict[str, Any], ratings: float, hypes: float) -> tuple[str, ...]:
+    """Why a hit might not be what the reader meant. Facts IGDB asserts, never guesses.
+
+    Deliberately not inferred from platforms: "Game Boy Color only" reads as suspicious for a
+    2025 release and as perfectly ordinary for a retro one, and no rule tells those apart.
+    """
+    out: list[str] = []
+    kind = row.get("game_type")
+    if isinstance(kind, int) and (what := _DERIVATIVE_TYPES.get(kind)):
+        out.append(what)
+    elif row.get("parent_game") or row.get("version_parent"):
+        out.append("an edition of another game")
+    if not ratings and not hypes:
+        out.append("no ratings or hype")
+    return tuple(out)
 
 
 class IgdbSource:
@@ -425,7 +466,11 @@ class IgdbSource:
         headers = {"Client-ID": cid, "Authorization": f"Bearer {token}"}
         body = (
             f'search "{query}"; '
-            f"fields id,name,slug,first_release_date,platforms.abbreviation; limit {limit};"
+            "fields id,name,slug,first_release_date,platforms.abbreviation,"
+            # Ranking signals, free on a request we already make. `game_type` and
+            # `parent_game` say whether this is the game or something built on it;
+            # `total_rating_count`/`hypes` say whether anyone has heard of it.
+            f"game_type,parent_game,version_parent,total_rating_count,hypes; limit {limit};"
         )
         rows = cast(
             "list[dict[str, Any]]",
@@ -439,6 +484,8 @@ class IgdbSource:
             abbrevs = ", ".join(
                 str(p.get("abbreviation", "")) for p in plats if p.get("abbreviation")
             )
+            ratings = _as_count(r.get("total_rating_count"))
+            hypes = _as_count(r.get("hypes"))
             out.append(
                 Candidate(
                     source=self.name,
@@ -448,6 +495,10 @@ class IgdbSource:
                     year=year,
                     release_date=rel_date,
                     extra=abbrevs,
+                    # An unreleased game has no ratings but plenty of hype, and a released one
+                    # the reverse, so neither alone ranks both — take whichever is louder.
+                    popularity=max(prominence(ratings), prominence(hypes, ceiling=1_000.0)),
+                    caveats=caveats_for(r, ratings, hypes),
                     url=f"https://www.igdb.com/games/{r.get('slug', r['id'])}",
                 )
             )
