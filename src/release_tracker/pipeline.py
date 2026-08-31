@@ -31,6 +31,7 @@ from release_tracker.resolve import best_estimates
 from release_tracker.sources import justwatch, sources_for
 from release_tracker.sources.base import SourceResult, make_client
 from release_tracker.sources.justwatch import JustWatchAvailability
+from release_tracker.titles import search_title, split_season
 
 log = get_logger("pipeline")
 
@@ -185,6 +186,47 @@ def persist_availability(db: Database, entity: Entity, avail: JustWatchAvailabil
     return 1
 
 
+# JustWatch releaseType -> the channel its date belongs on.
+_ANNOUNCED_CHANNEL: dict[str, ReleaseChannel] = {
+    "digital": ReleaseChannel.DIGITAL,
+    "physical": ReleaseChannel.PHYSICAL,
+}
+
+
+def persist_announced(db: Database, entity: Entity, avail: JustWatchAvailability) -> int:
+    """Persist a season's *announced* platform date (0/1 written).
+
+    The offer-less case a future season is in: nothing to read an ``availableFromTime`` off,
+    but the platform has published a date. Same lifecycle as :func:`persist_availability` —
+    dropped and rewritten first, so a date that moves leaves no ghost behind.
+    """
+    announced = avail.announced
+    if announced is None:
+        return 0
+    channel = _ANNOUNCED_CHANNEL.get(announced.release_type)
+    if channel is None:
+        return 0
+    db.delete_channel_observations(entity.id, _JUSTWATCH_PROVIDER, channel)
+    db.upsert_observation(
+        ReleaseObservation(
+            entity_id=entity.id,
+            channel=channel,
+            region=announced.country,
+            release_date=announced.when,
+            precision=DatePrecision.EXACT,
+            certainty=Certainty.CONFIRMED,
+            source_tier=SourceTier.FIRST_PARTY_STORE,
+            provider=_JUSTWATCH_PROVIDER,
+            source_name=f"JustWatch · {announced.platform}",
+            source_quote=f"{announced.platform} ({announced.country})",
+            # under the 0.95 a live offer earns — announced, not yet happened
+            confidence=0.9,
+            fetched_at=utc_now(),
+        )
+    )
+    return 1
+
+
 async def _refresh_offers(
     client: httpx.AsyncClient, db: Database, settings: Settings, entity: Entity
 ) -> None:
@@ -200,25 +242,37 @@ async def _refresh_offers(
 
     if not settings.justwatch_enabled or entity.kind not in (MediaKind.MOVIE, MediaKind.TV):
         return
-    if entity.season is not None:  # show-level offers can't answer a specific season's digital date
-        return
     obs = list(db.iter_observations(entity.id))
     hint = year_hint([o.release_date for o in obs if o.release_date], utc_today())
-    avail = await justwatch.availability(
-        client,
-        entity.title,
-        entity.kind,
-        countries=settings.justwatch_regions,
-        year=hint,
-        floor=justwatch.TheatricalFloor(
-            confirmed_theatrical_by_region(obs), earliest_confirmed_theatrical(obs)
-        ),
-    )
+    # Explicit coord first, title-parse as fallback — the same ladder `enrich` uses, and it
+    # matters here: most of the season rows written before `--season` existed carry the
+    # coordinate only in their title.
+    season = entity.season if entity.season is not None else split_season(entity.title)[1]
+    if entity.kind is MediaKind.TV and season is not None:
+        avail = await justwatch.season_availability(
+            client,
+            search_title(entity.title),
+            season=season,
+            countries=settings.justwatch_regions,
+            year=hint,
+        )
+    else:
+        avail = await justwatch.availability(
+            client,
+            entity.title,
+            entity.kind,
+            countries=settings.justwatch_regions,
+            year=hint,
+            floor=justwatch.TheatricalFloor(
+                confirmed_theatrical_by_region(obs), earliest_confirmed_theatrical(obs)
+            ),
+        )
     if avail is None or justwatch_year_mismatch(avail, hint) is not None:
         return
     if justwatch_predates_theatrical(avail, obs):
         return
     persist_availability(db, entity, avail)
+    persist_announced(db, entity, avail)
 
 
 async def _refresh_one(

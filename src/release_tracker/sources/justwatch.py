@@ -47,6 +47,7 @@ query RdtOffers($q: String!, $country: Country!, $language: Language!,
                 $priceLang: Language!, $types: [ObjectType!]) {
   popularTitles(country: $country, first: 4, filter: {searchQuery: $q, objectTypes: $types}) {
     edges { node {
+      id
       objectId
       objectType
       content(country: $country, language: $language) { title originalReleaseYear }
@@ -57,6 +58,48 @@ query RdtOffers($q: String!, $country: Country!, $language: Language!,
         currency
         availableFromTime
         package { clearName }
+      }
+    }}
+  }
+}
+"""
+
+# The season-scoped variant. `Show.seasons` takes **no** country argument (passing one is a
+# validation error) — the country lives on each season's `content`/`offers`, so one request per
+# country still returns every season. Selected as an inline fragment on the *search* result, so
+# resolving the show and reading its seasons stays one document and N requests, not N+1.
+#
+# `upcomingReleases` is why a future season is worth asking about at all: it has no offers yet,
+# and the platform's own announced date is sitting right there.
+_GQL_SEASONS = """
+query RdtSeasonOffers($q: String!, $country: Country!, $language: Language!,
+                      $priceLang: Language!) {
+  popularTitles(country: $country, first: 4, filter: {searchQuery: $q, objectTypes: [SHOW]}) {
+    edges { node {
+      id
+      objectId
+      objectType
+      content(country: $country, language: $language) { title originalReleaseYear }
+      ... on Show {
+        totalSeasonCount
+        seasons {
+          id
+          objectId
+          content(country: $country, language: $language) {
+            seasonNumber
+            title
+            fullPath
+            upcomingReleases { releaseDate releaseType label package { clearName } }
+          }
+          offers(country: $country, platform: WEB) {
+            monetizationType
+            presentationType
+            retailPrice(language: $priceLang)
+            currency
+            availableFromTime
+            package { clearName }
+          }
+        }
       }
     }}
   }
@@ -125,8 +168,42 @@ class Offer:
 
 
 @dataclass(frozen=True, slots=True)
+class UpcomingRelease:
+    """A dated, platform-attributed availability that has not gone live yet.
+
+    JustWatch's ``upcomingReleases``. The whole reason a *future* season is worth querying: it
+    has no offers to read a date off, but the platform has already published one.
+    """
+
+    country: str
+    when: date
+    release_type: str  # digital | physical | ... (lowercased)
+    label: str  # JustWatch's own confidence marker; "DATE" means an actual day
+    platform: str | None
+
+    @property
+    def firm(self) -> bool:
+        """True when JustWatch calls this a real date rather than a window or a placeholder."""
+        return self.label.upper() == "DATE"
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "country": self.country,
+            "when": self.when.isoformat(),
+            "release_type": self.release_type,
+            "label": self.label,
+            "platform": self.platform,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class JustWatchAvailability:
-    """A title's offers across the scanned region basket, plus the derived earliest-VOD facts."""
+    """A title's offers across the scanned region basket, plus the derived earliest-VOD facts.
+
+    ``season`` set means the offers are scoped to that season of a show rather than to the
+    whole thing, which is a materially different answer: Yellowjackets carries Netflix on
+    seasons 1-2 and not on 3, so the show-level reading is wrong for either one.
+    """
 
     object_id: int
     title: str
@@ -135,6 +212,14 @@ class JustWatchAvailability:
     earliest_vod: date | None
     earliest_vod_country: str | None
     earliest_vod_platform: str | None
+    season: int | None = None
+    upcoming: tuple[UpcomingRelease, ...] = ()
+
+    @property
+    def announced(self) -> UpcomingRelease | None:
+        """The soonest firm announced release — the answer for a season with no offers yet."""
+        firm = sorted((u for u in self.upcoming if u.firm), key=lambda u: u.when)
+        return firm[0] if firm else None
 
     @property
     def countries(self) -> tuple[str, ...]:
@@ -151,7 +236,13 @@ class JustWatchAvailability:
         return tuple(seen)
 
     def to_dict(self) -> dict[str, object]:
+        extra: dict[str, object] = {}
+        if self.season is not None:
+            extra["season"] = self.season
+        if self.upcoming:
+            extra["upcoming"] = [u.to_dict() for u in self.upcoming]
         return {
+            **extra,
             "object_id": self.object_id,
             "title": self.title,
             "year": self.year,
@@ -225,6 +316,52 @@ def parse_offers(node: dict[str, Any], country: str) -> list[Offer]:
             )
         )
     return out
+
+
+def parse_upcoming(raw: object, country: str) -> list[UpcomingRelease]:
+    """Pure: flatten a season's ``upcomingReleases`` into typed rows for a country."""
+    out: list[UpcomingRelease] = []
+    for item in cast("list[Any]", raw or []):
+        if not isinstance(item, dict):
+            continue
+        entry = cast("dict[str, Any]", item)
+        when = parse_from_time(entry.get("releaseDate"))
+        if when is None:
+            continue  # an undated "upcoming" says nothing we can act on
+        pkg = entry.get("package")
+        platform = str(pkg.get("clearName", "")).strip() or None if isinstance(pkg, dict) else None
+        out.append(
+            UpcomingRelease(
+                country=country.upper(),
+                when=when,
+                release_type=str(entry.get("releaseType") or "").strip().lower(),
+                label=str(entry.get("label") or "").strip(),
+                platform=platform,
+            )
+        )
+    return out
+
+
+def parse_season(
+    node: dict[str, Any], country: str
+) -> tuple[int, list[Offer], list[UpcomingRelease]] | None:
+    """Pure: one season node -> its number, offers and announced releases. None if unnumbered.
+
+    A season we cannot number is a season we cannot attribute, and guessing from list order
+    would silently shift every offer by one wherever JustWatch omits a season.
+    """
+    raw_content = node.get("content")
+    if not isinstance(raw_content, dict):
+        return None
+    content = cast("dict[str, Any]", raw_content)
+    number = content.get("seasonNumber")
+    if not isinstance(number, int):
+        return None
+    return (
+        number,
+        parse_offers(node, country.upper()),
+        parse_upcoming(content.get("upcomingReleases"), country),
+    )
 
 
 def title_match_score(want: str, cand: str) -> int:
@@ -332,6 +469,140 @@ async def _query_country(
         cand_year if isinstance(cand_year, int) else None,
         parse_offers(node, country.upper()),
     )
+
+
+async def _query_country_season(
+    client: httpx.AsyncClient,
+    title: str,
+    country: str,
+    *,
+    season: int,
+    year: int | None,
+    language: str,
+) -> tuple[int, str, int | None, list[Offer], list[UpcomingRelease]] | None:
+    """One country's offers for *one season* of a show. Never raises — a miss yields None."""
+    payload = json.dumps(
+        {
+            "query": _GQL_SEASONS,
+            "variables": {
+                "q": title,
+                "country": country.upper(),
+                "language": language,
+                "priceLang": _COUNTRY_LANG.get(country.upper(), language),
+            },
+        }
+    )
+    try:
+        data = await post_text(
+            client, _ENDPOINT, content=payload, headers={"Content-Type": "application/json"}
+        )
+    except Exception as exc:  # a keyless best-effort source must never break a lookup
+        log.warning("justwatch.season_fetch_error", country=country, title=title, error=str(exc))
+        return None
+    if not isinstance(data, dict) or data.get("errors"):
+        log.warning("justwatch.season_graphql_error", country=country, title=title)
+        return None
+    block = cast("dict[str, Any]", data)
+    data_node = cast("dict[str, Any]", block.get("data") or {})
+    titles = cast("dict[str, Any]", data_node.get("popularTitles") or {})
+    picked = pick_node(cast("list[Any]", titles.get("edges") or []), title, year)
+    if picked is None:
+        return None
+    node, content = picked
+    obj_id = node.get("objectId")
+    if not isinstance(obj_id, int):
+        return None
+    for raw in cast("list[Any]", node.get("seasons") or []):
+        if not isinstance(raw, dict):
+            continue
+        parsed = parse_season(cast("dict[str, Any]", raw), country)
+        if parsed is None or parsed[0] != season:
+            continue
+        cand_year: object = content.get("originalReleaseYear")
+        return (
+            obj_id,
+            str(content.get("title", title)),
+            cand_year if isinstance(cand_year, int) else None,
+            parsed[1],
+            parsed[2],
+        )
+    # The show matched but JustWatch does not carry this season. Honest miss, not an error:
+    # their numbering can lag ours, and reporting the show's offers instead is the exact
+    # wrong-season answer this path exists to avoid.
+    log.info("justwatch.season_absent", title=title, country=country, season=season)
+    return None
+
+
+async def season_availability(
+    client: httpx.AsyncClient,
+    title: str,
+    *,
+    season: int,
+    countries: tuple[str, ...],
+    year: int | None = None,
+    language: str = "en",
+) -> JustWatchAvailability | None:
+    """One season's offers + announced releases across the basket. Never raises.
+
+    Season-scoped *at the source*, which is the whole point: a show-level read reports the
+    series' earliest VOD (usually S1's) and its full set of streaming homes, and neither
+    answers "where and when can I watch *this* season".
+
+    No :class:`TheatricalFloor` is taken. The pre-order artifact it guards against is a
+    cinema phenomenon — a storefront standing a listing up on the local release day — and a
+    TV season has no cinema day for one to be dated to.
+    """
+    if not countries:
+        return None
+    sem = asyncio.Semaphore(_MAX_CONCURRENCY)
+
+    async def _bounded(
+        country: str,
+    ) -> tuple[int, str, int | None, list[Offer], list[UpcomingRelease]] | None:
+        async with sem:
+            return await _query_country_season(
+                client, title, country, season=season, year=year, language=language
+            )
+
+    results = await asyncio.gather(*(_bounded(c) for c in countries), return_exceptions=True)
+    offers: list[Offer] = []
+    upcoming: list[UpcomingRelease] = []
+    obj_id: int | None = None
+    matched_title, matched_year = title, year
+    for res in results:
+        if not isinstance(res, tuple):  # None, or an exception that slipped through gather
+            continue
+        cid, ctitle, cyear, country_offers, country_upcoming = res
+        if country_offers or country_upcoming:
+            obj_id = obj_id or cid
+            matched_title, matched_year = ctitle, cyear
+            offers.extend(country_offers)
+            upcoming.extend(country_upcoming)
+    # An announced date with no offers yet is the *expected* shape for a future season, so a
+    # bare offer check would throw away the only thing worth having.
+    if obj_id is None or not (offers or upcoming):
+        return None
+    deduped = tuple(dedupe(offers))
+    earliest, ec, ep = earliest_vod(deduped)
+    return JustWatchAvailability(
+        object_id=obj_id,
+        title=matched_title,
+        year=matched_year,
+        offers=deduped,
+        earliest_vod=earliest,
+        earliest_vod_country=ec,
+        earliest_vod_platform=ep,
+        season=season,
+        upcoming=tuple(dedupe_upcoming(upcoming)),
+    )
+
+
+def dedupe_upcoming(rows: list[UpcomingRelease]) -> list[UpcomingRelease]:
+    """Collapse the same announcement seen in several countries' payloads."""
+    best: dict[tuple[str, str, str, str | None], UpcomingRelease] = {}
+    for u in rows:
+        best.setdefault((u.country, u.release_type, u.when.isoformat(), u.platform), u)
+    return sorted(best.values(), key=lambda u: (u.when, u.country, u.platform or ""))
 
 
 def is_listing_artifact(offer: Offer, floor: TheatricalFloor) -> bool:

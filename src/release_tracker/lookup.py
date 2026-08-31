@@ -45,7 +45,7 @@ from release_tracker.models import (
     ReleaseChannel,
     ReleaseObservation,
 )
-from release_tracker.platforms import learn_predicted_platform
+from release_tracker.platforms import canonical_platform, learn_predicted_platform
 from release_tracker.resolve import (
     commercial_anchor,
     confirmed_theatrical_by_region,
@@ -68,6 +68,7 @@ from release_tracker.sources.whentostream import WhenToStreamHints
 from release_tracker.sources.whentostream import hints as wts_hints
 from release_tracker.sources.wiki import WikiHints, wiki_hints
 from release_tracker.tech import TechInfo, classify_tech, looks_like_tech, tech_info
+from release_tracker.titles import search_title
 from release_tracker.trends import StudioTrend, narrow_coarse
 
 log = get_logger("lookup")
@@ -304,25 +305,37 @@ async def report_for_candidate(
     avail: JustWatchAvailability | None = None
     wts: WhenToStreamHints | None = None
     if kind in (MediaKind.MOVIE, MediaKind.TV):
-        # JustWatch offers are *show-level*, not per-season: on a specific-season lookup they'd
-        # surface the earliest VOD across the whole series (usually S1's), which can't answer
-        # "when does *this* season drop digitally". Skip the scan and say so, don't mislead.
-        jw_season_blocked = season is not None
+        # A season-pinned lookup asks JustWatch for *that season's* node, so the offers come
+        # back scoped at the source. (This used to be skipped outright on the belief that
+        # JustWatch only answers at show level. It does not, and the show-level reading is
+        # actively wrong here: Yellowjackets carries Netflix on seasons 1-2 but not on 3.)
+        # `search_title` because the entity title is "Show: Season N" and the search wants
+        # the show.
         jw_task = (
-            justwatch.availability(
-                client,
-                cand.title,
-                kind,
-                countries=settings.justwatch_regions,
-                year=cand.year,
-                # per-market cinema dates, so a pre-order listing dated to theatrical day
-                # can't be mistaken for the digital release (see TheatricalFloor).
-                floor=justwatch.TheatricalFloor(
-                    confirmed_theatrical_by_region(observations),
-                    earliest_confirmed_theatrical(observations),
-                ),
+            (
+                justwatch.season_availability(
+                    client,
+                    search_title(cand.title),
+                    season=season,
+                    countries=settings.justwatch_regions,
+                    year=cand.year,
+                )
+                if season is not None
+                else justwatch.availability(
+                    client,
+                    cand.title,
+                    kind,
+                    countries=settings.justwatch_regions,
+                    year=cand.year,
+                    # per-market cinema dates, so a pre-order listing dated to theatrical day
+                    # can't be mistaken for the digital release (see TheatricalFloor).
+                    floor=justwatch.TheatricalFloor(
+                        confirmed_theatrical_by_region(observations),
+                        earliest_confirmed_theatrical(observations),
+                    ),
+                )
             )
-            if settings.justwatch_enabled and not jw_season_blocked
+            if settings.justwatch_enabled
             else _none()
         )
         wts_task = (
@@ -331,12 +344,6 @@ async def report_for_candidate(
             else _none()
         )
         avail, wts = await asyncio.gather(jw_task, wts_task)
-        if jw_season_blocked:
-            notes = (
-                *notes,
-                "JustWatch offers are show-level; skipped for a season-specific "
-                "lookup (they'd report the series' earliest VOD, not this season's).",
-            )
         year_reason = justwatch_year_mismatch(avail, cand.year) if avail is not None else None
         if avail is not None and year_reason is not None:
             # the matched title's year is implausible for this film — a same-name collision.
@@ -352,6 +359,8 @@ async def report_for_candidate(
             claims, streaming, predicted, extra = merge_justwatch(
                 list(claims), streaming, predicted, avail
             )
+            notes = (*notes, *extra)
+            claims, extra = merge_announced(list(claims), avail)
             notes = (*notes, *extra)
         if wts is not None:
             claims, extra = _merge_whentostream(list(claims), wts)
@@ -748,7 +757,59 @@ def merge_justwatch(
     # picture lives in the availability block, region-tagged, rather than flooding one line.
     if avail.streaming_platforms:
         predicted = None
+    if avail.season is not None:
+        # A season-scoped lookup must not answer with the *show's* streaming homes. TMDB's
+        # watch-providers are show-level, so they would list every service that has ever
+        # carried the series: Yellowjackets S4 is on Paramount+ alone, but the show line
+        # claims Netflix, which carries seasons 1-2 only. Empty is a real answer here — a
+        # season that has not dropped streams nowhere, and saying otherwise is the failure.
+        streaming = _season_streaming(avail)
     return claims, streaming, predicted, tuple(notes)
+
+
+def _season_streaming(avail: JustWatchAvailability) -> tuple[str, ...]:
+    """The season's own subscription homes, canonicalised and deduped."""
+    return tuple(dict.fromkeys(canonical_platform(p) for p in avail.streaming_platforms))
+
+
+# JustWatch releaseType -> the claim label it belongs under. A physical date is a real, dated
+# fact about a season and worth carrying, but it is not a "when can I stream this" answer.
+_ANNOUNCED_LABEL: dict[str, str] = {"digital": "Digital", "physical": "Physical"}
+
+
+def merge_announced(
+    claims: list[Claim], avail: JustWatchAvailability
+) -> tuple[list[Claim], tuple[str, ...]]:
+    """Fold a season's *announced* (not-yet-live) platform release into the claims.
+
+    Distinct from :func:`merge_justwatch`, which reads dates off offers that already exist.
+    Here there is no offer to corroborate — the season has not dropped — but the platform has
+    published a date, and that is exactly what a lookup on an upcoming season is asking for.
+    """
+    announced = avail.announced
+    if announced is None:
+        return claims, ()
+    label = _ANNOUNCED_LABEL.get(announced.release_type)
+    if label is None:  # a release type we have no channel for says nothing useful
+        return claims, ()
+    where = f"{announced.platform} ({announced.country})"
+    if any(c.label.startswith(label) and c.when == announced.when for c in claims):
+        return claims, ()  # already known from a source that got there first
+    claims.append(
+        Claim(
+            f"{label} (announced · {announced.country})",
+            announced.when,
+            DatePrecision.EXACT,
+            "confirmed",
+            # a shade under the 0.95 a *live* offer earns: this one has not happened yet
+            0.9,
+            None,
+            f"JustWatch · {where}",
+            announced.country,
+        )
+    )
+    season = f"season {avail.season}" if avail.season is not None else "this title"
+    return claims, (f"{announced.platform} has announced {season} for {where}.",)
 
 
 def _is_speculative_digital(c: Claim) -> bool:
