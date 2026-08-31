@@ -39,7 +39,7 @@ from release_tracker.sources.base import (
     get_json,
     pinned_id,
 )
-from release_tracker.titles import split_season
+from release_tracker.titles import coords_of, search_title
 
 log = get_logger("tmdb")
 
@@ -178,8 +178,8 @@ class TmdbSource:
         # Prefer the explicit structured coord (the `--season` path); fall back to parsing the
         # title ("The Boys: Season 5") for back-compat. Either way we search the *show* and then
         # resolve that specific season's date.
-        show_title, parsed_season = split_season(entity.title)
-        season_no = entity.season if entity.season is not None else parsed_season
+        show_title = search_title(entity.title)
+        season_no, _ = coords_of(entity)
         tmdb_id, skip = pinned_id(entity.external_ids, "tmdb")
         if skip:
             return SourceResult()

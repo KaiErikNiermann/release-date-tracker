@@ -11,7 +11,7 @@ import enum
 import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from typing import Final
+from typing import Final, Protocol
 
 _SEASON_RE = re.compile(r"^(?P<show>.+?)\s*[:\-]\s*Season\s+(?P<n>\d+)", re.IGNORECASE)
 # trailing qualifiers that aren't part of the canonical title
@@ -68,6 +68,34 @@ def strip_trailing_season(text: str) -> tuple[str, int | None]:
     return show, n
 
 
+class HasCoords(Protocol):
+    """The bit of an entity these helpers read — so `titles` stays free of the model layer."""
+
+    title: str
+    season: int | None
+    part: int | None
+
+
+def coords_of(entity: HasCoords) -> tuple[int | None, int | None]:
+    """A work's (season, part), explicit coord first and the title parsed as a fallback.
+
+    The one ladder, because every consumer needs the same answer and had grown its own copy.
+    The fallback is not legacy politeness: most season rows written before ``--season`` existed
+    carry the coordinate only in their title, and a reader that trusts the column alone treats
+    them as whole shows.
+
+    Freeform parsing runs after :func:`split_season` for the separators it cannot reach —
+    "Alien: Earth Season 2" and "Daredevil: Born Again ; Season 3" are both real rows that
+    ``_SEASON_RE`` returns nothing for.
+    """
+    season = entity.season
+    if season is None:
+        season = split_season(entity.title)[1]
+    if season is None:
+        season = strip_trailing_season(entity.title)[1]
+    return season, entity.part if entity.part is not None else extract_part(entity.title)
+
+
 def season_label(show: str, season: int) -> str:
     """Canonical season title, e.g. ('Pluribus', 2) -> 'Pluribus: Season 2'.
 
@@ -84,8 +112,13 @@ def extract_part(title: str) -> int | None:
 
 
 def search_title(title: str) -> str:
-    """Best query string for an API search: drop season/qualifiers and parentheticals."""
+    """Best query string for an API search: drop season/qualifiers and parentheticals.
+
+    Falls through to the freeform parser for the separators :data:`_SEASON_RE` cannot reach,
+    so "Alien: Earth Season 2" searches for the show rather than for its own row title.
+    """
     base, _ = split_season(title)
+    base = strip_trailing_season(base)[0]
     return _PAREN_RE.sub(" ", base).strip() or base
 
 

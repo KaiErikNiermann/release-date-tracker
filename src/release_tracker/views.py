@@ -45,6 +45,7 @@ from release_tracker.models import (
 )
 from release_tracker.query import VocabEntry, Vocabulary
 from release_tracker.resolve import PRECISION_RANK, best_estimates
+from release_tracker.titles import coords_of
 
 Freshness = Literal["fresh", "aging", "stale"]
 _THEATRICAL = (
@@ -377,6 +378,7 @@ def _track_row(
 ) -> TrackRow:
     estimates = best_estimates(db.iter_observations(entity.id))
     matcher = matcher_from_settings(settings)
+    season, part = coords_of(entity) if entity.kind is MediaKind.TV else (None, None)
     chan = settings.availability_channel
     # display picks (unfiltered) drive the row + upcoming ordering — nothing is hidden
     if entity.kind is MediaKind.MOVIE:
@@ -421,8 +423,10 @@ def _track_row(
         what=tuple(_tag_lines(db, entity.id)),
         series=_series_names(db, entity.id),
         aliases=tuple(entity.aliases),
-        season=entity.season,
-        part=entity.part,
+        # the shared ladder, not the raw column: most season rows written before `--season`
+        # existed carry the coordinate only in their title, and `season:3` has to find them
+        season=season,
+        part=part,
         bucket=bucket_of(entity.consumption_state, available_to_me, today),
         freshness=freshness(pivot.fetched_at if pivot else None, today, settings),
         has_notes=has_notes,

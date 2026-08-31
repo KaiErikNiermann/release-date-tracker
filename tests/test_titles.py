@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from release_tracker.titles import (
+    coords_of,
     normalize,
     search_title,
     split_season,
@@ -133,3 +134,39 @@ def test_strip_trailing_season_reads_what_a_person_types(text: str, want: tuple[
 def test_strip_trailing_season_declines_when_it_is_not_a_coordinate(text: str) -> None:
     """A false positive silently files a film as a TV season, so the parser stays timid."""
     assert strip_trailing_season(text) == (text, None)
+
+
+# --- the shared coordinate ladder ---------------------------------------------------------
+class _Work:
+    """The bit of an entity `coords_of` reads."""
+
+    def __init__(self, title: str, season: int | None = None, part: int | None = None) -> None:
+        self.title, self.season, self.part = title, season, part
+
+
+def test_coords_of_prefers_the_stored_coordinate() -> None:
+    """An explicit `--season` is authoritative over whatever the title happens to say."""
+    assert coords_of(_Work("Reacher: Season 1", season=3)) == (3, None)
+
+
+def test_coords_of_falls_back_to_the_title() -> None:
+    """Most season rows written before `--season` existed carry it only in their title."""
+    assert coords_of(_Work("Reacher: Season 3")) == (3, None)
+
+
+@pytest.mark.parametrize(
+    ("title", "season"),
+    [("Alien: Earth Season 2", 2), ("Daredevil: Born Again ; Season 3", 3)],
+)
+def test_coords_of_reaches_separators_split_season_cannot(title: str, season: int) -> None:
+    """Both are real rows in the live db that `_SEASON_RE` returns nothing for."""
+    assert coords_of(_Work(title))[0] == season
+
+
+def test_coords_of_reads_a_mid_season_part() -> None:
+    assert coords_of(_Work("Stranger Things: Season 5, Part 2")) == (5, 2)
+
+
+def test_search_title_strips_a_season_it_could_not_parse_before() -> None:
+    """Otherwise the row searches an API for its own title, season words and all."""
+    assert search_title("Alien: Earth Season 2") == "Alien: Earth"

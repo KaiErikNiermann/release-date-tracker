@@ -47,7 +47,7 @@ from release_tracker.resolve import commercial_anchor, earliest_premiere
 from release_tracker.sources.base import Credit, MediaGraph, PlatformOffer, pinned_id
 from release_tracker.sources.igdb import IgdbSource
 from release_tracker.sources.tmdb import TmdbSource
-from release_tracker.titles import extract_part, split_season
+from release_tracker.titles import coords_of
 
 log = get_logger("enrich")
 
@@ -121,8 +121,7 @@ async def enrich_work(
     if graph.series is not None:
         season = part = None
         if entity.kind is MediaKind.TV:  # explicit coords win; fall back to title parsing
-            season = entity.season if entity.season is not None else split_season(entity.title)[1]
-            part = entity.part if entity.part is not None else extract_part(entity.title)
+            season, part = coords_of(entity)
         _write_series(db, entity, graph.series, provider, now, ordinal=season, part=part)
         summary.series = 1
 

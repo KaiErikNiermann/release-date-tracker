@@ -36,7 +36,7 @@ from release_tracker.resolve import best_estimates
 from release_tracker.sources import justwatch, sources_for
 from release_tracker.sources.base import SourceResult, make_client
 from release_tracker.sources.justwatch import JustWatchAvailability
-from release_tracker.titles import search_title, split_season
+from release_tracker.titles import coords_of, search_title
 
 log = get_logger("pipeline")
 
@@ -289,10 +289,7 @@ async def _refresh_offers(
         return
     obs = list(db.iter_observations(entity.id))
     hint = year_hint([o.release_date for o in obs if o.release_date], utc_today())
-    # Explicit coord first, title-parse as fallback — the same ladder `enrich` uses, and it
-    # matters here: most of the season rows written before `--season` existed carry the
-    # coordinate only in their title.
-    season = entity.season if entity.season is not None else split_season(entity.title)[1]
+    season, _ = coords_of(entity)
     if entity.kind is MediaKind.TV and season is not None:
         avail = await justwatch.season_availability(
             client,
