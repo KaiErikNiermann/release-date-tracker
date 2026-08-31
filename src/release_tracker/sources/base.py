@@ -32,6 +32,21 @@ class Credit:
 
 
 @dataclass(slots=True, frozen=True)
+class PlatformOffer:
+    """One consumption platform a work is on, scoped to the market it was read from.
+
+    ``region`` is the ISO-2 the offer was found in, or ``None`` when the fact isn't a market
+    fact at all — a show's origin network and a game's hardware are properties of the thing,
+    not of anywhere you happen to be. ``predicted`` marks our own guess rather than a source's
+    answer, so the write side can file it at MODEL tier without a parallel container.
+    """
+
+    name: str
+    region: str | None = None
+    predicted: bool = False
+
+
+@dataclass(slots=True, frozen=True)
 class MediaGraph:
     """Source-extracted who/what/series for a work. ``where`` (platforms) is filled
     for games here (hardware/storefronts); movies/TV resolve it via watch-providers."""

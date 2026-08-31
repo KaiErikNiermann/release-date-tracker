@@ -83,6 +83,13 @@ class _TomlSource(TomlConfigSettingsSource):
             raise ConfigFileError(Path(str(file_path)), str(exc)) from exc
 
 
+# "region doesn't gate me" (a VPN). Lives here, beside the `RDT_REGIONS` field it is a value
+# of, because both the availability gate (`contingency.matcher_from_settings`) and every
+# provider lookup have to recognise it — the gate drops the dimension, a lookup reads *past*
+# it to a real market. Re-exported from `contingency` for callers that think in dimensions.
+REGION_WILDCARD: frozenset[str] = frozenset({"ANY", "*"})
+
+
 def _csv_lower(raw: str) -> tuple[str, ...]:
     """Parse a comma-separated accept-list to a lowercased tuple (facet values are lowercased)."""
     return tuple(v.strip().lower() for v in raw.split(",") if v.strip())
@@ -167,6 +174,8 @@ class Settings(BaseSettings):
     # --- defaults ---
     # CSV of accepted ISO-2 regions; the sentinel ANY (or *) means "region never gates me"
     # (e.g. a VPN makes region-locks inapplicable) — see contingency.matcher_from_settings.
+    # Read it through `provider_regions` before handing it to any API: the sentinel is a
+    # profile value, not a market code.
     regions_raw: str = Field(default="US,DE,GB", alias="RDT_REGIONS")
     db_path: Path = Field(
         default_factory=lambda: _path("data", "releases.db", "data/releases.db"),
@@ -240,6 +249,20 @@ class Settings(BaseSettings):
     @property
     def justwatch_regions(self) -> tuple[str, ...]:
         return tuple(r.strip().upper() for r in self.justwatch_regions_raw.split(",") if r.strip())
+
+    @property
+    def provider_regions(self) -> tuple[str, ...]:
+        """The markets an *API* lookup should ask about — never the raw `regions`.
+
+        ``regions`` is a contingency profile, so it may hold the ``ANY``/``*`` wildcard meaning
+        "region does not gate me". That is not an ISO-2 code any provider keys on: looked up
+        literally it matches nothing, and TMDB's whole ~100-market table is not a useful answer
+        either. Fall back to the offer-scan basket — the markets already configured as worth
+        looking at — so a VPN user gets the majors instead of nothing.
+        """
+        if REGION_WILDCARD & frozenset(self.regions):
+            return self.justwatch_regions
+        return self.regions
 
     @property
     def platforms(self) -> tuple[str, ...]:

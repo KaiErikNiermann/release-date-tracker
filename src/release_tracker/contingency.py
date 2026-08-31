@@ -17,7 +17,9 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date
 
-from release_tracker.config import Settings
+# The sentinel is defined next to the setting it is a value of; re-exported here because
+# tech has to read *past* it (a stream can be region-hopped, a device cannot).
+from release_tracker.config import REGION_WILDCARD, Settings
 from release_tracker.models import BestEstimate, Certainty
 
 
@@ -99,11 +101,6 @@ def combine(parts: Iterable[Resolution]) -> Resolution:
     if dates:
         return Resolution(ResolutionStatus.RESOLVED, max(dates))
     return Resolution(ResolutionStatus.PENDING)  # nothing to go on
-
-
-# "region doesn't gate me" (a VPN). Public because tech has to read *past* it:
-# a stream can be region-hopped, a device cannot.
-REGION_WILDCARD: frozenset[str] = frozenset({"ANY", "*"})
 
 
 def matcher_from_settings(settings: Settings) -> ProfileMatcher:

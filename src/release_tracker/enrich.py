@@ -44,15 +44,13 @@ from release_tracker.models import (
 )
 from release_tracker.platforms import learn_predicted_platform
 from release_tracker.resolve import commercial_anchor, earliest_premiere
-from release_tracker.sources.base import Credit, MediaGraph, pinned_id
+from release_tracker.sources.base import Credit, MediaGraph, PlatformOffer, pinned_id
 from release_tracker.sources.igdb import IgdbSource
 from release_tracker.sources.tmdb import TmdbSource
 from release_tracker.titles import extract_part, split_season
 
 log = get_logger("enrich")
 
-# (name, predicted?) — predicted homes are written as MODEL-tier edges.
-PlatformRef = tuple[str, bool]
 _MAX_THEMES = 6
 
 
@@ -125,8 +123,8 @@ async def enrich_work(
         _write_series(db, entity, graph.series, provider, now, ordinal=season, part=part)
         summary.series = 1
 
-    for name, predicted in platforms:
-        _write_platform(db, entity, name, predicted, provider, now)
+    for offer in _collapse_offers(platforms):
+        _write_platform(db, entity, offer, provider, now)
         summary.platforms += 1
 
     if include_themes:
@@ -266,10 +264,28 @@ def _write_series(
     )
 
 
+def _collapse_offers(offers: list[PlatformOffer]) -> list[PlatformOffer]:
+    """One offer per service, region dropped — what the region-less edge can still say.
+
+    The sources now answer per market, but an ``AVAILABLE_ON`` edge has nowhere to put a
+    region yet, so writing one row per (service, market) would just be the same service
+    repeated. Collapse here rather than asking the sources for less: the per-market answer
+    is the thing being built towards, and throwing it away at the source would have to be
+    undone.
+    """
+    seen: dict[str, PlatformOffer] = {}
+    for offer in offers:
+        # a sourced answer outranks a prediction for the same service
+        if offer.name not in seen or (seen[offer.name].predicted and not offer.predicted):
+            seen[offer.name] = PlatformOffer(offer.name, None, offer.predicted)
+    return list(seen.values())
+
+
 def _write_platform(
-    db: Database, entity: Entity, name: str, predicted: bool, provider: str, now: datetime
+    db: Database, entity: Entity, offer: PlatformOffer, provider: str, now: datetime
 ) -> None:
-    node = Node.create(NodeKind.PLATFORM, name, owned=False)
+    predicted = offer.predicted
+    node = Node.create(NodeKind.PLATFORM, offer.name, owned=False)
     db.upsert_node(node)
     db.upsert_edge(
         Edge(
@@ -287,7 +303,7 @@ def _write_platform(
 # --- per-kind source fetch ------------------------------------------------
 async def _fetch(
     client: httpx.AsyncClient, settings: Settings, entity: Entity
-) -> tuple[MediaGraph | None, list[PlatformRef]]:
+) -> tuple[MediaGraph | None, list[PlatformOffer]]:
     key = secret(settings.tmdb_api_key)
     match entity.kind:
         case MediaKind.MOVIE:
@@ -296,32 +312,32 @@ async def _fetch(
                 return None, []
             src = TmdbSource()
             graph = await src.movie_graph(client, key, tmdb_id)
-            actual = await src.movie_platforms(client, key, tmdb_id, settings.regions)
-            where = [(p, False) for p in actual] or await _predicted_where(graph, settings)
-            return graph, where
+            actual = await src.movie_platforms(client, key, tmdb_id, settings.provider_regions)
+            return graph, list(actual) or await _predicted_where(graph, settings)
         case MediaKind.TV:
             tmdb_id, skip = pinned_id(entity.external_ids, "tmdb")
             if skip or not (tmdb_id and key):
                 return None, []
             src = TmdbSource()
             graph = await src.tv_graph(client, key, tmdb_id)
-            actual = await src.tv_platforms(client, key, tmdb_id, settings.regions)
-            return graph, [(p, False) for p in actual]
+            actual = await src.tv_platforms(client, key, tmdb_id, settings.provider_regions)
+            return graph, list(actual)
         case MediaKind.GAME:
             igdb_id, skip = pinned_id(entity.external_ids, "igdb")
             if skip or not igdb_id:
                 return None, []
             graph = await IgdbSource().game_graph(client, settings, igdb_id)
-            return graph, [(p, False) for p in graph.platforms]
+            # hardware, not a market: a console is the same console everywhere.
+            return graph, [PlatformOffer(p) for p in graph.platforms]
         case _:
             return None, []
 
 
-async def _predicted_where(graph: MediaGraph, settings: Settings) -> list[PlatformRef]:
+async def _predicted_where(graph: MediaGraph, settings: Settings) -> list[PlatformOffer]:
     """Nothing streaming yet: predict the studio's typical home (a MODEL-tier guess)."""
     studios = tuple(c.name for c in graph.credits if c.node_kind is NodeKind.ORG)
     predicted = await learn_predicted_platform(studios, settings)
-    return [(predicted, True)] if predicted else []
+    return [PlatformOffer(predicted, predicted=True)] if predicted else []
 
 
 # --- LLM theme extraction (soft, flagged) ---------------------------------

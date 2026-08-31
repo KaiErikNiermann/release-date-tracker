@@ -34,6 +34,7 @@ from release_tracker.sources.base import (
     Candidate,
     Credit,
     MediaGraph,
+    PlatformOffer,
     SourceResult,
     get_json,
     pinned_id,
@@ -365,9 +366,18 @@ class TmdbSource:
         media: str,
         tmdb_id: str,
         regions: tuple[str, ...],
-    ) -> list[str]:
-        """Subscription (flatrate) providers per region — TMDB's JustWatch feed."""
-        names: list[str] = []
+    ) -> list[PlatformOffer]:
+        """Subscription (flatrate) providers, each tagged with the market it was read from.
+
+        One offer per (region, service): the same service in two markets is two facts, and
+        collapsing them by name is what made a where-line assert availability everywhere.
+
+        ``regions`` must already be real market codes — pass ``Settings.provider_regions``,
+        never ``Settings.regions``, which can hold the ``ANY``/``*`` profile sentinel that
+        keys nothing here and silently yields no providers at all.
+        """
+        offers: list[PlatformOffer] = []
+        seen: set[tuple[str, str]] = set()
         providers = cast(
             "dict[str, Any]",
             await get_json(
@@ -379,14 +389,18 @@ class TmdbSource:
             block = cast("dict[str, Any]", results.get(region, {}))
             for prov in cast("list[dict[str, Any]]", block.get("flatrate", [])):
                 name = str(prov.get("provider_name", "")).strip()
-                # drop reseller add-ons ("HBO Max Amazon Channel") — keep the base service
-                if name and "Channel" not in name and name not in names:
-                    names.append(name)
-        return names
+                # drop reseller add-ons — keep the base service. Case-insensitively: TMDB
+                # spells them both ways ("Paramount+ Amazon Channel", "Paramount Plus Apple
+                # TV channel"), and a cased test kept every lowercase one.
+                if not name or "channel" in name.casefold() or (region, name) in seen:
+                    continue
+                seen.add((region, name))
+                offers.append(PlatformOffer(name, region))
+        return offers
 
     async def movie_platforms(
         self, client: httpx.AsyncClient, key: str, tmdb_id: str, regions: tuple[str, ...]
-    ) -> tuple[str, ...]:
+    ) -> tuple[PlatformOffer, ...]:
         """Where the film actually streams now (empty until it lands somewhere)."""
         return tuple(await self._flatrate_providers(client, key, "movie", tmdb_id, regions))
 
@@ -448,24 +462,30 @@ class TmdbSource:
 
     async def tv_platforms(
         self, client: httpx.AsyncClient, key: str, tmdb_id: str, regions: tuple[str, ...]
-    ) -> tuple[str, ...]:
-        """Likely streaming homes: origin networks + per-region flatrate providers."""
-        names: list[str] = []
+    ) -> tuple[PlatformOffer, ...]:
+        """Likely streaming homes: origin networks + per-region flatrate providers.
 
-        def add(name: str) -> None:
-            name = name.strip()
-            if name and name not in names:
-                names.append(name)
+        Networks carry no region. A show's home channel is a fact about the production, not
+        an availability in any one market — stamping it with a country would be the same
+        untruth as leaving a flatrate offer unstamped.
+        """
+        offers: list[PlatformOffer] = []
+        seen: set[tuple[str, str | None]] = set()
+
+        def add(offer: PlatformOffer) -> None:
+            if offer.name and (offer.name, offer.region) not in seen:
+                seen.add((offer.name, offer.region))
+                offers.append(offer)
 
         detail = cast(
             "dict[str, Any]",
             await get_json(client, f"{BASE}/tv/{tmdb_id}", params={"api_key": key}),
         )
         for net in cast("list[dict[str, Any]]", detail.get("networks", [])):
-            add(str(net.get("name", "")))
-        for name in await self._flatrate_providers(client, key, "tv", tmdb_id, regions):
-            add(name)
-        return tuple(names)
+            add(PlatformOffer(str(net.get("name", "")).strip()))
+        for offer in await self._flatrate_providers(client, key, "tv", tmdb_id, regions):
+            add(offer)
+        return tuple(offers)
 
 
 # job titles in TMDB crew -> our CreditRole (anything else is dropped)

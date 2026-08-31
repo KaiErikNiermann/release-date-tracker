@@ -53,7 +53,13 @@ from release_tracker.resolve import (
     earliest_premiere,
 )
 from release_tracker.sources import justwatch, sources_for, unavailable_for
-from release_tracker.sources.base import Candidate, Source, SourceResult, make_client
+from release_tracker.sources.base import (
+    Candidate,
+    PlatformOffer,
+    Source,
+    SourceResult,
+    make_client,
+)
 from release_tracker.sources.ddg import WebInfo, instant_answer
 from release_tracker.sources.igdb import IgdbSource
 from release_tracker.sources.justwatch import JustWatchAvailability
@@ -938,7 +944,7 @@ async def _movie_claims(
     # streaming: stage 2 (actual providers, confirmed) then stage 1 (studio
     # prediction) only when nothing is streaming yet.
     streaming = (
-        await src.movie_platforms(client, key, tmdb_id, settings.regions)
+        _platform_names(await src.movie_platforms(client, key, tmdb_id, settings.provider_regions))
         if (tmdb_id and key)
         else ()
     )
@@ -947,6 +953,15 @@ async def _movie_claims(
         await learn_predicted_platform(meta.studios, settings) if (meta and not streaming) else None
     )
     return claims, notes, streaming, predicted
+
+
+def _platform_names(offers: tuple[PlatformOffer, ...]) -> tuple[str, ...]:
+    """The distinct service names, order preserved — the flat `streaming` headline.
+
+    The per-market detail the sources now return lives in the availability block, which is
+    region-tagged; this one line has no room for it and would just repeat a name per market.
+    """
+    return tuple(dict.fromkeys(o.name for o in offers))
 
 
 async def _tv_claims(
@@ -983,7 +998,9 @@ async def _tv_claims(
     streaming: tuple[str, ...] = ()
     key = secret(settings.tmdb_api_key)
     if tmdb_id and key:
-        streaming = await TmdbSource().tv_platforms(client, key, tmdb_id, settings.regions)
+        streaming = _platform_names(
+            await TmdbSource().tv_platforms(client, key, tmdb_id, settings.provider_regions)
+        )
     return claims, streaming, notes
 
 
