@@ -143,7 +143,9 @@ class BrowseScreen(Screen[None]):
         table = self.table
         table.clear()
         for row in self._visible:
-            who, where, what = render.wcw_cells(row)
+            who, where, what = render.wcw_cells(
+                row, home=frozenset(self.rdt.settings.provider_regions)
+            )
             table.add_row(
                 Text.from_markup(render.fmt_cell(row.digital or row.theatrical)),
                 Text.from_markup(render.fresh_dot(row.freshness)),

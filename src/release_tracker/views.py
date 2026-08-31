@@ -99,11 +99,26 @@ class TagLine:
 
 @dataclass(frozen=True, slots=True)
 class PlatformLine:
-    """One where-edge: a consumption platform, possibly only a prediction."""
+    """One place to watch: a platform and every market it is known to be live in.
+
+    One line per *platform*, not per edge — Netflix in six countries is one place to watch,
+    and six rows would blow out the browse column and the card alike. ``regions`` empty means
+    unscoped: a broadcast network, or a source that never told us where.
+    """
 
     name: str
     predicted: bool
     node_id: str = ""
+    regions: tuple[str, ...] = ()  # ISO-2s, sorted
+    providers: tuple[str, ...] = ()  # tmdb / justwatch / model — provenance for the card
+
+    def live_in(self, regions: Iterable[str]) -> bool:
+        """True when this platform is live in any of ``regions`` — or is unscoped.
+
+        An unscoped platform matches anything on purpose: "we don't know where" must not
+        read as "nowhere you can reach", which would hide every broadcast network.
+        """
+        return not self.regions or bool(frozenset(self.regions) & frozenset(regions))
 
 
 @dataclass(frozen=True, slots=True)
@@ -506,13 +521,29 @@ def _credit_lines(db: Database, entity_id: str) -> list[CreditLine]:
 
 
 def _platform_lines(db: Database, entity_id: str) -> list[PlatformLine]:
+    """The where-edges folded to one line per platform, markets unioned.
+
+    Sourced answers sort ahead of predictions: the renderers truncate this list, and a guess
+    displacing a fact off the end of the column is the one ordering that must not happen.
+    """
     edges = db.edges_from(entity_id, RelationKind.AVAILABLE_ON)
     nodes = db.get_nodes(e.dst_id for e in edges)
-    return [
-        PlatformLine(n.name, e.source_tier is SourceTier.MODEL, n.id)
-        for e in edges
-        if (n := nodes.get(e.dst_id))
+    grouped: dict[str, tuple[str, set[str], set[str], list[bool]]] = {}
+    for e in edges:
+        if (n := nodes.get(e.dst_id)) is None:
+            continue
+        _, regions, providers, tiers = grouped.setdefault(n.id, (n.name, set(), set(), []))
+        if e.region:
+            regions.add(e.region)
+        providers.add(e.source_provider)
+        tiers.append(e.source_tier is SourceTier.MODEL)
+    lines = [
+        # predicted only when *every* edge behind it is a guess — one sourced answer settles it
+        PlatformLine(name, all(tiers), node_id, tuple(sorted(regions)), tuple(sorted(providers)))
+        for node_id, (name, regions, providers, tiers) in grouped.items()
     ]
+    lines.sort(key=lambda p: (p.predicted, p.name.casefold()))
+    return lines
 
 
 def _tag_lines(db: Database, entity_id: str) -> list[TagLine]:

@@ -505,6 +505,10 @@ class Edge(BaseModel):
     role: CreditRole | WorkRelation | None = None
     ordinal: int | None = None  # the season number for PART_OF_SERIES, if any
     part: int | None = None  # the mid-season cut (Part/Volume/Cour N) within a season
+    # ISO-2 the relation holds in, for AVAILABLE_ON. None means unscoped, *not* worldwide:
+    # a broadcast network genuinely has no market, and claiming "WW" for an unknown scope is
+    # exactly the everywhere-lie this field exists to remove.
+    region: str | None = None
     source_provider: str = "unknown"  # tmdb / igdb / steam / openai / user
     source_url: str | None = None
     source_tier: SourceTier = SourceTier.AGGREGATOR
@@ -514,7 +518,14 @@ class Edge(BaseModel):
 
     @property
     def id(self) -> str:
-        """Deterministic dedup key: same relation from same source collapses to one row."""
+        """Deterministic dedup key: same relation from same source collapses to one row.
+
+        Region joins the key for ``AVAILABLE_ON`` only, where "on Netflix in the US" and "on
+        Netflix in Japan" are two facts that must not collapse. Every other relation hashes
+        exactly as it did — folding ``region or ""`` in unconditionally would move the id of
+        every credit, genre and series edge already in the db and duplicate the lot on the
+        next enrich.
+        """
         parts = (
             self.src_id,
             self.dst_id,
@@ -522,6 +533,8 @@ class Edge(BaseModel):
             self.role.value if self.role else "",
             self.source_provider,
         )
+        if self.relation is RelationKind.AVAILABLE_ON and self.region:
+            parts = (*parts, self.region)
         return hashlib.sha1("|".join(parts).encode()).hexdigest()  # noqa: S324
 
 

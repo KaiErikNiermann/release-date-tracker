@@ -121,15 +121,13 @@ class CardScreen(ModalScreen[ConsumptionState | None]):
             )
         if not lines:
             lines.append("  [dim]no dates yet[/]")
+        home = frozenset(self.rdt.settings.provider_regions)
         sections: list[tuple[str, list[str]]] = [
             ("Dates", lines),
             ("Who", [f"  [dim]{c.role.value:<18}[/] {c.name}" for c in self.card.credits]),
             (
                 "Where",
-                [
-                    f"  {p.name}{' [dim](predicted)[/]' if p.predicted else ''}"
-                    for p in self.card.platforms
-                ],
+                [f"  {render.fmt_platform(p, home=home)}" for p in self.card.platforms],
             ),
             ("What", [f"  {render.fmt_tag(t)} [dim]{t.kind.value}[/]" for t in self.card.tags]),
         ]

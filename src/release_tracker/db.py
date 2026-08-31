@@ -106,6 +106,7 @@ CREATE TABLE IF NOT EXISTS edges (
     role            TEXT,
     ordinal         INTEGER,
     part            INTEGER,
+    region          TEXT,
     source_provider TEXT NOT NULL,
     source_url      TEXT,
     source_tier     INTEGER NOT NULL,
@@ -185,6 +186,8 @@ class Database:
             self._conn.execute("ALTER TABLE edges ADD COLUMN ordinal INTEGER")
         if "part" not in edge_cols:
             self._conn.execute("ALTER TABLE edges ADD COLUMN part INTEGER")
+        if "region" not in edge_cols:
+            self._conn.execute("ALTER TABLE edges ADD COLUMN region TEXT")
         entity_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(entities)")}
         if "consumption_state" not in entity_cols:
             self._conn.execute(
@@ -679,6 +682,25 @@ class Database:
             cur = conn.execute("DELETE FROM edges WHERE id = ?", (edge_id,))
             return cur.rowcount > 0
 
+    def delete_edges(self, src_id: str, relation: RelationKind, providers: tuple[str, ...]) -> int:
+        """Drop an entity's edges of one relation for the providers about to rewrite them.
+
+        Refetchable facts only: ``owned`` edges are the user's own assertion and survive.
+        Without this, a source that stops reporting a platform — or one whose rows predate
+        region entering the AVAILABLE_ON key — leaves them behind forever, next to their
+        region-scoped replacements.
+        """
+        if not providers:
+            return 0
+        holes = ",".join("?" * len(providers))
+        with self._tx() as conn:
+            cur = conn.execute(
+                "DELETE FROM edges WHERE src_id = ? AND relation = ? AND owned = 0 "  # noqa: S608
+                f"AND source_provider IN ({holes})",
+                (src_id, relation.value, *providers),
+            )
+            return cur.rowcount
+
     def edges_from(self, src_id: str, relation: RelationKind | None = None) -> list[Edge]:
         return self._edges("src_id", src_id, relation)
 
@@ -743,13 +765,14 @@ def _insert_observation(conn: sqlite3.Connection, obs: ReleaseObservation) -> No
 def _insert_edge(conn: sqlite3.Connection, edge: Edge) -> None:
     conn.execute(
         """
-        INSERT INTO edges (id, src_id, dst_id, relation, role, ordinal, part, source_provider,
-            source_url, source_tier, confidence, owned, fetched_at)
-        VALUES (:id, :src_id, :dst_id, :relation, :role, :ordinal, :part, :source_provider,
-            :source_url, :source_tier, :confidence, :owned, :fetched_at)
+        INSERT INTO edges (id, src_id, dst_id, relation, role, ordinal, part, region,
+            source_provider, source_url, source_tier, confidence, owned, fetched_at)
+        VALUES (:id, :src_id, :dst_id, :relation, :role, :ordinal, :part, :region,
+            :source_provider, :source_url, :source_tier, :confidence, :owned, :fetched_at)
         ON CONFLICT(id) DO UPDATE SET
             ordinal=COALESCE(excluded.ordinal, edges.ordinal),
             part=COALESCE(excluded.part, edges.part),
+            region=COALESCE(excluded.region, edges.region),
             source_url=COALESCE(excluded.source_url, edges.source_url),
             source_tier=excluded.source_tier,
             confidence=excluded.confidence,
@@ -764,6 +787,7 @@ def _insert_edge(conn: sqlite3.Connection, edge: Edge) -> None:
             "role": edge.role.value if edge.role else None,
             "ordinal": edge.ordinal,
             "part": edge.part,
+            "region": edge.region,
             "source_provider": edge.source_provider,
             "source_url": edge.source_url,
             "source_tier": int(edge.source_tier),
@@ -820,6 +844,7 @@ def _row_to_edge(row: sqlite3.Row) -> Edge:
         role=_parse_role(relation, row["role"]),
         ordinal=row["ordinal"],
         part=row["part"],
+        region=row["region"],
         source_provider=row["source_provider"],
         source_url=row["source_url"],
         source_tier=SourceTier(row["source_tier"]),

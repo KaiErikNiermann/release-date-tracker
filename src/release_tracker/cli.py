@@ -2070,6 +2070,11 @@ def _print_enrich(entity: Entity, s: EnrichSummary) -> None:
     )
 
 
+def _home() -> frozenset[str]:
+    """The markets the reader can actually reach — what a `*` in the Where column is about."""
+    return frozenset(get_settings().provider_regions)
+
+
 def _wcw(table: Table) -> None:
     """The shared who/where/what columns."""
     table.add_column("Who", max_width=16, no_wrap=True, overflow="ellipsis")
@@ -2079,7 +2084,7 @@ def _wcw(table: Table) -> None:
 
 def _render_upcoming(rows: list[views.TrackRow], days: int | None) -> None:
     title = "Upcoming releases" + (f" · next {days}d" if days else "")
-    region = (get_settings().regions or ("US",))[0]
+    region = next(iter(get_settings().provider_regions), "US")
     table = Table(title=title, show_lines=False)
     table.add_column(f"Theatrical {region}", min_width=10, no_wrap=True)
     table.add_column("Digital", min_width=10, no_wrap=True)
@@ -2087,6 +2092,7 @@ def _render_upcoming(rows: list[views.TrackRow], days: int | None) -> None:
     table.add_column("Title", min_width=18, max_width=30, no_wrap=True, overflow="ellipsis")
     table.add_column("Kind", min_width=5, no_wrap=True)
     _wcw(table)
+    home = _home()
     today = _today()
     prev_month: tuple[int, int] | None = None
     for r in rows:
@@ -2105,7 +2111,7 @@ def _render_upcoming(rows: list[views.TrackRow], days: int | None) -> None:
             fresh_dot(r.freshness),
             title_cell(r),
             r.kind.value,
-            *wcw_cells(r),
+            *wcw_cells(r, home=home),
         )
     console.print(table)
     if rows:
@@ -2149,6 +2155,7 @@ def _render_find(rows: list[views.TrackRow], expr: str) -> None:
     table.add_column("Kind", min_width=5, no_wrap=True)
     table.add_column("Bucket", min_width=9, no_wrap=True)
     table.add_column("State", min_width=8, no_wrap=True)
+    home = _home()
     _wcw(table)
     for r in rows:
         table.add_row(
@@ -2158,7 +2165,7 @@ def _render_find(rows: list[views.TrackRow], expr: str) -> None:
             r.kind.value,
             _bucket_label(r.bucket),
             state_label(r.state),
-            *wcw_cells(r),
+            *wcw_cells(r, home=home),
         )
     console.print(table)
     console.print(
@@ -2175,6 +2182,7 @@ def _render_watched(rows: list[views.TrackRow]) -> None:
     table.add_column("Kind", min_width=5, no_wrap=True)
     table.add_column("State", min_width=8, no_wrap=True)
     _wcw(table)
+    home = _home()
     for r in rows:
         state = state_label(r.state)
         table.add_row(
@@ -2182,7 +2190,7 @@ def _render_watched(rows: list[views.TrackRow]) -> None:
             title_cell(r),
             r.kind.value,
             state,
-            *wcw_cells(r),
+            *wcw_cells(r, home=home),
         )
     console.print(table)
     if rows:
@@ -2197,6 +2205,7 @@ def _render_available(rows: list[views.TrackRow]) -> None:
     table.add_column("Title", min_width=18, max_width=32, no_wrap=True, overflow="ellipsis")
     table.add_column("Kind", min_width=5, no_wrap=True)
     table.add_column("State", min_width=8, no_wrap=True)
+    home = _home()
     _wcw(table)
     for r in rows:
         table.add_row(
@@ -2204,7 +2213,7 @@ def _render_available(rows: list[views.TrackRow]) -> None:
             title_cell(r),
             r.kind.value,
             state_label(r.state),
-            *wcw_cells(r),
+            *wcw_cells(r, home=home),
         )
     console.print(table)
     if rows:
@@ -2231,7 +2240,8 @@ def _render_card(card: views.WorkCard) -> None:
             owned = " [green](yours)[/]" if c.owned else ""
             console.print(f"  [dim]{c.role.value:<10}[/] {c.name}{owned}")
     if card.platforms:
-        where = ", ".join(f"[dim]~{p.name}[/]" if p.predicted else p.name for p in card.platforms)
+        home = frozenset(get_settings().provider_regions)
+        where = ", ".join(render.fmt_platform(p, home=home) for p in card.platforms)
         console.print(f"[bold]Where[/] {where}")
     if card.tags:
         # bucket by descriptor kind (a user-authored theme is OFFICIAL-tier, not a genre);

@@ -132,13 +132,36 @@ def title_cell(row: views.TrackRow) -> str:
     return title
 
 
+def fmt_platform(p: views.PlatformLine, *, home: frozenset[str] = frozenset()) -> str:
+    """One where-line for a card: name, the markets it is live in, and how sure we are.
+
+    Shared by both cards so they cannot drift on what a "~" or a market list means.
+    """
+    mark = "[dim]~[/]" if p.predicted else ""
+    where = f" [dim]({', '.join(p.regions)})[/]" if p.regions else ""
+    reach = "" if p.live_in(home) else " [yellow]*[/]"
+    return f"{mark}{p.name}{where}{reach}"
+
+
 def wcw_cells(
-    row: views.TrackRow, *, who: int = 2, where: int = 2, what: int = 4
+    row: views.TrackRow,
+    *,
+    who: int = 2,
+    where: int = 2,
+    what: int = 4,
+    home: frozenset[str] = frozenset(),
 ) -> tuple[str, str, str]:
-    """The who/where/what trio, truncated for display (the model carries them in full)."""
+    """The who/where/what trio, truncated for display (the model carries them in full).
+
+    Platforms reachable from ``home`` sort first and the rest carry a ``*``. Truncation is
+    what makes that matter: without it the two names this column has room for could both be
+    markets the reader cannot get to, which reads as "available" and is not.
+    """
+    platforms = sorted(row.platforms, key=lambda p: not p.live_in(home))
     return (
         ", ".join(row.who[:who]) or "[dim]—[/]",
-        ", ".join(row.where[:where]) or "[dim]—[/]",
+        ", ".join(p.name if p.live_in(home) else f"{p.name}[yellow]*[/]" for p in platforms[:where])
+        or "[dim]—[/]",
         ", ".join(fmt_tag(t) for t in row.what[:what]) or "[dim]—[/]",
     )
 

@@ -51,6 +51,9 @@ from release_tracker.titles import extract_part, split_season
 
 log = get_logger("enrich")
 
+# Our own guess, filed apart from any source so a refetch can clear it by name.
+_PREDICTED_PROVIDER = "model"
+
 _MAX_THEMES = 6
 
 
@@ -123,7 +126,12 @@ async def enrich_work(
         _write_series(db, entity, graph.series, provider, now, ordinal=season, part=part)
         summary.series = 1
 
-    for offer in _collapse_offers(platforms):
+    if platforms:
+        # Clear only what is about to be re-answered, and only when there *is* an answer —
+        # an unconfigured source returns an empty list exactly like a real miss, and wiping
+        # the where-graph on that is the failure `pipeline` documents for observations.
+        db.delete_edges(entity.id, RelationKind.AVAILABLE_ON, (provider, _PREDICTED_PROVIDER))
+    for offer in platforms:
         _write_platform(db, entity, offer, provider, now)
         summary.platforms += 1
 
@@ -264,26 +272,10 @@ def _write_series(
     )
 
 
-def _collapse_offers(offers: list[PlatformOffer]) -> list[PlatformOffer]:
-    """One offer per service, region dropped — what the region-less edge can still say.
-
-    The sources now answer per market, but an ``AVAILABLE_ON`` edge has nowhere to put a
-    region yet, so writing one row per (service, market) would just be the same service
-    repeated. Collapse here rather than asking the sources for less: the per-market answer
-    is the thing being built towards, and throwing it away at the source would have to be
-    undone.
-    """
-    seen: dict[str, PlatformOffer] = {}
-    for offer in offers:
-        # a sourced answer outranks a prediction for the same service
-        if offer.name not in seen or (seen[offer.name].predicted and not offer.predicted):
-            seen[offer.name] = PlatformOffer(offer.name, None, offer.predicted)
-    return list(seen.values())
-
-
 def _write_platform(
     db: Database, entity: Entity, offer: PlatformOffer, provider: str, now: datetime
 ) -> None:
+    """One where-edge, scoped to the market the offer was read from (None = unscoped)."""
     predicted = offer.predicted
     node = Node.create(NodeKind.PLATFORM, offer.name, owned=False)
     db.upsert_node(node)
@@ -292,7 +284,8 @@ def _write_platform(
             src_id=entity.id,
             dst_id=node.id,
             relation=RelationKind.AVAILABLE_ON,
-            source_provider="model" if predicted else provider,
+            region=offer.region,
+            source_provider=_PREDICTED_PROVIDER if predicted else provider,
             source_tier=SourceTier.MODEL if predicted else SourceTier.AGGREGATOR,
             confidence=0.4 if predicted else 0.85,
             fetched_at=now,
