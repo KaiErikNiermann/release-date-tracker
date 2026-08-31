@@ -85,6 +85,11 @@ class SourceResult:
     observations: list[ReleaseObservation] = field(default_factory=list[ReleaseObservation])
     external_ids: dict[str, str] = field(default_factory=dict[str, str])
     skipped: str | None = None
+    # What this source wants said about *this* pull, in the reader's words. A third thing
+    # again: `skipped` is "I was never able to look", an exception is "something broke", and
+    # this is "I looked, I answered, and something about the answer needs attributing".
+    # Printed verbatim, never parsed.
+    notes: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -191,6 +196,39 @@ async def get_json(
     resp = await client.get(url, params=params, headers=headers)
     if resp.status_code in (429, 500, 502, 503, 504):
         resp.raise_for_status()
+    return resp.json()
+
+
+@retry(
+    retry=retry_if_exception_type((httpx.TransportError, httpx.HTTPStatusError)),
+    wait=wait_exponential(multiplier=0.5, min=0.5, max=8),
+    stop=stop_after_attempt(4),
+    reraise=True,
+)
+async def get_json_absentable(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    params: dict[str, str] | None = None,
+    headers: dict[str, str] | None = None,
+) -> object | None:
+    """GET returning ``None`` when the resource is genuinely absent, parsed JSON otherwise.
+
+    :func:`get_json` raises only for 429/5xx, so a 404 comes back as whatever the API put in
+    the *body* — for TMDB, ``{"success": false, "status_code": 34, …}``, which reads to every
+    caller as a successful response that merely has no fields. That is why asking for a season
+    a show does not have and asking for one with no air date yet were the same code path.
+
+    Absent and empty are different answers, the same way ``SourceResult.skipped`` separates
+    "never asked" from "found nothing". This reads the status rather than sniffing the body:
+    a body-shape guess would start discarding real payloads that happen to carry a ``success``
+    key.
+    """
+    resp = await client.get(url, params=params, headers=headers)
+    if resp.status_code in (429, 500, 502, 503, 504):
+        resp.raise_for_status()
+    if resp.status_code == 404:
+        return None
     return resp.json()
 
 

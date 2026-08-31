@@ -12,7 +12,6 @@ import asyncio
 from datetime import date
 from typing import Any
 
-import httpx
 import pytest
 
 from release_tracker.config import Settings
@@ -29,26 +28,35 @@ def _tv_entity(title: str, *, season: int | None = None) -> Entity:
 def _run(
     monkeypatch: pytest.MonkeyPatch, entity: Entity, responses: dict[str, Any]
 ) -> tuple[SourceResult, list[str]]:
-    """Drive TmdbSource.pull with get_json answered from a {url-substring: payload} table.
+    """Drive TmdbSource.pull with the fetchers answered from a {url-substring: payload} table.
 
-    A payload of the literal 404 sentinel raises an HTTPStatusError(404) for that url.
+    A payload of the literal 404 sentinel stands for a resource TMDB does not have. It is
+    returned as ``None`` from `get_json_absentable` rather than raised, because that is what
+    the real thing does: TMDB answers 404 with a JSON body, `get_json` only raises for
+    429/5xx, and an earlier version of this harness raised instead — which made a branch pass
+    here that could never run in production.
     """
     seen: list[str] = []
 
-    async def fake_get_json(_client: object, url: str, **_kw: object) -> Any:
+    def _answer(url: str) -> Any:
         seen.append(url)
         for needle, payload in responses.items():
             if needle in url:
-                if payload == 404:
-                    raise httpx.HTTPStatusError(
-                        "not found",
-                        request=httpx.Request("GET", url),
-                        response=httpx.Response(404, request=httpx.Request("GET", url)),
-                    )
                 return payload
         raise AssertionError(f"unexpected url: {url}")
 
+    async def fake_get_json(_client: object, url: str, **_kw: object) -> Any:
+        payload = _answer(url)
+        if payload == 404:  # `get_json` hands the error envelope back as if it were data
+            return {"success": False, "status_code": 34}
+        return payload
+
+    async def fake_absentable(_client: object, url: str, **_kw: object) -> Any:
+        payload = _answer(url)
+        return None if payload == 404 else payload
+
     monkeypatch.setattr(tmdb, "get_json", fake_get_json)
+    monkeypatch.setattr(tmdb, "get_json_absentable", fake_absentable)
 
     # silence the module logger: structlog's PrintLogger writes to a stderr that pytest's
     # capture may have closed by the time the full suite reaches here (order-dependent flake).
@@ -74,12 +82,86 @@ def test_explicit_season_hits_that_season_endpoint(monkeypatch: pytest.MonkeyPat
 
 
 def test_absent_season_404_is_tba_not_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    # a renewed-but-unlisted season (e.g. Pluribus S2): /season/2 -> 404 -> no date, no raise,
+    # a renewed-but-unlisted season (Pluribus S2): /season/2 -> 404 -> no date, no raise,
     # and crucially NO fallback to the show's first_air_date (which would leak S1's date)
     entity = _tv_entity("Pluribus", season=2)
-    result, _ = _run(monkeypatch, entity, {"/season/2": 404})
+    result, _ = _run(
+        monkeypatch,
+        entity,
+        {
+            "/season/2": 404,
+            "/tv/225171": {"status": "Returning Series", "number_of_seasons": 1, "seasons": []},
+        },
+    )
     assert result.observations == []
     assert result.external_ids == {"tmdb": "225171"}  # still resolves the show id
+
+
+def test_an_absent_season_says_why_it_is_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Pluribus regression. A running show's missing season is "not listed yet" — never a
+    denial — because it was renewed before season 1 aired and TMDB has not caught up."""
+    result, _ = _run(
+        monkeypatch,
+        _tv_entity("Pluribus", season=2),
+        {
+            "/season/2": 404,
+            "/tv/225171": {
+                "status": "Returning Series",
+                "number_of_seasons": 1,
+                "seasons": [
+                    {
+                        "season_number": 1,
+                        "name": "Season 1",
+                        "air_date": "2025-11-06",
+                        "episode_count": 9,
+                    }
+                ],
+            },
+        },
+    )
+    said = " ".join(result.notes).casefold()
+    assert "not listed yet" in said
+    for never in ("carries no", "does not exist", "cancel"):
+        assert never not in said
+
+
+def test_a_finished_shows_missing_season_is_stated_plainly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Marvel's Daredevil has three; the fourth is Born Again's first, on another id."""
+    result, _ = _run(
+        monkeypatch,
+        _tv_entity("Daredevil", season=4),
+        {
+            "/season/4": 404,
+            "/tv/225171": {
+                "status": "Ended",
+                "number_of_seasons": 3,
+                "seasons": [
+                    {
+                        "season_number": n,
+                        "name": f"Season {n}",
+                        "air_date": f"201{n + 4}-01-01",
+                        "episode_count": 13,
+                    }
+                    for n in (1, 2, 3)
+                ],
+            },
+        },
+    )
+    assert "carries no season 4" in " ".join(result.notes)
+    assert "Ended" in " ".join(result.notes)
+
+
+def test_an_in_range_season_costs_no_extra_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The show detail is fetched only on the anomaly — every row of a refresh batch must
+    cost exactly what it did before this existed."""
+    _, seen = _run(
+        monkeypatch,
+        _tv_entity("Whatever", season=2),
+        {"/season/2": {"air_date": "2026-07-02"}},
+    )
+    assert not [u for u in seen if u.endswith("/tv/225171")]
 
 
 def test_title_parse_is_fallback_when_no_coord(monkeypatch: pytest.MonkeyPatch) -> None:

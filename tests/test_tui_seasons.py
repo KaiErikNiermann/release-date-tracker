@@ -20,9 +20,9 @@ from release_tracker import drafts
 from release_tracker.config import get_settings
 from release_tracker.db import Database
 from release_tracker.models import Entity, MediaKind
+from release_tracker.seasons import SeasonRef, ShowShape
 from release_tracker.slices import Episode, SliceProposal, SliceScan
 from release_tracker.sources.base import Candidate
-from release_tracker.sources.tmdb import SeasonRef
 from release_tracker.tui import add as add_module
 from release_tracker.tui.add import AddScreen, SeasonPicker, SeasonRow, SliceRow, resolve
 from release_tracker.tui.app import RdtApp
@@ -238,13 +238,18 @@ def _seasons(*numbers: int, specials: bool = True) -> tuple[SeasonRef, ...]:
 
 @pytest.fixture
 def listed(monkeypatch: pytest.MonkeyPatch) -> dict[str, tuple[SeasonRef, ...]]:
-    """Answer `tv_seasons` from a table keyed by tmdb id, with no network."""
+    """Answer `tv_shape` from a table keyed by tmdb id, with no network.
+
+    The table still holds bare seasons — the picker's subject — and a running show is assumed,
+    so a test that cares about the status says so by building its own ShowShape.
+    """
     table: dict[str, tuple[SeasonRef, ...]] = {}
 
-    async def _tv_seasons(_self: object, _c: object, _k: str, tmdb_id: str) -> Any:
-        return table.get(tmdb_id, ())
+    async def _tv_shape(_self: object, _c: object, _k: str, tmdb_id: str) -> Any:
+        seasons = table.get(tmdb_id, ())
+        return ShowShape("Returning Series", seasons, len(seasons))
 
-    monkeypatch.setattr(add_module.TmdbSource, "tv_seasons", _tv_seasons)
+    monkeypatch.setattr(add_module.TmdbSource, "tv_shape", _tv_shape)
     return table
 
 

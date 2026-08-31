@@ -16,7 +16,7 @@ from typing import Any, cast
 
 import httpx
 
-from release_tracker.clock import utc_now
+from release_tracker.clock import utc_now, utc_today
 from release_tracker.config import Settings, secret
 from release_tracker.logging import get_logger
 from release_tracker.models import (
@@ -30,6 +30,7 @@ from release_tracker.models import (
     ReleaseObservation,
     SourceTier,
 )
+from release_tracker.seasons import SeasonRef, ShowShape, check_season
 from release_tracker.slices import Episode
 from release_tracker.sources.base import (
     Candidate,
@@ -38,6 +39,7 @@ from release_tracker.sources.base import (
     PlatformOffer,
     SourceResult,
     get_json,
+    get_json_absentable,
     pinned_id,
     prominence,
 )
@@ -88,21 +90,6 @@ _TYPE_TO_CHANNEL: dict[int, ReleaseChannel] = {
     5: ReleaseChannel.PHYSICAL,
     6: ReleaseChannel.TV_BROADCAST,
 }
-
-
-@dataclass(frozen=True, slots=True)
-class SeasonRef:
-    """One season of a show as TMDB lists it on the show detail."""
-
-    number: int
-    name: str
-    air_date: date | None
-    episodes: int
-
-    @property
-    def specials(self) -> bool:
-        """Season 0 — a specials bucket, not a season anyone means by "season"."""
-        return self.number == 0
 
 
 class TmdbSource:
@@ -194,26 +181,41 @@ class TmdbSource:
         observations: list[ReleaseObservation] = []
         url = f"https://www.themoviedb.org/tv/{tmdb_id}"
         air: date | None = None
+        notes: tuple[str, ...] = ()
 
         if season_no is not None:
             # a specific season: use ITS air_date only. A future season with no date
             # yet is TBA — do NOT fall back to the show's first_air_date / next episode,
             # those belong to a *different* (already-aired) season and would stamp the
             # unaired season with a wrong, ancient "confirmed" date (e.g. S3 -> S1's date).
-            # A 404 means TMDB hasn't created this season yet (very-early renewal, e.g.
-            # Pluribus S2) — also TBA, not an error.
-            try:
-                season = cast(
-                    "dict[str, Any]",
-                    await get_json(
-                        client, f"{BASE}/tv/{tmdb_id}/season/{season_no}", params={"api_key": key}
-                    ),
-                )
+            # A 404 means TMDB does not list this season — which is TBA either way, but for
+            # two very different reasons worth telling apart: a very-early renewal it has not
+            # caught up with (Pluribus was renewed before season 1 aired), or a season that is
+            # simply not on this id (Dexter's ninth is New Blood's first, filed separately).
+            # `get_json` cannot see the difference at all: TMDB answers 404 with a JSON body,
+            # and only 429/5xx are raised, so the error envelope came back looking like a
+            # successful response with no fields.
+            season = cast(
+                "dict[str, Any] | None",
+                await get_json_absentable(
+                    client, f"{BASE}/tv/{tmdb_id}/season/{season_no}", params={"api_key": key}
+                ),
+            )
+            if season is not None:
                 air = _parse_tmdb_date(season.get("air_date"))
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code != 404:
-                    raise
-                log.info("tmdb.season_absent", tmdb_id=tmdb_id, season=season_no)
+            else:
+                # The one place a second GET is paid for, and only on the anomaly: an in-range
+                # pull — every row in a `refresh` batch — costs exactly what it did before.
+                shape = await self.tv_shape(client, key, tmdb_id)
+                verdict = check_season(shape, season_no, utc_today(), show=show_title)
+                notes = verdict.reasons
+                log.info(
+                    "tmdb.season_absent",
+                    tmdb_id=tmdb_id,
+                    season=season_no,
+                    standing=verdict.standing.value,
+                    stance=verdict.stance.value,
+                )
         else:
             # whole show (no season pinned): next episode to air, else first air date
             detail = cast(
@@ -249,7 +251,9 @@ class TmdbSource:
             season=season_no,
             observations=len(observations),
         )
-        return SourceResult(observations=observations, external_ids={"tmdb": str(tmdb_id)})
+        return SourceResult(
+            observations=observations, external_ids={"tmdb": str(tmdb_id)}, notes=notes
+        )
 
     # -- search ------------------------------------------------------------
     async def _search(
@@ -504,20 +508,24 @@ class TmdbSource:
         ]
         return tuple(sorted(dated, key=lambda e: e.number))
 
-    async def tv_seasons(
-        self, client: httpx.AsyncClient, key: str, tmdb_id: str
-    ) -> tuple[SeasonRef, ...]:
-        """Every season TMDB lists for a show, in order, specials last.
+    async def tv_shape(self, client: httpx.AsyncClient, key: str, tmdb_id: str) -> ShowShape:
+        """What TMDB lists for a show: its seasons, and whether it says more are coming.
 
-        Read off the show detail the platform lookup already fetches, so a picker row gets its
-        air date and episode count for free. The numbering matters as much as the list: it is
-        the same numbering ``_pull_tv`` later resolves against at ``/tv/{id}/season/{n}``, so
-        anything offered here is a season the puller can actually fetch.
+        One GET, and the same one the platform lookup already makes. It supersedes a
+        seasons-only reader: this response has always carried ``status`` and
+        ``number_of_seasons`` too, and throwing them away is what made a season a show does
+        not have indistinguishable from one it has not scheduled yet.
+
+        The numbering matters as much as the list: it is the same numbering ``_pull_tv``
+        resolves against at ``/tv/{id}/season/{n}``, so anything listed here is a season the
+        puller can actually fetch.
         """
         detail = cast(
             "dict[str, Any]",
             await get_json(client, f"{BASE}/tv/{tmdb_id}", params={"api_key": key}),
         )
+        status = detail.get("status")
+        listed = detail.get("number_of_seasons")
         seasons = [
             SeasonRef(
                 number=number,
@@ -528,7 +536,12 @@ class TmdbSource:
             for raw in cast("list[dict[str, Any]]", detail.get("seasons") or [])
             if isinstance(number := raw.get("season_number"), int)
         ]
-        return tuple(sorted(seasons, key=lambda s: (s.number == 0, s.number)))
+        ordered = tuple(sorted(seasons, key=lambda s: (s.number == 0, s.number)))
+        return ShowShape(
+            status=str(status) if isinstance(status, str) else None,
+            seasons=ordered,
+            listed=listed if isinstance(listed, int) else len(ordered),
+        )
 
     async def tv_platforms(
         self, client: httpx.AsyncClient, key: str, tmdb_id: str, regions: tuple[str, ...]

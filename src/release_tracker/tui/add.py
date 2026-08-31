@@ -38,10 +38,11 @@ from release_tracker.lookup import (
     report_for_candidate,
 )
 from release_tracker.models import Entity, MediaKind
+from release_tracker.seasons import SeasonRef, ShowShape
 from release_tracker.slices import SliceProposal, SliceScan, scan_slices
 from release_tracker.sources import unavailable_for
 from release_tracker.sources.base import Candidate
-from release_tracker.sources.tmdb import SeasonRef, TmdbSource
+from release_tracker.sources.tmdb import TmdbSource
 from release_tracker.tech import looks_like_tech
 from release_tracker.titles import extract_slice, slice_suffix, strip_trailing_season
 from release_tracker.tui.draft import DraftScreen
@@ -240,7 +241,9 @@ class AddScreen(ModalScreen[Entity | None]):
         self._memo: dict[KeyT, tuple[float, list[tuple[MediaKind, Candidate]], Draft]] = {}
         # Set while the list is showing a show's seasons instead of the search hits.
         self._seasons: SeasonPicker | None = None
-        self._season_memo: dict[str, tuple[SeasonRef, ...]] = {}
+        # keyed by canonical id: the picker and a capture-time season check share it,
+        # so opening `s` then adding costs one GET, not two.
+        self._shape_memo: dict[str, ShowShape] = {}
 
     def compose(self) -> ComposeResult:
         with Vertical(id="add"):
@@ -514,19 +517,18 @@ class AddScreen(ModalScreen[Entity | None]):
         if not key:
             self._status("[yellow]TMDB is not configured[/] [dim]— `rdt doctor`[/]")
             return
-        seasons = self._season_memo.get(cand.canonical_id)
-        if seasons is None:
+        shape = self._shape_memo.get(cand.canonical_id)
+        if shape is None:
             self._candidates.loading = True
             try:
-                seasons = await TmdbSource().tv_seasons(
-                    await self.app.http(), key, cand.canonical_id
-                )
+                shape = await TmdbSource().tv_shape(await self.app.http(), key, cand.canonical_id)
             except Exception as exc:
                 self._candidates.loading = False
                 self._status(f"[red]could not list seasons:[/] {exc}")
                 return
-            self._season_memo[cand.canonical_id] = seasons
+            self._shape_memo[cand.canonical_id] = shape
             self._candidates.loading = False
+        seasons = shape.seasons
         # A limited series has exactly one season and no choice to make. Say so rather than
         # opening a one-row picker, which reads as a broken keybinding.
         if len([x for x in seasons if not x.specials]) <= 1:
