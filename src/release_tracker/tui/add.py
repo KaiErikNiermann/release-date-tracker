@@ -29,7 +29,7 @@ from textual.timer import Timer
 from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
 
-from release_tracker import drafts, query
+from release_tracker import drafts, edits, query
 from release_tracker.capture import capture_work
 from release_tracker.config import secret
 from release_tracker.drafts import Draft
@@ -42,11 +42,14 @@ from release_tracker.lookup import (
 )
 from release_tracker.models import Entity, MediaKind
 from release_tracker.seasons import (
+    DidYouMean,
     SeasonRef,
     SeasonVerdict,
     ShowShape,
     ShowStance,
+    Successor,
     check_season,
+    rank_successors,
     stance_of,
 )
 from release_tracker.slices import SliceProposal, SliceScan, scan_slices
@@ -199,6 +202,44 @@ class SeasonPicker:
         return replace(self, expanded=self.expanded - {season})
 
 
+@dataclass(frozen=True, slots=True)
+class AnywayRow:
+    """Add the season as typed. Always first, always selectable, never removed — the tracker
+    knows what the source lists, not what is true."""
+
+
+@dataclass(frozen=True, slots=True)
+class SuccessorRow:
+    successor: Successor
+    native: int | None  # the season number on *that* show; None when the offset lands below 1
+
+
+MeanRow = AnywayRow | SuccessorRow
+
+
+@dataclass(frozen=True, slots=True)
+class MeanPicker:
+    """The out-of-range answer: add it anyway, or take the show that carries that season.
+
+    Same contract as `SeasonPicker` — `rows` is the only place an index means anything.
+    """
+
+    kind: MediaKind
+    base: Candidate
+    ask: DidYouMean
+
+    @property
+    def rows(self) -> tuple[MeanRow, ...]:
+        return (
+            AnywayRow(),
+            *(SuccessorRow(s, self.ask.native(s)) for s in self.ask.offer),
+        )
+
+    def at(self, index: int) -> MeanRow | None:
+        rows = self.rows
+        return rows[index] if 0 <= index < len(rows) else None
+
+
 def _is_named(season: SeasonRef) -> bool:
     """Does TMDB carry a real name for this season, rather than a restatement of its number?
 
@@ -261,6 +302,9 @@ class AddScreen(ModalScreen[Entity | None]):
         # keyed by canonical id: the picker and a capture-time season check share it,
         # so opening `s` then adding costs one GET, not two.
         self._shape_memo: dict[str, ShowShape] = {}
+        self._cast_memo: dict[str, frozenset[str]] = {}
+        # Set while the list is offering the show that carries an out-of-range season.
+        self._mean: MeanPicker | None = None
 
     def compose(self) -> ComposeResult:
         with Vertical(id="add"):
@@ -413,6 +457,7 @@ class AddScreen(ModalScreen[Entity | None]):
         self._freeform = freeform
         self._shown_key = key
         self._seasons = None  # these hits are not the show whose seasons were open
+        self._mean = None
         typed = self._typed()
         options = self._candidates
         options.loading = False
@@ -723,6 +768,19 @@ class AddScreen(ModalScreen[Entity | None]):
 
     @on(OptionList.OptionSelected, "#candidates")
     def _on_pick(self, event: OptionList.OptionSelected) -> None:
+        if (mean := self._mean) is not None:
+            match mean.at(event.option_index):
+                case SuccessorRow(successor=successor, native=native):
+                    self.take_successor(mean, successor, native)
+                case _:
+                    # the anyway row: the same capture, now with the question already answered
+                    self.capture(
+                        mean.kind,
+                        mean.base,
+                        season=mean.ask.verdict.season,
+                        checked=mean.ask.verdict,
+                    )
+            return
         if (picker := self._seasons) is not None:
             season, part, _ = self._picked(picker.at(event.option_index))
             self.capture(picker.kind, picker.candidate, season=season, part=part)
@@ -795,6 +853,7 @@ class AddScreen(ModalScreen[Entity | None]):
         *,
         season: int | None = None,
         part: int | None = None,
+        checked: SeasonVerdict | None = None,
     ) -> None:
         """Report on the *chosen* candidate then persist — no second search.
 
@@ -817,7 +876,14 @@ class AddScreen(ModalScreen[Entity | None]):
         # not carry enriches perfectly — real credits, real networks, a series edge — and then
         # sits in the TBA tail forever with nothing to resolve, which is indistinguishable
         # from a season that is merely undated.
-        verdict = await self._check_season(client, kind, cand, season)
+        verdict = checked or await self._check_season(client, kind, cand, season)
+        if verdict is not None and verdict.firm and self._mean is None and checked is None:
+            # The source says this show is over, so the season the reader wants is very likely
+            # on another id — Dexter's ninth is New Blood's first. Offer before writing; the
+            # first row of that offer still writes exactly this.
+            self._busy(False, "")
+            self.offer_continuation(cand, verdict)
+            return
         try:
             report = await report_for_candidate(
                 client, typed.text, kind, cand, self.app.settings, season=season
@@ -843,6 +909,97 @@ class AddScreen(ModalScreen[Entity | None]):
             # not know the future, and the reader may be right where the source is behind.
             self._say_verdict(verdict)
         self.dismiss(entity)
+
+    @work(exclusive=True, group="add-continuity")
+    async def offer_continuation(
+        self, base: Candidate, verdict: SeasonVerdict, picker_kind: MediaKind = MediaKind.TV
+    ) -> None:
+        """Rank the other TV hits by how much of the base show's cast they carry.
+
+        Built from candidates already on screen — the same search that produced the
+        out-of-range hit produced the reboot, because a pinned season forces the search to TV.
+        Its own worker group: must not be cancelled by the keystroke that opened it, must
+        never cancel a capture.
+        """
+        from release_tracker.tui.app import RdtApp
+
+        assert isinstance(self.app, RdtApp)
+        key = secret(self.app.settings.tmdb_api_key)
+        pool = [
+            c
+            for kind, c in self._hits
+            if kind is MediaKind.TV and c.id_key == "tmdb" and c.canonical_id != base.canonical_id
+        ]
+        if not key or not pool:
+            # Nothing to offer, so the question stands as asked: add it and say what the
+            # source said. Returning here would leave the keystroke doing nothing at all.
+            self.capture(picker_kind, base, season=verdict.season, checked=verdict)
+            return
+        self._candidates.loading = True
+        try:
+            client = await self.app.http()
+            base_cast = await self._cast(client, key, base)
+            shared = [(c, len(base_cast & await self._cast(client, key, c))) for c in pool]
+        except Exception as exc:
+            self._candidates.loading = False
+            log.warning("add.cast_error", error=str(exc))
+            return
+        self._candidates.loading = False
+        offer, why = rank_successors(
+            base.title,
+            [Successor(c.title, c.canonical_id, c.year, 0, n) for c, n in shared],
+        )
+        if not offer:
+            self.capture(picker_kind, base, season=verdict.season, checked=verdict)
+            return
+        self._mean = MeanPicker(MediaKind.TV, base, DidYouMean(verdict, offer, why))
+        self._show_mean()
+
+    async def _cast(self, client: httpx.AsyncClient, key: str, cand: Candidate) -> frozenset[str]:
+        """A show's top cast, fetched once per session."""
+        if cand.canonical_id not in self._cast_memo:
+            self._cast_memo[cand.canonical_id] = await TmdbSource().tv_cast(
+                client, key, cand.canonical_id
+            )
+        return self._cast_memo[cand.canonical_id]
+
+    def _show_mean(self) -> None:
+        """Render the offer: add it anyway, or take the show that carries that season."""
+        picker = self._mean
+        if picker is None:
+            return
+        options = self._candidates
+        options.clear_options()
+        for row in picker.rows:
+            options.add_option(Option(Text.from_markup(self._mean_label(picker, row))))
+        options.highlighted = 0
+        options.focus()
+        ask = picker.ask
+        self._status(
+            "".join(f"[dim]· {r}[/]\n" for r in (*ask.verdict.reasons, *ask.reasons))
+            + "[dim]enter takes one, e reviews first, esc back[/]"
+        )
+
+    def _mean_label(self, picker: MeanPicker, row: MeanRow) -> str:
+        match row:
+            case AnywayRow():
+                season = picker.ask.verdict.season
+                return (
+                    f"[bold]◂ Add “{picker.base.title}” season {season} anyway[/]"
+                    "  [dim]— TMDB does not list it; your call[/]"
+                )
+            case SuccessorRow(successor=successor, native=native):
+                lands = (
+                    f"[cyan]→ its season {native}[/]"
+                    if native is not None
+                    else "[dim]the show itself[/]"
+                )
+                why = " · ".join(successor.reasons)
+                return (
+                    f"  [bold]{successor.title}[/]  {lands}"
+                    f"  [dim]records `continues` after {picker.ask.after}[/]\n"
+                    f"      [dim]{why}[/]"
+                )
 
     async def _check_season(
         self, client: httpx.AsyncClient, kind: MediaKind, cand: Candidate, season: int | None
@@ -885,6 +1042,53 @@ class AddScreen(ModalScreen[Entity | None]):
             standing=verdict.standing.value,
             stance=verdict.stance.value,
         )
+
+    @work(exclusive=True, group="add-capture")
+    async def take_successor(
+        self, picker: MeanPicker, successor: Successor, native: int | None
+    ) -> None:
+        """Capture the show that carries the season, and record that it continues the base.
+
+        Writing the edge is the point: the guess happens once, and `franchise_position` then
+        answers the same question from the graph with no inference at all.
+        """
+        from release_tracker.tui.app import RdtApp
+
+        assert isinstance(self.app, RdtApp)
+        cand = replace(picker.base, title=successor.title, canonical_id=successor.key)
+        self._busy(True, f"[dim]adding “{successor.title}” — pulling dates…[/]")
+        client = await self.app.http()
+        try:
+            report = await report_for_candidate(
+                client, successor.title, picker.kind, cand, self.app.settings, season=native
+            )
+            entity = await capture_work(
+                self.app.db,
+                self.app.settings,
+                successor.title,
+                report,
+                season=native,
+                client=client,
+            )
+        except Exception as exc:
+            self._busy(False, f"[red]add failed:[/] {exc}")
+            return
+        if entity is None:
+            self._busy(False, "[yellow]not tracked[/] — no canonical id to pin")
+            return
+        try:
+            edits.set_continuation(
+                self.app.db,
+                entity,
+                predecessor=picker.base.title,
+                after=picker.ask.after,
+                source="tmdb",
+                source_id=picker.base.canonical_id,
+            )
+        except edits.NoSeriesError as exc:
+            # The work is captured either way; only the lineage could not be recorded.
+            log.warning("add.continuation_skipped", entity=entity.title, error=str(exc))
+        self.dismiss(entity)
 
     def _busy(self, flag: bool, markup: str) -> None:
         """Show a capture as running: a spinner where the result will land, and a dead bar.
@@ -933,7 +1137,13 @@ class AddScreen(ModalScreen[Entity | None]):
             self.focus_previous()
 
     def action_back(self) -> None:
-        """Escape walks out: seasons -> candidates -> query bar, then closes the palette."""
+        """Escape walks out: offer -> seasons -> candidates -> query bar, then closes."""
+        if self._mean is not None:
+            self._mean = None
+            if self._freeform is not None and self._shown_key is not None:
+                self._show(self._hits, self._shown_key, self._freeform)
+            self._candidates.focus()
+            return
         if self._seasons is not None:
             self._close_seasons()
             return

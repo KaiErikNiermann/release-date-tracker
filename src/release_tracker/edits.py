@@ -38,6 +38,7 @@ from release_tracker.models import (
     ReleaseChannel,
     ReleaseObservation,
     SourceTier,
+    WorkRelation,
 )
 
 __all__ = [
@@ -56,6 +57,7 @@ __all__ = [
     "remove_platforms",
     "remove_tags",
     "rename",
+    "set_continuation",
     "set_coords",
     "set_date",
 ]
@@ -83,6 +85,54 @@ class DateEdit:
 # --- the work itself ----------------------------------------------------------------------
 class NoSeriesError(LookupError):
     """A work has no series edge and the caller named no series to make one."""
+
+
+def set_continuation(
+    db: Database,
+    entity: Entity,
+    *,
+    predecessor: str,
+    after: int,
+    source: str | None = None,
+    source_id: str | None = None,
+) -> Node:
+    """Record that ``entity``'s series continues ``predecessor``, which ran ``after`` seasons.
+
+    The edge links **series** nodes, not works: a renumbering is one fact about the franchise,
+    so stating it once lets every season of the continuation find it.
+
+    ``source``/``source_id`` matter more than they look. Enrichment keys a series node as
+    ``series:tmdb:<show id>`` (see ``enrich._write_series``), so minting the predecessor from
+    its name alone would create ``series:marvels-daredevil`` — an orphan that never collapses
+    with the node written the day that show is itself tracked, leaving the chain permanently
+    broken. Pass the source's id whenever it is known.
+
+    Raises :class:`NoSeriesError` when the work is in no series, or in more than one.
+    """
+    edges = db.edges_from(entity.id, RelationKind.PART_OF_SERIES)
+    if len(edges) != 1:
+        the = "no series" if not edges else "several series"
+        raise NoSeriesError(f"{entity.title} is in {the} — cannot say what it continues")
+
+    prior = Node.create(
+        NodeKind.SERIES, predecessor.strip(), source=source, source_id=source_id, owned=False
+    )
+    db.upsert_node(prior)
+    db.upsert_edge(
+        Edge(
+            src_id=edges[0].dst_id,
+            dst_id=prior.id,
+            relation=RelationKind.DERIVED_FROM,
+            role=WorkRelation.CONTINUES,
+            ordinal=after,
+            source_provider=USER_PROVIDER,
+            source_tier=SourceTier.OFFICIAL,
+            confidence=1.0,
+            owned=True,
+        )
+    )
+    log.info("edits.continuation", entity=entity.title, predecessor=prior.name, after=after)
+    return prior
 
 
 def set_coords(

@@ -261,6 +261,15 @@ we hold no market for (a broadcast network) answers `on:showtime` but never `on:
   did not split still opens, to a row saying so. The *word* a cut was sold under is only ever
   read back from what you typed (`arcane noxus act 1`), never guessed from outside — unstated,
   it reads as "Part", and the review form is where you change it
+- **asking for a season that is not there** — checked before anything is written, and phrased
+  as what TMDB *lists* rather than as fact: a running show's missing season is "not listed yet"
+  (Pluribus was renewed before its first season aired, so its second is a 404 for a season that
+  exists), while a show TMDB marks Ended gets a plainer answer. When the show is over, the
+  season is usually on another id — Dexter's ninth is New Blood's first — so the palette offers
+  the shows that might carry it, ranked by how much of the original cast they share. Taking one
+  captures it *and* records that it continues the original, so the same question is answered
+  from the graph next time. The first row always adds the season exactly as typed: the tracker
+  knows what the source lists, not what is true
 - **tracking something unannounced** — the last row of the candidate list is always *add it
   yourself*, because a search that found things can still have found the wrong things, and
   four of the nine kinds (book, music, podcast, comic) have no source to search at all. It
