@@ -211,3 +211,46 @@ def test_a_graphql_error_yields_none_and_does_not_raise(monkeypatch: pytest.Monk
     """A keyless best-effort source must never break the lookup around it."""
     avail, _ = _run(monkeypatch, {"errors": [{"message": "nope"}]}, season=2)
     assert avail is None
+
+
+# --- the year guard, which a season legitimately trips ------------------------------------
+def _avail(
+    *, season: int | None, year: int | None, vod: date | None = None
+) -> JustWatchAvailability:
+    return JustWatchAvailability(
+        object_id=1,
+        title="Yellowjackets",
+        year=year,
+        offers=(),
+        earliest_vod=vod,
+        earliest_vod_country="US" if vod else None,
+        earliest_vod_platform="Amazon Video" if vod else None,
+        season=season,
+    )
+
+
+def test_a_show_older_than_its_season_is_not_a_collision() -> None:
+    """JustWatch reports the *show's* first year; the hint is the *season's*.
+
+    A long-running series legitimately puts years between them, and the symmetric ±1 check
+    read that as a same-name collision — silently discarding the offers for every season past
+    the second.
+    """
+    from release_tracker.lookup import justwatch_year_mismatch
+
+    assert justwatch_year_mismatch(_avail(season=3, year=2021), 2025) is None
+
+
+def test_a_show_that_postdates_its_own_season_still_fails() -> None:
+    """That direction is still impossible, so it still catches a newer same-named title."""
+    from release_tracker.lookup import justwatch_year_mismatch
+
+    assert justwatch_year_mismatch(_avail(season=1, year=2030), 2021) is not None
+
+
+def test_the_symmetric_check_still_holds_for_a_film() -> None:
+    """Nothing about the film path changes — it compares two years of the same thing."""
+    from release_tracker.lookup import justwatch_year_mismatch
+
+    assert justwatch_year_mismatch(_avail(season=None, year=2001), 2026) is not None
+    assert justwatch_year_mismatch(_avail(season=None, year=2026), 2026) is None

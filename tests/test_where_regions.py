@@ -253,3 +253,38 @@ def test_a_prediction_never_displaces_a_fact() -> None:
     guess = PlatformLine("Hulu", predicted=True, regions=("US",))
     fact = PlatformLine("U-NEXT", predicted=False, regions=("JP",))
     assert sorted([guess, fact], key=lambda p: p.rank({"US"}))[0].name == "U-NEXT"
+
+
+# --- JustWatch flatrate as where-edges ----------------------------------------------------
+def test_only_subscription_offers_become_where_edges(tmp_path: Path) -> None:
+    """A buy/rent is a transaction, not a home — persisting those would put Amazon Video on
+    the card of every title ever released."""
+    from release_tracker.pipeline import persist_platforms
+    from release_tracker.sources.justwatch import JustWatchAvailability, Offer
+
+    db = Database(tmp_path / "jw.db")
+    entity = Entity.create("Yellowjackets: Season 3", MediaKind.TV, season=3)
+    db.upsert_entity(entity)
+    avail = JustWatchAvailability(
+        object_id=1,
+        title="Yellowjackets",
+        year=2021,
+        offers=(
+            Offer("US", "flatrate", "Paramount Plus Premium", "hd", None, None, None),
+            Offer("DE", "flatrate", "Paramount Plus", "hd", None, None, None),
+            Offer("US", "buy", "Amazon Video", "hd", 16.99, "USD", None),
+        ),
+        earliest_vod=None,
+        earliest_vod_country=None,
+        earliest_vod_platform=None,
+        season=3,
+    )
+    assert persist_platforms(db, entity, avail) == 2
+
+    from release_tracker import views
+
+    (line,) = views.work_card(db, entity).platforms
+    assert line.name == "Paramount+"  # both spellings collapsed onto one service
+    assert line.regions == ("DE", "US")
+    assert line.providers == ("justwatch",)
+    db.close()

@@ -21,12 +21,17 @@ from release_tracker.models import (
     BestEstimate,
     Certainty,
     DatePrecision,
+    Edge,
     Entity,
     MediaKind,
+    Node,
+    NodeKind,
+    RelationKind,
     ReleaseChannel,
     ReleaseObservation,
     SourceTier,
 )
+from release_tracker.platforms import canonical_platform
 from release_tracker.resolve import best_estimates
 from release_tracker.sources import justwatch, sources_for
 from release_tracker.sources.base import SourceResult, make_client
@@ -186,6 +191,46 @@ def persist_availability(db: Database, entity: Entity, avail: JustWatchAvailabil
     return 1
 
 
+def persist_platforms(db: Database, entity: Entity, avail: JustWatchAvailability) -> int:
+    """Persist JustWatch's live flatrate homes as region-scoped ``AVAILABLE_ON`` edges.
+
+    Only ``flatrate``. A buy/rent offer is a transaction, not a place the work lives, and
+    persisting those would put Apple TV Store and Amazon Video on the card of every title
+    ever released.
+
+    Filed at ``FIRST_PARTY_STORE`` because that is what it is — the storefront's own listing,
+    strictly better provenance than TMDB's aggregator-tier copy of the same feed with the
+    market stripped off. On a season entity the offers are season-scoped, so the edges are
+    too: "Yellowjackets: Season 3" gets Paramount+ and not Netflix, which the show-level
+    answer cannot express.
+    """
+    homes = {
+        (canonical_platform(o.platform), o.country)
+        for o in avail.offers
+        if o.monetization == "flatrate" and o.platform and o.country
+    }
+    if not homes:
+        return 0
+    db.delete_edges(entity.id, RelationKind.AVAILABLE_ON, (_JUSTWATCH_PROVIDER,))
+    now = utc_now()
+    for name, country in sorted(homes):
+        node = Node.create(NodeKind.PLATFORM, name, owned=False)
+        db.upsert_node(node)
+        db.upsert_edge(
+            Edge(
+                src_id=entity.id,
+                dst_id=node.id,
+                relation=RelationKind.AVAILABLE_ON,
+                region=country,
+                source_provider=_JUSTWATCH_PROVIDER,
+                source_tier=SourceTier.FIRST_PARTY_STORE,
+                confidence=0.9,
+                fetched_at=now,
+            )
+        )
+    return len(homes)
+
+
 # JustWatch releaseType -> the channel its date belongs on.
 _ANNOUNCED_CHANNEL: dict[str, ReleaseChannel] = {
     "digital": ReleaseChannel.DIGITAL,
@@ -254,7 +299,10 @@ async def _refresh_offers(
             search_title(entity.title),
             season=season,
             countries=settings.justwatch_regions,
-            year=hint,
+            # deliberately not `hint`: that is the *season's* year, and `pick_node` would
+            # reject the show for not matching it. The title floor plus the season having to
+            # exist on the matched show is the guard here.
+            year=None,
         )
     else:
         avail = await justwatch.availability(
@@ -273,6 +321,7 @@ async def _refresh_offers(
         return
     persist_availability(db, entity, avail)
     persist_announced(db, entity, avail)
+    persist_platforms(db, entity, avail)
 
 
 async def _refresh_one(

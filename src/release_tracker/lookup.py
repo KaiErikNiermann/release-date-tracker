@@ -669,9 +669,25 @@ def justwatch_year_mismatch(avail: JustWatchAvailability, film_year: int | None)
 
     Anchors on the *matched* title's own year when the film's is unknown (not yet dated in TMDB),
     so an absurdly old VOD date — e.g. a 2001 offer surfacing for a 2026 film — is still caught.
+
+    The symmetric check does not apply to a season: JustWatch reports the *show's* first year
+    while ``film_year`` is the *season's*, and a long-running series legitimately puts decades
+    between them. Season 3 of a 2021 show airing in 2025 is not a collision, and treating it as
+    one discarded the offers for every season past the second.
     """
-    if film_year is not None and avail.year is not None and abs(avail.year - film_year) > 1:
+    if (
+        avail.season is None
+        and film_year is not None
+        and avail.year is not None
+        and abs(avail.year - film_year) > 1
+    ):
         return f"matched title year {avail.year} is far from the film's {film_year}"
+    # A show cannot begin after one of its own seasons aired; that direction still catches a
+    # collision with a same-named *newer* title.
+    if avail.season is not None and film_year is not None and avail.year is not None:
+        if avail.year > film_year + 1:
+            return f"matched show year {avail.year} postdates the season's {film_year}"
+        return None
     anchor = film_year if film_year is not None else avail.year
     vod = avail.earliest_vod
     if vod is not None and anchor is not None and vod.year < anchor - 1:
