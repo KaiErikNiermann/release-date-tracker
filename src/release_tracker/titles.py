@@ -26,7 +26,48 @@ _WS_RE = re.compile(r"\s+")
 _PAREN_RE = re.compile(r"\s*\([^)]*\)\s*")
 
 
-_PART_RE = re.compile(r"\b(?:Part|Pt\.?|Volume|Vol\.?|Cour)\s*(\d+)\b", re.IGNORECASE)
+# The counting nouns a season's slices are numbered in. `Arc` is deliberately absent: every
+# real one is name-attached and unnumbered ("Reze Arc", "Entertainment District Arc"), so it
+# is matched by `_NAMED_SLICE_RE` below instead — "Arc 2" is not a thing anyone ships.
+_PART_NOUN = r"(?:Part|Pt\.?|Volume|Vol\.?|Cour|Act|Chapter|Ch\.?|Book)"
+_PART_RE = re.compile(rf"\b(?P<label>{_PART_NOUN})\s*(?P<n>\d+)\b", re.IGNORECASE)
+# "Act II" — roman only right after a counting noun. `_roman_ordinal` refuses single letters
+# because `split_version` has nothing but trailing position to go on; a preceding noun is a far
+# stronger anchor, so `I` and `V` are safe here where they are not there.
+_PART_ROMAN_RE = re.compile(rf"\b(?P<label>{_PART_NOUN})\s+(?P<r>[IVXL]{{1,4}})\b")
+_PART_WORD_RE = re.compile(rf"\b(?P<label>{_PART_NOUN})\s+(?P<w>[A-Za-z]+)\b", re.IGNORECASE)
+# A slice that is a *name*, not a number — the anime convention. Never yields a number.
+_NAMED_SLICE_RE = re.compile(r"[:\-]\s*(?P<name>[^:\-]+?\s+(?:Arc|Saga))\s*$", re.IGNORECASE)
+_ORDINAL_WORDS: Final[dict[str, int]] = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+}
+# No franchise ships an "Act XXX"; past this a numeral is far likelier part of a real title.
+_MAX_SLICE: Final[int] = 12
+
+DEFAULT_PART_LABEL: Final = "Part"
+# Completion fodder, never a constraint — the label column is free text so a one-off
+# marketing name ("The Finale") is expressible without a second field.
+PART_LABELS: Final[tuple[str, ...]] = (
+    "Part",
+    "Volume",
+    "Vol",
+    "Act",
+    "Cour",
+    "Chapter",
+    "Arc",
+    "Book",
+)
 
 # Freeform: what a person types into a search box, where `_SEASON_RE`'s required ':'/'-'
 # separator never appears. End-anchored and requiring the season *word* (or the `s<N>`
@@ -96,19 +137,106 @@ def coords_of(entity: HasCoords) -> tuple[int | None, int | None]:
     return season, entity.part if entity.part is not None else extract_part(entity.title)
 
 
+@dataclass(frozen=True, slots=True)
+class Slice:
+    """A mid-season cut as a title writes it.
+
+    ``number`` is None for a *named* slice — the anime convention, where the cut has a title
+    rather than an index ("Reze Arc"). One field carries both readings: with a number,
+    ``label`` is the counting noun ("Act"); without one, it is the whole name.
+    """
+
+    number: int | None
+    label: str
+    token: str  # verbatim, exactly as the title spelled it
+
+    @property
+    def named(self) -> bool:
+        return self.number is None
+
+
+def slice_suffix(part: int | None, label: str | None) -> str:
+    """How a slice reads: 'Act 2', 'Part 1', or a bare name. Empty when there is no slice."""
+    if part is None:
+        return (label or "").strip()
+    return f"{(label or DEFAULT_PART_LABEL).strip()} {part}"
+
+
 def season_label(show: str, season: int) -> str:
     """Canonical season title, e.g. ('Pluribus', 2) -> 'Pluribus: Season 2'.
 
-    The inverse of :func:`split_season`; used by the explicit ``--season`` capture path so a
-    season entry is titled consistently regardless of how the user typed the show name.
+    The part-less case of :func:`slice_title`, kept because most callers only have a season.
     """
-    return f"{show.strip()}: Season {season}"
+    return slice_title(show, season)
+
+
+def slice_title(
+    show: str,
+    season: int | None,
+    part: int | None = None,
+    label: str | None = None,
+) -> str:
+    """The canonical title for a coordinate — the inverse of :func:`coords_of`.
+
+    Its absence is why ``--season 5 --part 1`` and ``--part 2`` used to mint the *same* entity
+    id: every capture path titled a season row ``season_label(show, season)`` and dropped the
+    part, so the two rows collided and the second overwrote the first.
+
+    The two formats are not a fresh design — they are the ones already hand-written in the
+    live tracker, so a capture converges onto the row that exists instead of forking a
+    near-duplicate. That is the whole migration.
+
+        ('Stranger Things', 5, 1, 'Part') -> 'Stranger Things: Season 5, Part 1'
+        ('Arcane: Noxus', None, 1, 'Act') -> 'Arcane: Noxus (Act 1)'
+        ('Pluribus', 2)                   -> 'Pluribus: Season 2'
+        ('Dune', None)                    -> 'Dune'
+    """
+    stem = show.strip()
+    suffix = slice_suffix(part, label) if (part is not None or label) else ""
+    if season is None:
+        return f"{stem} ({suffix})" if suffix else stem
+    return f"{stem}: Season {season}, {suffix}" if suffix else f"{stem}: Season {season}"
+
+
+def _slice_number(title: str) -> tuple[int, str, str] | None:
+    """The first numbered slice in a title, as (number, label, verbatim token)."""
+    for pattern, group in ((_PART_RE, "n"), (_PART_ROMAN_RE, "r"), (_PART_WORD_RE, "w")):
+        if (m := pattern.search(title)) is None:
+            continue
+        raw = m.group(group)
+        match group:
+            case "n":
+                number = int(raw)
+            case "r":
+                number = _roman_ordinal(raw.upper()) or 0
+            case _:
+                number = _ORDINAL_WORDS.get(raw.casefold(), 0)
+        if 1 <= number <= _MAX_SLICE:
+            return number, m.group("label").strip(), m.group(0).strip()
+    return None
+
+
+def extract_slice(title: str) -> Slice | None:
+    """The slice a title names, numbered or named, or None.
+
+    Deliberately kind-blind: "Dune: Part Three" really does *say* part three, and a parser
+    that lied about that would be the wrong place to fix it. The guard is that every caller
+    on the coordinate path gates on ``MediaKind.TV`` — which is also the only reason
+    "Stranger Things: Finale" can be a slice while being filed as a movie.
+    """
+    if (found := _slice_number(title)) is not None:
+        number, label, token = found
+        return Slice(number, label, token)
+    if (m := _NAMED_SLICE_RE.search(title)) is not None:
+        name = m.group("name").strip()
+        return Slice(None, name, name)
+    return None
 
 
 def extract_part(title: str) -> int | None:
     """('Stranger Things: Season 5, Part 2') -> 2; a mid-season cut (Part/Volume/Cour N)."""
-    m = _PART_RE.search(title)
-    return int(m.group(1)) if m else None
+    found = extract_slice(title)
+    return found.number if found is not None else None
 
 
 def search_title(title: str) -> str:

@@ -6,8 +6,13 @@ import pytest
 
 from release_tracker.titles import (
     coords_of,
+    extract_part,
+    extract_slice,
     normalize,
     search_title,
+    season_label,
+    slice_suffix,
+    slice_title,
     split_season,
     split_version,
     strip_trailing_season,
@@ -170,3 +175,107 @@ def test_coords_of_reads_a_mid_season_part() -> None:
 def test_search_title_strips_a_season_it_could_not_parse_before() -> None:
     """Otherwise the row searches an API for its own title, season words and all."""
     assert search_title("Alien: Earth Season 2") == "Alien: Earth"
+
+
+# --- the slice coordinate and its title ----------------------------------------------------
+@pytest.mark.parametrize(
+    ("args", "want"),
+    [
+        (("Stranger Things", 5, 1, "Part"), "Stranger Things: Season 5, Part 1"),
+        (("Arcane: Noxus", None, 1, "Act"), "Arcane: Noxus (Act 1)"),
+        (("Pluribus", 2), "Pluribus: Season 2"),
+        (("Dune", None), "Dune"),
+        (("Show", 5, 3, "Volume"), "Show: Season 5, Volume 3"),
+        (("Show", 5, None, "The Finale"), "Show: Season 5, The Finale"),
+    ],
+)
+def test_slice_title_formats(args: tuple[object, ...], want: str) -> None:
+    assert slice_title(*args) == want  # type: ignore[arg-type]
+
+
+def test_slice_title_reproduces_the_titles_already_in_the_tracker() -> None:
+    """The no-backfill guarantee.
+
+    `Entity.make_id` hashes the title, so generating the format the user already types by
+    hand makes a capture converge onto the row that exists instead of forking a duplicate.
+    These three ids are the live ones; if this test fails, the migration story is broken.
+    """
+    from release_tracker.models import Entity, MediaKind
+
+    live = {
+        slice_title("Stranger Things", 5, 1, "Part"): "tv-stranger-things-season-5-part-1-c287b9",
+        slice_title("Stranger Things", 5, 2, "Part"): "tv-stranger-things-season-5-part-2-9cfdaf",
+        slice_title("Arcane: Noxus", None, 1, "Act"): "tv-arcane-noxus-act-1-b9ed54",
+    }
+    assert {t: Entity.create(t, MediaKind.TV).id for t in live} == live
+
+
+def test_two_parts_of_one_season_are_two_rows() -> None:
+    """The collision this whole change exists to fix: both used to mint the same id."""
+    from release_tracker.models import Entity, MediaKind
+
+    a = Entity.create(slice_title("Stranger Things", 5, 1), MediaKind.TV, season=5, part=1)
+    b = Entity.create(slice_title("Stranger Things", 5, 2), MediaKind.TV, season=5, part=2)
+    assert a.id != b.id
+
+
+def test_season_label_is_the_partless_case() -> None:
+    """Kept as its own name because most callers only ever have a season."""
+    assert season_label("Pluribus", 2) == slice_title("Pluribus", 2)
+
+
+@pytest.mark.parametrize(
+    ("title", "number", "label"),
+    [
+        ("Stranger Things: Season 5, Part 2", 2, "Part"),
+        ("Arcane: Noxus (Act 1)", 1, "Act"),
+        ("Show: Act II", 2, "Act"),
+        ("Show: Part Three", 3, "Part"),
+        ("Frieren: Cour 2", 2, "Cour"),
+        ("Show: Chapter 4", 4, "Chapter"),
+        ("Show: Vol. 3", 3, "Vol."),
+    ],
+)
+def test_extract_slice_reads_a_numbered_cut(title: str, number: int, label: str) -> None:
+    found = extract_slice(title)
+    assert found is not None
+    assert (found.number, found.label) == (number, label)
+
+
+@pytest.mark.parametrize(
+    "title", ["Chainsaw Man: Reze Arc", "Demon Slayer: Entertainment District Arc"]
+)
+def test_extract_slice_reads_a_named_cut(title: str) -> None:
+    """The anime convention: the cut has a title, not an index. "Arc 2" is not a thing."""
+    found = extract_slice(title)
+    assert found is not None and found.named
+    assert found.label.endswith("Arc")
+
+
+@pytest.mark.parametrize("title", ["Yellowjackets", "Pluribus: Season 2", "Severance"])
+def test_extract_slice_declines_when_there_is_no_cut(title: str) -> None:
+    assert extract_slice(title) is None
+
+
+def test_a_films_part_is_parsed_but_never_becomes_a_coordinate() -> None:
+    """ "Dune: Part Three" really does say part three, and a parser that denied it would be
+    the wrong place to fix this. The guard is that the coordinate path is TV-gated — which
+    is also the only reason "Stranger Things: Finale" can be a slice while being a movie."""
+    from release_tracker.models import Entity, MediaKind
+
+    assert extract_part("Dune: Part Three") == 3
+    film = Entity.create("Dune: Part Three", MediaKind.MOVIE)
+    assert (film.season, film.part) == (None, None)
+
+
+@pytest.mark.parametrize(
+    ("part", "label", "want"),
+    [
+        (2, "Act", "Act 2"),
+        (1, None, "Part 1"),
+        (None, "The Finale", "The Finale"),
+        (None, None, ""),
+    ],
+)
+def test_slice_suffix_reads_both_ways(part: int | None, label: str | None, want: str) -> None:
+    assert slice_suffix(part, label) == want
