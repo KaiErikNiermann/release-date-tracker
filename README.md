@@ -170,7 +170,7 @@ rdt upcoming 'tag:"body horror" year:2026..2028'
 | `platform:` / `on:`, `series:` | consumption platform, series; `on:netflix@us` scopes it to a market |
 | `region:` / `in:` | a market something is streamable in at all |
 | `year:` | any release year — `2026`, `2020..2026`, `>=2026`, `<2030` |
-| `season:` `part:` | season / mid-season coords |
+| `season:` `part:` | season / mid-season coords — set with `rdt add --season N [--part N]`, `rdt edit part`, or **s** in the add palette |
 
 `is:` is a different axis from `state:`: the *bucket* `watched` spans
 `watched|dropped|skipped`, while the *state* `watched` is only one of them.
@@ -210,6 +210,14 @@ we hold no market for (a broadcast network) answers `on:showtime` but never `on:
   and `hardware` alias it), and the no-match line says so — it still names what was missed or
   never configured, since the freeform row is offered *underneath* that warning, not instead
   of it
+- **adding one season** — a show adds as one unit by default, which is right for a limited
+  series where a season number is meaningless. To track a single season, either say so
+  (`yellowjackets season:2`, or just `yellowjackets season 2` — a trailing season phrase is
+  read as a coordinate, shown back as `read as … + season:2`, and taken off the text the
+  sources are searched with), or press **s** on a TV hit to list the show's seasons with
+  their air dates and pick one. The whole-show row stays first either way, and a one-season
+  show declines rather than opening a picker with nothing to choose. Either path lands the
+  same row `rdt add --season 2` would
 - **tracking something unannounced** — the last row of the candidate list is always *add it
   yourself*, because a search that found things can still have found the wrong things, and
   four of the nine kinds (book, music, podcast, comic) have no source to search at all. It
