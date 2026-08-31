@@ -11,6 +11,7 @@ the request in flight instead of racing it.
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 from typing import ClassVar
@@ -40,10 +41,17 @@ from release_tracker.sources import unavailable_for
 from release_tracker.sources.base import Candidate
 from release_tracker.sources.tmdb import SeasonRef, TmdbSource
 from release_tracker.tech import looks_like_tech
-from release_tracker.titles import strip_trailing_season
+from release_tracker.titles import extract_slice, slice_suffix, strip_trailing_season
 from release_tracker.tui.draft import DraftScreen
 
 KeyT = tuple[str, "MediaKind | None"]
+
+# what to take off the search text once a cut has been read out of it
+_PART_TAIL_RE = re.compile(
+    r"[\s:,\-]*\b(?:part|pt\.?|vol(?:ume)?\.?|cour|act|chapter|ch\.?|book)"
+    r"\s*(?:\d+|[ivxl]+|one|two|three|four|five)\b\s*$",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +68,7 @@ class Typed:
     year: int | None
     season: int | None = None
     part: int | None = None
+    part_label: str | None = None  # what the cut is called; None reads as "Part"
     reasons: tuple[str, ...] = ()  # provenance, printed verbatim by the review screen
 
     @property
@@ -77,19 +86,31 @@ def resolve(source: str) -> Typed:
     jackets season 2" is a worse query to TMDB than "yellowjackets".
     """
     parsed = query.parse(source)
-    if (season := parsed.season_hint) is not None:
-        return Typed(parsed.text, parsed.kind_hint, parsed.year_hint, season, parsed.part_hint)
-    stem, inferred = strip_trailing_season(parsed.text)
-    if inferred is None:
-        return Typed(parsed.text, parsed.kind_hint, parsed.year_hint, part=parsed.part_hint)
-    return Typed(
-        stem,
-        parsed.kind_hint,
-        parsed.year_hint,
-        inferred,
-        parsed.part_hint,
-        (f"“season {inferred}” in what you typed names a season",),
-    )
+    reasons: list[str] = []
+    text = parsed.text
+
+    # The cut comes off first, because it sits at the end and would otherwise hide the season
+    # from `strip_trailing_season`, which is end-anchored: "stranger things season 5 act 1".
+    #
+    # The *word* a cut was sold under is only ever read back from what the user typed. No
+    # source models a slice at all, and guessing the label from outside is worse than useless —
+    # Wikipedia's Stranger Things article says "Chapter" because that is its episode-title
+    # convention, while the split is actually sold as volumes. Unstated, it reads as "Part".
+    part, label = parsed.part_hint, None
+    if (cut := extract_slice(text)) is not None and cut.number is not None:
+        stem = _PART_TAIL_RE.sub("", text).strip()
+        if stem:  # a bare "act 1" is not a title, so only take the tail when a stem survives
+            text = stem
+            if part is None:
+                part, label = cut.number, cut.label.title()
+                reasons.append(f"read “{cut.token}” as {label} {part}")
+
+    season = parsed.season_hint
+    if season is None:
+        text, season = strip_trailing_season(text)
+        if season is not None:
+            reasons.append(f"“season {season}” in what you typed names a season")
+    return Typed(text, parsed.kind_hint, parsed.year_hint, season, part, label, tuple(reasons))
 
 
 _DEBOUNCE = 0.6
@@ -114,9 +135,12 @@ class _SeasonList:
         return self.seasons[index - 1] if 1 <= index <= len(self.seasons) else None
 
 
-def _season_tail(season: int | None) -> str:
-    """The " · Season N" a row wears once a season is in play, or nothing."""
-    return f" · Season {season}" if season is not None else ""
+def _coord_tail(season: int | None, part: int | None = None, label: str | None = None) -> str:
+    """The " · Season 5 · Act 1" a row wears once a coordinate is in play, or nothing."""
+    bits = [f"Season {season}"] if season is not None else []
+    if cut := slice_suffix(part, label):
+        bits.append(cut)
+    return "".join(f" · {b}" for b in bits)
 
 
 class AddScreen(ModalScreen[Entity | None]):
@@ -293,7 +317,7 @@ class AddScreen(ModalScreen[Entity | None]):
         self._freeform = freeform
         self._shown_key = key
         self._seasons = None  # these hits are not the show whose seasons were open
-        season = self._typed().season
+        typed = self._typed()
         options = self._candidates
         options.loading = False
         options.clear_options()
@@ -302,7 +326,11 @@ class AddScreen(ModalScreen[Entity | None]):
             extra = f"  [dim]{cand.extra[:60]}[/]" if cand.extra else ""
             # only on a series: a season means nothing on a film, and printing it there
             # would advertise a coordinate the capture is (correctly) about to drop.
-            coord = f" [cyan]{_season_tail(season).lstrip(' ·')}[/]" if kind is MediaKind.TV else ""
+            coord = (
+                f" [cyan]{_coord_tail(typed.season, typed.part, typed.part_label).lstrip(' ·')}[/]"
+                if kind is MediaKind.TV
+                else ""
+            )
             options.add_option(
                 Option(
                     Text.from_markup(
@@ -332,7 +360,8 @@ class AddScreen(ModalScreen[Entity | None]):
             return (
                 f"[bold]{draft.title}[/]  [dim]not announced · track it as new{version}[/]{follows}"
             )
-        kind = f"  [dim]as {draft.kind.value}[/][cyan]{_season_tail(draft.season)}[/]"
+        coord = _coord_tail(draft.season, draft.part, draft.part_label)
+        kind = f"  [dim]as {draft.kind.value}[/][cyan]{coord}[/]"
         if any(cand.score >= MATCH_FLOOR for _, cand in hits):
             return f"[bold]+ Add “{draft.title}” myself[/]  [dim]— none of these[/]{kind}"
         return f"[bold]+ Add “{draft.title}” as a new entry[/]  [dim]— nothing matched[/]{kind}"
@@ -518,6 +547,7 @@ class AddScreen(ModalScreen[Entity | None]):
                     cand,
                     season=typed.season,
                     part=typed.part,
+                    part_label=typed.part_label,
                     reasons=typed.reasons,
                 )
             )
@@ -548,7 +578,9 @@ class AddScreen(ModalScreen[Entity | None]):
         # An explicit pick off the season list is an act on this screen, so it outranks
         # whatever the bar says; the bar still supplies the coord on the ordinary path.
         season = (season if season is not None else typed.season) if kind is MediaKind.TV else None
-        self._busy(True, f"[dim]adding “{cand.title}”{_season_tail(season)} — pulling dates…[/]")
+        cut = typed.part if kind is MediaKind.TV else None
+        tail = _coord_tail(season, cut, typed.part_label)
+        self._busy(True, f"[dim]adding “{cand.title}”{tail} — pulling dates…[/]")
         client = await self.app.http()
         try:
             report = await report_for_candidate(
@@ -561,6 +593,7 @@ class AddScreen(ModalScreen[Entity | None]):
                 report,
                 season=season,
                 part=typed.part if kind is MediaKind.TV else None,
+                part_label=typed.part_label if kind is MediaKind.TV else None,
                 client=client,
             )
         except Exception as exc:

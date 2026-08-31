@@ -356,3 +356,41 @@ async def test_escape_leaves_the_seasons_before_it_leaves_the_screen(
         await pilot.pause()
         assert screen._seasons is None  # pyright: ignore[reportPrivateUsage]
         assert isinstance(app.screen, AddScreen)  # back to the hits, not out of the palette
+
+
+# --- the slice label, read off what was typed ----------------------------------------------
+@pytest.mark.parametrize(
+    ("typed", "text", "season", "part", "label"),
+    [
+        ("stranger things season:5 part:1", "stranger things", 5, 1, None),
+        ("stranger things season 5 act 1", "stranger things", 5, 1, "Act"),
+        ("arcane noxus act 1", "arcane noxus", None, 1, "Act"),
+        ("show volume 2", "show", None, 2, "Volume"),
+        ("yellowjackets season 2", "yellowjackets", 2, None, None),
+        ("dune", "dune", None, None, None),
+    ],
+)
+def test_the_bar_resolves_a_cut_and_its_word(
+    typed: str, text: str, season: int | None, part: int | None, label: str | None
+) -> None:
+    """The cut has to come off before the season is read: `strip_trailing_season` is
+    end-anchored, so "season 5 act 1" would otherwise hide the season behind the act."""
+    got = resolve(typed)
+    assert (got.text, got.season, got.part, got.part_label) == (text, season, part, label)
+
+
+def test_a_bare_cut_is_not_a_title() -> None:
+    """ "act 1" alone leaves no stem, so there is nothing to search and nothing to coordinate."""
+    got = resolve("act 1")
+    assert (got.text, got.part) == ("act 1", None)
+
+
+def test_an_explicit_part_wins_over_the_prose() -> None:
+    got = resolve("show act 1 part:3")
+    assert got.part == 3
+
+
+def test_an_inferred_cut_says_so() -> None:
+    """The label is never guessed from outside the user's own words, so when it *is* read
+    off them that has to be visible — it is the only provenance there is."""
+    assert any("act 1" in r.casefold() for r in resolve("arcane noxus act 1").reasons)

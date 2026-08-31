@@ -234,7 +234,9 @@ class WorkCard:
     platforms: tuple[PlatformLine, ...]
     tags: tuple[TagLine, ...]
     series: tuple[str, ...] = field(default_factory=tuple)
-    season: int | None = None  # this work's season/part number within its series
+    season: int | None = None  # this work's season number within its series
+    part: int | None = None  # the cut within it, if the season was split
+    part_label: str | None = None  # what that cut was called; None reads as "Part"
     derived_from: tuple[RelatedWork, ...] = ()  # what it descends from
     derivatives: tuple[RelatedWork, ...] = ()  # what descends from it
     blockers: tuple[ConditionLine, ...] = ()  # external conditions this work is BLOCKED_BY
@@ -794,6 +796,7 @@ def work_card(db: Database, entity: Entity) -> WorkCard:
     """Full who/where/what + dates for one work (the `card` surface)."""
     series_edges = db.edges_from(entity.id, RelationKind.PART_OF_SERIES)
     season = next((e.ordinal for e in series_edges if e.ordinal is not None), None)
+    part = next((e.part for e in series_edges if e.part is not None), entity.part)
     return WorkCard(
         entity=entity,
         estimates=_collapse_estimates(
@@ -805,6 +808,8 @@ def work_card(db: Database, entity: Entity) -> WorkCard:
         tags=tuple(_tag_lines(db, entity.id)),
         series=_series_names(db, entity.id),
         season=season,
+        part=part,
+        part_label=entity.part_label,
         derived_from=tuple(derived_from(db, entity.id)),
         derivatives=tuple(derivatives_of(db, entity.id)),
         blockers=_blocker_lines(db, entity.id),

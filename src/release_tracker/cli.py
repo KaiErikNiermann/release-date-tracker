@@ -1701,6 +1701,10 @@ def edit_part(
     part: Annotated[
         int | None, typer.Argument(help="the mid-season cut (Part/Vol/Cour N), if split")
     ] = None,
+    cut: Annotated[
+        int | None,
+        typer.Option("--part", help="the cut, for one that sits above the season grid"),
+    ] = None,
     label: Annotated[
         str | None,
         typer.Option("--label", help="what the cut is called — Part (default)/Act/Vol/..."),
@@ -1717,10 +1721,13 @@ def edit_part(
 
     A part with no season is legal — that is a cut sitting *above* the season grid, the
     "Arcane: Noxus (Act 1)" shape, where the split is the numbering rather than a slice of one.
+    The positional part reads as "within this season", so that shape takes `--part` instead:
+    there is no season to put in front of it.
     """
     configure_logging()
-    if season is None and part is None:
-        console.print("[yellow]Nothing to set[/] — give a season, a part, or both.")
+    part = cut if cut is not None else part
+    if season is None and part is None and label is None:
+        console.print("[yellow]Nothing to set[/] — give a season, a part, or a --label.")
         raise typer.Exit(1)
     db = _db()
     entity = _edit_entity(db, ref)
@@ -1734,8 +1741,8 @@ def edit_part(
         raise typer.Exit(1) from exc
     db.close()
     coord = f"S{season}" if season is not None else ""
-    if cut := slice_suffix(part, label):
-        coord = f"{coord} {cut}".strip()
+    if suffix := slice_suffix(part, label):
+        coord = f"{coord} {suffix}".strip()
     console.print(f"[green]Set[/] {entity.title} → [bold]{coord or '—'}[/]")
 
 
@@ -2226,7 +2233,17 @@ def _render_card(card: views.WorkCard) -> None:
     e = card.entity
     if card.series:
         name = ", ".join(card.series)
-        label = f"Season {card.season} of {name}" if card.season is not None else name
+        # "Season 5, Act 1 of Arcane" — the cut is shown in the words it was sold under,
+        # because "Pt1" is not what anybody called it.
+        coord = ", ".join(
+            b
+            for b in (
+                f"Season {card.season}" if card.season is not None else "",
+                slice_suffix(card.part, card.part_label),
+            )
+            if b
+        )
+        label = f"{coord} of {name}" if coord else name
         series = f" [dim]· {label}[/]"
     else:
         series = ""

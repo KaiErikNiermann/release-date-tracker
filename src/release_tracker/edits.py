@@ -147,7 +147,12 @@ def set_coords(
     db.upsert_entity(updated)
     # `upsert_entity` COALESCEs the coords so a stateless pull cannot wipe them, which also
     # means it cannot *clear* one. An explicit edit is the one caller that means "unset".
-    db.clear_coords(entity.id, season=season is None, part=part is None)
+    db.clear_coords(
+        entity.id,
+        season=season is None,
+        part=part is None,
+        part_label=part_label is None,
+    )
     log.info("edits.coords", entity=entity.title, season=season, part=part, label=part_label)
     return updated
 

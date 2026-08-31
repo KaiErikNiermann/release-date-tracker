@@ -31,6 +31,7 @@ from release_tracker.tui import add as add_module
 from release_tracker.tui.add import AddScreen, resolve
 from release_tracker.tui.app import RdtApp
 from release_tracker.tui.draft import DraftScreen
+from release_tracker.tui.edit import Row
 
 TODAY = date(2026, 8, 27)
 
@@ -323,3 +324,29 @@ async def test_e_reviews_a_real_candidate_instead_of_adding_it(
         assert not review.draft.synthetic
         assert review.draft.candidate is hit
         assert review.draft.kind is MediaKind.MOVIE
+
+
+async def test_the_part_label_row_is_tv_only_and_defaults_to_part(app: RdtApp) -> None:
+    """The label is what a cut was sold under. Blank means "Part" — the default is what
+    everyone calls one when nobody said otherwise, not the absence of a name."""
+    async with app.run_test(size=(120, 40)) as pilot:
+        app.push_screen(
+            DraftScreen(Draft(title="Stranger Things", kind=MediaKind.TV, season=5, part=1))
+        )
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, DraftScreen)
+        row = screen._row("part label")  # pyright: ignore[reportPrivateUsage]
+        assert row.display
+        assert screen._gather().part_label is None  # pyright: ignore[reportPrivateUsage]
+
+        assert isinstance(row, Row)
+        row.field.value = "Volume"
+        assert screen._gather().part_label == "Volume"  # pyright: ignore[reportPrivateUsage]
+
+        kind = screen.picker("kind").cycle
+        while kind.value != MediaKind.MOVIE.value:
+            kind.action_step(1)
+        await pilot.pause()
+        assert not row.display
+        assert screen._gather().part_label is None  # pyright: ignore[reportPrivateUsage]

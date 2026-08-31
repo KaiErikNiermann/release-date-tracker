@@ -702,19 +702,31 @@ class Database:
             )
         ]
 
-    def clear_coords(self, entity_id: str, *, season: bool = False, part: bool = False) -> None:
-        """Null out a coordinate that an edit deliberately unset.
+    def clear_coords(
+        self,
+        entity_id: str,
+        *,
+        season: bool = False,
+        part: bool = False,
+        part_label: bool = False,
+    ) -> None:
+        """Null out coordinates that an edit deliberately unset.
 
-        `upsert_entity` COALESCEs season/part so a stateless pull cannot wipe a coord it
-        never knew about — which also means an upsert can never *clear* one. A hand edit is
-        the one caller that genuinely means "there is no season here any more".
+        `upsert_entity` COALESCEs the coords so a stateless pull cannot wipe one it never knew
+        about — which also means an upsert can never *clear* one. A hand edit is the caller
+        that genuinely means "there is no season here any more".
+
+        The three clear independently: a *named* slice is ``part=None`` with a label
+        ("Reze Arc"), so wiping the label alongside the number would erase the name.
         """
-        columns = [c for c, wanted in (("season", season), ("part", part)) if wanted]
+        columns = [
+            c
+            for c, wanted in (("season", season), ("part", part), ("part_label", part_label))
+            if wanted
+        ]
         if not columns:
             return
         sets = ", ".join(f"{c} = NULL" for c in columns)
-        if part:
-            sets += ", part_label = NULL"
         with self._tx() as conn:
             conn.execute(f"UPDATE entities SET {sets} WHERE id = ?", (entity_id,))  # noqa: S608
 

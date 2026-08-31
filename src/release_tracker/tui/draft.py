@@ -33,6 +33,7 @@ from release_tracker import drafts
 from release_tracker.drafts import Draft
 from release_tracker.models import Entity, MediaKind
 from release_tracker.tech import TechCategory
+from release_tracker.titles import DEFAULT_PART_LABEL
 from release_tracker.tui.cycle import Cycle
 from release_tracker.tui.edit import DATE_HELP, Row, TitleRow
 
@@ -96,6 +97,10 @@ class DraftScreen(ModalScreen[Entity | None]):
                 yield Row("date", Input(value=self.draft.edtf, placeholder=DATE_HELP))
                 yield Row("season", Input(value=_num(self.draft.season), placeholder="e.g. 2"))
                 yield Row("part", Input(value=_num(self.draft.part), placeholder="e.g. 1"))
+                yield Row(
+                    "part label",
+                    Input(value=self.draft.part_label or "", placeholder=DEFAULT_PART_LABEL),
+                )
             # Docked as one container — see the note in `edit.py`; docked siblings overlap.
             with Vertical(id="draft-chrome"):
                 yield Static(self._provenance(), id="draft-lineage")
@@ -160,6 +165,7 @@ class DraftScreen(ModalScreen[Entity | None]):
         "category": MediaKind.TECH,
         "season": MediaKind.TV,
         "part": MediaKind.TV,
+        "part label": MediaKind.TV,
     }
 
     def _sync_rows(self) -> None:
@@ -194,6 +200,9 @@ class DraftScreen(ModalScreen[Entity | None]):
             edtf=self._value("date"),
             season=self._coord("season") if tv else None,
             part=self._coord("part") if tv else None,
+            # Blank means "Part" rather than "unnamed" — the default is what a cut is called
+            # when nobody said otherwise, not the absence of a name.
+            part_label=(self._value("part label").strip() or None) if tv else None,
         )
 
     def _value(self, label: str) -> str:
