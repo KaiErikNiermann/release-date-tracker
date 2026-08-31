@@ -15,8 +15,10 @@ import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
+from datetime import date
 from typing import ClassVar
 
+import httpx
 from rich.text import Text
 from textual import on, work
 from textual.app import ComposeResult
@@ -31,6 +33,7 @@ from release_tracker import drafts, query
 from release_tracker.capture import capture_work
 from release_tracker.config import secret
 from release_tracker.drafts import Draft
+from release_tracker.logging import get_logger
 from release_tracker.lookup import (
     DETECT_KINDS,
     MATCH_FLOOR,
@@ -38,7 +41,14 @@ from release_tracker.lookup import (
     report_for_candidate,
 )
 from release_tracker.models import Entity, MediaKind
-from release_tracker.seasons import SeasonRef, ShowShape
+from release_tracker.seasons import (
+    SeasonRef,
+    SeasonVerdict,
+    ShowShape,
+    ShowStance,
+    check_season,
+    stance_of,
+)
 from release_tracker.slices import SliceProposal, SliceScan, scan_slices
 from release_tracker.sources import unavailable_for
 from release_tracker.sources.base import Candidate
@@ -46,6 +56,8 @@ from release_tracker.sources.tmdb import TmdbSource
 from release_tracker.tech import looks_like_tech
 from release_tracker.titles import extract_slice, slice_suffix, strip_trailing_season
 from release_tracker.tui.draft import DraftScreen
+
+log = get_logger("tui.add")
 
 KeyT = tuple[str, "MediaKind | None"]
 
@@ -157,6 +169,11 @@ class SeasonPicker:
     kind: MediaKind
     candidate: Candidate
     seasons: tuple[SeasonRef, ...]
+    # what the source says about whether more is coming — free, from the same GET the season
+    # list came out of, and the difference between "that is all of them" and "that is all of
+    # them *so far*".
+    stance: ShowStance = ShowStance.UNKNOWN
+    status: str | None = None
     scans: Mapping[int, SliceScan] = field(default_factory=dict[int, SliceScan])
     expanded: frozenset[int] = frozenset()
 
@@ -281,6 +298,14 @@ class AddScreen(ModalScreen[Entity | None]):
             self.action_focus_candidates()
         else:
             self._schedule(now=True)
+
+    @property
+    def _today(self) -> date:
+        """The app's clock, narrowed once so the render paths need not each assert it."""
+        from release_tracker.tui.app import RdtApp
+
+        assert isinstance(self.app, RdtApp)
+        return self.app.today
 
     def _typed(self) -> Typed:
         """The bar as every path downstream should read it."""
@@ -536,7 +561,13 @@ class AddScreen(ModalScreen[Entity | None]):
             return
         # Specials are listed by TMDB but are not what anyone means by "season"; reachable
         # deliberately via `season:0`, not by sitting in the middle of this list.
-        self._seasons = SeasonPicker(kind, cand, tuple(x for x in seasons if not x.specials))
+        self._seasons = SeasonPicker(
+            kind,
+            cand,
+            tuple(x for x in seasons if not x.specials),
+            stance=stance_of(shape, self._today),
+            status=shape.status,
+        )
         self._show_seasons()
 
     def _show_seasons(self, *, keep: int | None = None) -> None:
@@ -570,6 +601,12 @@ class AddScreen(ModalScreen[Entity | None]):
                 elif scan is not None:
                     cuts = "  [dim]no split found[/]"
                 marker = "▾" if is_open else "▸"
+                # Listed but not aired — both shapes of it. Worth saying on the row, because
+                # picking one is fine and expecting a date from it is not.
+                if season.air_date is None and not season.episodes:
+                    when, eps = "[yellow]announced[/]", "[dim]no date yet[/]"
+                elif season.air_date is not None and season.air_date > self._today:
+                    eps = f"{eps}  [yellow]not aired yet[/]" if eps else "[yellow]not aired yet[/]"
                 return f"  {marker} [bold]Season {season.number}[/]{named}  {when}  {eps}{cuts}"
             case SliceRow(proposal=proposal):
                 when = proposal.starts.isoformat()
@@ -582,6 +619,7 @@ class AddScreen(ModalScreen[Entity | None]):
         """What the picker is showing, and — when a season is open — why it says what it does."""
         head = (
             f"[dim]{len(picker.seasons)} seasons of[/] [bold]{picker.candidate.title}[/]"
+            f"{self._stance_tail(picker)}"
             " [dim]· → opens a season, enter adds what is highlighted, e reviews, esc back[/]"
         )
         opened = [s for s in picker.expanded if (scan := picker.scans.get(s)) and scan.reasons]
@@ -589,6 +627,20 @@ class AddScreen(ModalScreen[Entity | None]):
             return head
         scan = picker.scans[max(opened)]
         return head + "".join(f"\n[dim]· {r}[/]" for r in scan.reasons)
+
+    @staticmethod
+    def _stance_tail(picker: SeasonPicker) -> str:
+        """Whether the list is all of them, or all of them so far — in the source's own word."""
+        said = f"“{picker.status}”" if picker.status else "no status"
+        match picker.stance:
+            case ShowStance.FINISHED:
+                return f"  [dim]· TMDB marks this {said} — nothing listed after[/]"
+            case ShowStance.CONFIRMED_NEXT:
+                return f"  [dim]· {said} · another season is listed[/]"
+            case ShowStance.UNCERTAIN:
+                return f"  [dim]· {said} · no next season listed[/]"
+            case ShowStance.UNKNOWN:
+                return ""
 
     def action_expand(self) -> None:
         """Open the highlighted season to the release blocks its air dates imply."""
@@ -761,6 +813,11 @@ class AddScreen(ModalScreen[Entity | None]):
         tail = _coord_tail(season, cut, typed.part_label)
         self._busy(True, f"[dim]adding “{cand.title}”{tail} — pulling dates…[/]")
         client = await self.app.http()
+        # Check the season against the show before writing. A row for a season the show does
+        # not carry enriches perfectly — real credits, real networks, a series edge — and then
+        # sits in the TBA tail forever with nothing to resolve, which is indistinguishable
+        # from a season that is merely undated.
+        verdict = await self._check_season(client, kind, cand, season)
         try:
             report = await report_for_candidate(
                 client, typed.text, kind, cand, self.app.settings, season=season
@@ -781,7 +838,53 @@ class AddScreen(ModalScreen[Entity | None]):
         if entity is None:
             self._busy(False, "[yellow]not tracked[/] — unknown kind, or no canonical id to pin")
             return
+        if verdict is not None and verdict.out_of_range:
+            # Written anyway, and said out loud. The tracker knows what TMDB lists; it does
+            # not know the future, and the reader may be right where the source is behind.
+            self._say_verdict(verdict)
         self.dismiss(entity)
+
+    async def _check_season(
+        self, client: httpx.AsyncClient, kind: MediaKind, cand: Candidate, season: int | None
+    ) -> SeasonVerdict | None:
+        """Where the requested season stands, or None when there is nothing to check against.
+
+        Reuses the picker's memo, so opening `s` and then adding costs one show fetch, not two.
+        Never raises: a check that cannot run must not stop a capture.
+        """
+        from release_tracker.tui.app import RdtApp
+
+        assert isinstance(self.app, RdtApp)
+        key = secret(self.app.settings.tmdb_api_key)
+        if kind is not MediaKind.TV or season is None or cand.id_key != "tmdb" or not key:
+            return None
+        shape = self._shape_memo.get(cand.canonical_id)
+        if shape is None:
+            try:
+                shape = await TmdbSource().tv_shape(client, key, cand.canonical_id)
+            except Exception as exc:
+                log.warning("add.shape_error", candidate=cand.title, error=str(exc))
+                return None
+            self._shape_memo[cand.canonical_id] = shape
+        return check_season(shape, season, self._today)
+
+    def _say_verdict(self, verdict: SeasonVerdict) -> None:
+        """Say what the source says about an out-of-range season, without hiding the row.
+
+        A firm verdict — the source calls the show over — warns; a soft one, which is the
+        Pluribus shape of a renewal TMDB has not caught up with, merely informs.
+        """
+        self.app.notify(
+            "\n".join(verdict.reasons),
+            title=f"season {verdict.season}",
+            severity="warning" if verdict.firm else "information",
+        )
+        log.info(
+            "add.season_out_of_range",
+            season=verdict.season,
+            standing=verdict.standing.value,
+            stance=verdict.stance.value,
+        )
 
     def _busy(self, flag: bool, markup: str) -> None:
         """Show a capture as running: a spinner where the result will land, and a dead bar.

@@ -591,3 +591,120 @@ async def test_picking_a_cut_captures_the_season_and_the_part(
         await pilot.press("enter")
         await until(pilot, lambda: bool(seen), "the capture")
     assert seen == [(2, 2)]
+
+
+# --- out-of-range -----------------------------------------------------------------------------
+@pytest.fixture
+def shapes(monkeypatch: pytest.MonkeyPatch) -> dict[str, ShowShape]:
+    """Answer `tv_shape` with a full shape, so a test can set the status it cares about."""
+    table: dict[str, ShowShape] = {}
+
+    async def _tv_shape(_self: object, _c: object, _k: str, tmdb_id: str) -> Any:
+        return table.get(tmdb_id, ShowShape("A Show", "Returning Series", (), 0))
+
+    monkeypatch.setattr(add_module.TmdbSource, "tv_shape", _tv_shape)
+    return table
+
+
+async def test_the_picker_says_whether_the_list_is_all_of_them(
+    app: RdtApp, tv_hit: list[str], shapes: dict[str, ShowShape]
+) -> None:
+    """ "3 seasons" reads very differently depending on whether a 4th is coming."""
+    shapes["117488"] = ShowShape("Yellowjackets", "Ended", _seasons(1, 2, 3), 3)
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _open(app, pilot, "yellowjackets")
+        await _press_s(app, pilot, screen)
+        status = str(screen.query_one("#add-status", Static).content)
+    assert "Ended" in status
+    assert "nothing listed after" in status
+
+
+async def test_an_announced_season_is_marked_on_its_row(
+    app: RdtApp, tv_hit: list[str], shapes: dict[str, ShowShape]
+) -> None:
+    """Severance's third carries no date and zero episodes — picking it is fine, expecting a
+    date from it is not."""
+    import datetime as _dt
+
+    listed = (
+        SeasonRef(1, "Season 1", _dt.date(2022, 2, 17), 9),
+        SeasonRef(2, "Season 2", _dt.date(2025, 1, 16), 10),
+        SeasonRef(3, "Season 3", None, 0),
+    )
+    shapes["117488"] = ShowShape("Severance", "Returning Series", listed, 3)
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _open(app, pilot, "yellowjackets")
+        await _press_s(app, pilot, screen)
+        rows = _rows(screen)
+    assert any("announced" in r and "no date yet" in r for r in rows)
+
+
+async def test_an_out_of_range_season_is_captured_and_reported(
+    app: RdtApp,
+    tv_hit: list[str],
+    shapes: dict[str, ShowShape],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Never blocked — the reader may be right where the source is behind — but never silent
+    either, which is what it was before."""
+    shapes["117488"] = ShowShape("Marvel's Daredevil", "Ended", _seasons(1, 2, 3), 3)
+    said: list[str] = []
+    captured: list[int | None] = []
+
+    async def _report(*_a: object, **_k: object) -> object:
+        return object()
+
+    async def _capture(*_a: object, **kw: object) -> Entity:
+        captured.append(kw.get("season"))  # type: ignore[arg-type]
+        return Entity.create("Daredevil: Season 4", MediaKind.TV, season=4)
+
+    monkeypatch.setattr(add_module, "report_for_candidate", _report)
+    monkeypatch.setattr(add_module, "capture_work", _capture)
+    monkeypatch.setattr(
+        RdtApp,
+        "notify",
+        lambda _s, msg, **_k: said.append(str(msg)),  # type: ignore[misc]
+    )
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _open(app, pilot, "yellowjackets season:4")
+        options = screen.query_one("#candidates", OptionList)
+        options.highlighted = 0
+        options.focus()  # enter on the bar steps *into* the list; the pick happens in it
+        await pilot.press("enter")
+        await until(pilot, lambda: bool(captured), "the capture")
+    assert captured == [4]  # written anyway
+    assert any("carries no season 4" in s for s in said)
+
+
+async def test_an_in_range_season_says_nothing(
+    app: RdtApp,
+    tv_hit: list[str],
+    shapes: dict[str, ShowShape],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shapes["117488"] = ShowShape("Yellowjackets", "Returning Series", _seasons(1, 2, 3, 4), 4)
+    said: list[str] = []
+
+    async def _report(*_a: object, **_k: object) -> object:
+        return object()
+
+    async def _capture(*_a: object, **_k: object) -> Entity:
+        return Entity.create("Yellowjackets: Season 4", MediaKind.TV, season=4)
+
+    monkeypatch.setattr(add_module, "report_for_candidate", _report)
+    monkeypatch.setattr(add_module, "capture_work", _capture)
+    monkeypatch.setattr(
+        RdtApp,
+        "notify",
+        lambda _s, msg, **_k: said.append(str(msg)),  # type: ignore[misc]
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _open(app, pilot, "yellowjackets season:4")
+        options = screen.query_one("#candidates", OptionList)
+        options.highlighted = 0
+        options.focus()
+        await pilot.press("enter")
+        await until(pilot, lambda: app.screen is not screen, "the capture to dismiss")
+    # the app's own "added …" toast is fine; nothing should question the season
+    assert not [s for s in said if "TMDB lists" in s]
