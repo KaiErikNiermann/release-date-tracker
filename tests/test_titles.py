@@ -9,6 +9,7 @@ from release_tracker.titles import (
     search_title,
     split_season,
     split_version,
+    strip_trailing_season,
     title_similarity,
 )
 
@@ -98,3 +99,37 @@ def test_split_version_never_returns_an_empty_stem() -> None:
     """A bare marker has no family to look up, so it isn't one."""
     assert split_version("2") == ("2", None)
     assert split_version("VIII") == ("VIII", None)
+
+
+# --- freeform season inference ------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("text", "want"),
+    [
+        ("yellowjackets season 2", ("yellowjackets", 2)),
+        ("Andor s2", ("Andor", 2)),
+        ("the boys season 5", ("the boys", 5)),
+        ("Reacher Staffel 3", ("Reacher", 3)),
+        # separators `_SEASON_RE` cannot handle — the live db has both of these
+        ("Alien: Earth Season 2", ("Alien: Earth", 2)),
+        ("Daredevil: Born Again ; Season 3", ("Daredevil: Born Again", 3)),
+    ],
+)
+def test_strip_trailing_season_reads_what_a_person_types(text: str, want: tuple[str, int]) -> None:
+    assert strip_trailing_season(text) == want
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Season of the Witch",  # the word, but not as a coordinate
+        "Dune 2",  # a sequel number is not a season
+        "GTA 6",
+        "season 2",  # no stem left — nothing to search for
+        "Silo",
+        "Show season 99",  # past any plausible run; likelier part of a title
+        "Andor season 0",  # specials are never *inferred*; explicit `season:0` still works
+    ],
+)
+def test_strip_trailing_season_declines_when_it_is_not_a_coordinate(text: str) -> None:
+    """A false positive silently files a film as a TV season, so the parser stays timid."""
+    assert strip_trailing_season(text) == (text, None)

@@ -28,7 +28,7 @@ from release_tracker.sources.wikidata import Lineage
 from release_tracker.tech import TechCategory
 from release_tracker.titles import split_version
 from release_tracker.tui import add as add_module
-from release_tracker.tui.add import AddScreen
+from release_tracker.tui.add import AddScreen, resolve
 from release_tracker.tui.app import RdtApp
 from release_tracker.tui.draft import DraftScreen
 
@@ -85,7 +85,7 @@ def offers_draft(monkeypatch: pytest.MonkeyPatch) -> Draft:
 
 async def _search_for(pilot: Any, screen: AddScreen, text: str) -> None:
     screen.query_one("#add-query", Input).value = text
-    screen.search(text, None)  # skip the debounce; the worker is what we exercise
+    screen.search(resolve(text))  # skip the debounce; the worker is what we exercise
     await until(
         pilot,
         lambda: not screen.query_one("#candidates", OptionList).loading,

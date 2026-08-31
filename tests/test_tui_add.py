@@ -22,7 +22,7 @@ from release_tracker.db import Database
 from release_tracker.models import Entity, MediaKind
 from release_tracker.sources.base import Candidate
 from release_tracker.tui import add as add_module
-from release_tracker.tui.add import AddScreen
+from release_tracker.tui.add import AddScreen, resolve
 from release_tracker.tui.app import RdtApp
 from release_tracker.tui.draft import DraftScreen
 
@@ -86,7 +86,9 @@ def _status_text(screen: AddScreen) -> str:
 async def _search_for(pilot: Any, screen: AddScreen, text: str) -> None:
     screen.query_one("#add-query", Input).focus()
     await pilot.press(*text)
-    screen.search(text, None)  # skip the debounce timer; the worker is what we exercise
+    # skip the debounce timer; the worker is what we exercise. Resolving the bar here (rather
+    # than passing `text` through) is the point: it is what the screen itself would search for.
+    screen.search(resolve(text))
     await until(
         pilot,
         lambda: not screen.query_one("#candidates", OptionList).loading,
@@ -195,7 +197,7 @@ async def test_a_keystroke_mid_capture_does_not_cancel_the_write(
         screen.capture(kind, cand)
         await pilot.pause()
 
-        screen.search("dune part", None)  # what a keystroke's debounce would fire
+        screen.search(resolve("dune part"))  # what a keystroke's debounce would fire
         await pilot.pause()
 
         await until(

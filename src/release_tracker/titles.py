@@ -28,12 +28,44 @@ _PAREN_RE = re.compile(r"\s*\([^)]*\)\s*")
 
 _PART_RE = re.compile(r"\b(?:Part|Pt\.?|Volume|Vol\.?|Cour)\s*(\d+)\b", re.IGNORECASE)
 
+# Freeform: what a person types into a search box, where `_SEASON_RE`'s required ':'/'-'
+# separator never appears. End-anchored and requiring the season *word* (or the `s<N>`
+# shorthand) is what keeps it off "Dune 2", "Season of the Witch" and every limited series
+# that never names a season at all.
+_LOOSE_SEASON_RE = re.compile(
+    r"^(?P<show>.+?)[\s:,\-]+(?:s|season|series|staffel|saison)\s*(?P<n>\d{1,2})$",
+    re.IGNORECASE,
+)
+# A show can plausibly run to ~50; past that the number is far likelier to be part of a title.
+_MAX_INFERRED_SEASON: Final[int] = 50
+# whatever separator ran up to the season word, left behind once the number is taken
+_TRAILING_PUNCT_RE = re.compile(r"[\s:;,\-\u2013\u2014]+$")
+
 
 def split_season(title: str) -> tuple[str, int | None]:
     """('The Boys: Season 5') -> ('The Boys', 5); strip Part/Finale qualifiers too."""
     if (m := _SEASON_RE.match(title)) is not None:
         return m.group("show").strip(), int(m.group("n"))
     return _QUALIFIER_RE.sub("", title).strip(), None
+
+
+def strip_trailing_season(text: str) -> tuple[str, int | None]:
+    """('yellowjackets season 2') -> ('yellowjackets', 2); no marker -> (text.strip(), None).
+
+    The freeform counterpart to :func:`split_season`, which needs a ':'/'-' because it parses
+    titles *we* wrote. This one parses what someone types, so it must be conservative: the
+    stem has to survive non-empty, and season 0 is never inferred — an explicit `season:0`
+    still reaches Specials, but no one types "Specials" by accident.
+
+    Returning the stem matters as much as the number: sending "yellowjackets season 2" to
+    TMDB's search verbatim is a worse query than "yellowjackets".
+    """
+    if (m := _LOOSE_SEASON_RE.match(text.strip())) is None:
+        return text.strip(), None
+    show, n = _TRAILING_PUNCT_RE.sub("", m.group("show")).strip(), int(m.group("n"))
+    if not show or not 1 <= n <= _MAX_INFERRED_SEASON:
+        return text.strip(), None
+    return show, n
 
 
 def season_label(show: str, season: int) -> str:

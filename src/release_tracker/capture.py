@@ -66,7 +66,9 @@ class CaptureOutcome:
         return self.entity is not None
 
 
-def entity_for(db: Database, name: str, report: RdReport, season: int | None) -> Entity:
+def entity_for(
+    db: Database, name: str, report: RdReport, season: int | None, part: int | None = None
+) -> Entity:
     """The entity to upsert for a capture — reusing an existing one keyed by canonical id.
 
     Dedup by the pinned id (not the title slug) so re-capturing the same work under a different
@@ -101,6 +103,7 @@ def entity_for(db: Database, name: str, report: RdReport, season: int | None) ->
         external_ids=dict(report.canonical),
         consumption_state=ConsumptionState.WANT,
         season=season,
+        part=part,
     )
 
 
@@ -111,6 +114,7 @@ async def capture_work(
     report: RdReport,
     *,
     season: int | None = None,
+    part: int | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> Entity | None:
     """Capture a looked-up title into the tracker — always, whenever we know its kind.
@@ -133,12 +137,14 @@ async def capture_work(
 
     With ``season``, the entry is canonical-titled ``"Show: Season N"`` and carries the
     structured coord so enrichment auto-wires the series link + subtitle (full-auto path).
+    ``part`` rides alongside it as the mid-season cut; TMDB has no notion of one, so it is a
+    local coordinate only.
     """
     if report.kind is None:
         return None
     if matching.requires_canonical_for_capture(report.kind) and not report.canonical:
         return None
-    entity = entity_for(db, name, report, season)
+    entity = entity_for(db, name, report, season, part)
     write_work(db, entity)
     if report.canonical:  # only a pinned, resolvable entity has ids to pull dates / enrich from
         async with contextlib.AsyncExitStack() as stack:

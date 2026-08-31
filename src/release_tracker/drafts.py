@@ -97,13 +97,30 @@ class Draft:
         return self.candidate is None
 
 
-def for_candidate(title: str, kind: MediaKind, candidate: Candidate) -> Draft:
-    """A draft standing in for a search hit, so review and capture share one path."""
+def for_candidate(
+    title: str,
+    kind: MediaKind,
+    candidate: Candidate,
+    *,
+    season: int | None = None,
+    part: int | None = None,
+    reasons: tuple[str, ...] = (),
+) -> Draft:
+    """A draft standing in for a search hit, so review and capture share one path.
+
+    Coords are kind-gated the way :func:`prefill` gates them: a season on a film is not a
+    coordinate, it is a mistake, and carrying it into a hidden form field is how it becomes
+    an invisible one.
+    """
+    tv = kind is MediaKind.TV
     return Draft(
         title=title,
         kind=kind,
         category=classify_tech(title) if kind is MediaKind.TECH else None,
         candidate=candidate,
+        season=season if tv else None,
+        part=part if tv else None,
+        reasons=reasons if tv and season is not None else (),
     )
 
 
@@ -275,10 +292,21 @@ async def commit(
     writes one, plus whatever date the user filled in during review.
     """
     if draft.candidate is not None:
+        # The coords have to reach *both* calls: the report resolves the season's own air
+        # date rather than the show's, and the capture titles and files it as that season.
+        # Passing them to neither is how a season typed on this form used to vanish.
         report = await report_for_candidate(
-            client, draft.title, draft.kind, draft.candidate, settings
+            client, draft.title, draft.kind, draft.candidate, settings, season=draft.season
         )
-        return await capture_work(db, settings, draft.title, report, client=client)
+        return await capture_work(
+            db,
+            settings,
+            draft.title,
+            report,
+            season=draft.season,
+            part=draft.part,
+            client=client,
+        )
 
     # Season coords are titled the way `rdt add --season` titles them, so a season added here
     # and one added from the CLI land on the same row rather than forking a near-duplicate.

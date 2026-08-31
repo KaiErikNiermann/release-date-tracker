@@ -262,6 +262,8 @@ class Query:
             parts.append(f"year:{year}")
         if (season := self.season_hint) is not None:
             parts.append(f"season:{season}")
+        if (part := self.part_hint) is not None:
+            parts.append(f"part:{part}")
         return " ".join(p for p in parts if p)
 
     @property
@@ -278,6 +280,11 @@ class Query:
     @property
     def season_hint(self) -> int | None:
         return _exact(self._first("season"))
+
+    @property
+    def part_hint(self) -> int | None:
+        """``part:`` as an exact mid-season cut, for the capture coords."""
+        return _exact(self._first("part"))
 
 
 def _exact(term: Term | None) -> int | None:

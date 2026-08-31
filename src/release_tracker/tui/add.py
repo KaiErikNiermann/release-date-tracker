@@ -12,6 +12,7 @@ the request in flight instead of racing it.
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from typing import ClassVar
 
 from rich.text import Text
@@ -37,13 +38,66 @@ from release_tracker.models import Entity, MediaKind
 from release_tracker.sources import unavailable_for
 from release_tracker.sources.base import Candidate
 from release_tracker.tech import looks_like_tech
+from release_tracker.titles import strip_trailing_season
 from release_tracker.tui.draft import DraftScreen
 
 KeyT = tuple[str, "MediaKind | None"]
 
+
+@dataclass(frozen=True, slots=True)
+class Typed:
+    """What the bar resolves to: the text the sources see, the coords, and where they came from.
+
+    One value read by search, capture and review alike. They used to each re-parse the bar and
+    disagree — `enter` honoured a `season:` that `e` silently dropped — which is invisible from
+    the outside because both paths "work".
+    """
+
+    text: str  # the stem, with any season words taken off: what a source should be asked
+    kind: MediaKind | None
+    year: int | None
+    season: int | None = None
+    part: int | None = None
+    reasons: tuple[str, ...] = ()  # provenance, printed verbatim by the review screen
+
+    @property
+    def key(self) -> KeyT:
+        """The memo/staleness key. On the *stem*, so typing " season 2" onto a searched title
+        does not invalidate the results it is narrowing."""
+        return (self.text.strip().lower(), self.kind)
+
+
+def resolve(source: str) -> Typed:
+    """Parse the bar into the coordinate every path downstream should use.
+
+    An explicit ``season:`` is the user's own word and wins. Otherwise the text is read for a
+    trailing season phrase, which is both a coordinate *and* a better search string — "yellow
+    jackets season 2" is a worse query to TMDB than "yellowjackets".
+    """
+    parsed = query.parse(source)
+    if (season := parsed.season_hint) is not None:
+        return Typed(parsed.text, parsed.kind_hint, parsed.year_hint, season, parsed.part_hint)
+    stem, inferred = strip_trailing_season(parsed.text)
+    if inferred is None:
+        return Typed(parsed.text, parsed.kind_hint, parsed.year_hint, part=parsed.part_hint)
+    return Typed(
+        stem,
+        parsed.kind_hint,
+        parsed.year_hint,
+        inferred,
+        parsed.part_hint,
+        (f"“season {inferred}” in what you typed names a season",),
+    )
+
+
 _DEBOUNCE = 0.6
 _MIN_CHARS = 3
 _MEMO_TTL = 120.0
+
+
+def _season_tail(season: int | None) -> str:
+    """The " · Season N" a row wears once a season is in play, or nothing."""
+    return f" · Season {season}" if season is not None else ""
 
 
 class AddScreen(ModalScreen[Entity | None]):
@@ -116,53 +170,36 @@ class AddScreen(ModalScreen[Entity | None]):
         else:
             self._schedule(now=True)
 
-    def _current_key(self) -> tuple[str, MediaKind | None]:
-        parsed = query.parse(self.query_one("#add-query", Input).value)
-        return (parsed.text.strip().lower(), parsed.kind_hint)
+    def _typed(self) -> Typed:
+        """The bar as every path downstream should read it."""
+        return resolve(self.query_one("#add-query", Input).value)
+
+    def _current_key(self) -> KeyT:
+        return self._typed().key
 
     def _schedule(self, *, now: bool = False) -> None:
         if self._timer is not None:
             self._timer.stop()
-        parsed = query.parse(self.query_one("#add-query", Input).value)
-        if len(parsed.text.strip()) < _MIN_CHARS:
+        typed = self._typed()
+        if len(typed.text.strip()) < _MIN_CHARS:
             self._status("[dim]keep typing…[/]")
             return
         if now:
-            self.search(
-                parsed.text,
-                parsed.kind_hint,
-                year_hint=parsed.year_hint,
-                season_hint=parsed.season_hint,
-            )
+            self.search(typed)
         else:
-            self._timer = self.set_timer(
-                _DEBOUNCE,
-                lambda: self.search(
-                    parsed.text,
-                    parsed.kind_hint,
-                    year_hint=parsed.year_hint,
-                    season_hint=parsed.season_hint,
-                ),
-            )
+            self._timer = self.set_timer(_DEBOUNCE, lambda: self.search(typed))
 
     def _status(self, markup: str) -> None:
         self.query_one("#add-status", Static).update(Text.from_markup(markup))
 
     @work(exclusive=True, group="add-search")
-    async def search(
-        self,
-        text: str,
-        kind_hint: MediaKind | None,
-        *,
-        year_hint: int | None = None,
-        season_hint: int | None = None,
-    ) -> None:
+    async def search(self, typed: Typed) -> None:
         """Exclusive within its own group: a newer keystroke cancels this request rather
         than racing it — but never cancels a capture, which is a write."""
         from release_tracker.tui.app import RdtApp
 
         assert isinstance(self.app, RdtApp)
-        key = (text.lower(), kind_hint)
+        text, kind_hint, key = typed.text, typed.kind, typed.key
         cached = self._memo.get(key)
         if cached is not None and time.monotonic() - cached[0] < _MEMO_TTL:
             self._show(cached[1], key, cached[2])
@@ -193,8 +230,8 @@ class AddScreen(ModalScreen[Entity | None]):
                 await self.app.http(),
                 text,
                 kind_hint=kind_hint,
-                year_hint=year_hint,
-                season_hint=season_hint,
+                year_hint=typed.year,
+                season_hint=typed.season,
                 hits=hits,
             )
         except Exception as exc:  # a dead provider must not kill the palette
@@ -205,7 +242,7 @@ class AddScreen(ModalScreen[Entity | None]):
                 [],
                 key,
                 drafts.prefill(
-                    text, kind_hint=kind_hint, year_hint=year_hint, season_hint=season_hint
+                    text, kind_hint=kind_hint, year_hint=typed.year, season_hint=typed.season
                 ),
                 status=f"[red]search failed:[/] {exc}",
             )
@@ -232,16 +269,20 @@ class AddScreen(ModalScreen[Entity | None]):
         self._hits = hits
         self._freeform = freeform
         self._shown_key = key
+        season = self._typed().season
         options = self._candidates
         options.loading = False
         options.clear_options()
         for kind, cand in hits:
             year = f" [dim]({cand.year})[/]" if cand.year else ""
             extra = f"  [dim]{cand.extra[:60]}[/]" if cand.extra else ""
+            # only on a series: a season means nothing on a film, and printing it there
+            # would advertise a coordinate the capture is (correctly) about to drop.
+            coord = f" [cyan]{_season_tail(season).lstrip(' ·')}[/]" if kind is MediaKind.TV else ""
             options.add_option(
                 Option(
                     Text.from_markup(
-                        f"[bold]{cand.title}[/]{year}  [dim]{kind.value} · {cand.id_key}"
+                        f"[bold]{cand.title}[/]{coord}{year}  [dim]{kind.value} · {cand.id_key}"
                         f":{cand.canonical_id} · {cand.score:.2f}[/]{extra}"
                     )
                 )
@@ -267,10 +308,22 @@ class AddScreen(ModalScreen[Entity | None]):
             return (
                 f"[bold]{draft.title}[/]  [dim]not announced · track it as new{version}[/]{follows}"
             )
-        kind = f"  [dim]as {draft.kind.value}[/]"
+        kind = f"  [dim]as {draft.kind.value}[/][cyan]{_season_tail(draft.season)}[/]"
         if any(cand.score >= MATCH_FLOOR for _, cand in hits):
             return f"[bold]+ Add “{draft.title}” myself[/]  [dim]— none of these[/]{kind}"
         return f"[bold]+ Add “{draft.title}” as a new entry[/]  [dim]— nothing matched[/]{kind}"
+
+    def _read_as(self) -> str:
+        """How the bar was interpreted, when that differs from what is in it.
+
+        Only shown for an *inference*. An explicit `season:2` is already on screen — repeating
+        it would be noise — but text silently becoming a coordinate has to be visible, or a
+        wrong guess is indistinguishable from a wrong search.
+        """
+        typed = self._typed()
+        if not typed.reasons or typed.season is None:
+            return ""
+        return f"[cyan]read as[/] [bold]{typed.text}[/] [cyan]+ season:{typed.season}[/] · "
 
     def _search_status(
         self,
@@ -283,22 +336,22 @@ class AddScreen(ModalScreen[Entity | None]):
         an unconfigured source both read as "this thing does not exist"."""
         if hits:
             return (
-                f"[dim]{len(hits)} candidate(s) · ↓ into the list, enter adds, e reviews first"
-                " · esc back[/]"
+                f"{self._read_as()}[dim]{len(hits)} candidate(s) · ↓ into the list, enter adds,"
+                " e reviews first · esc back[/]"
             )
-        tail = " [dim]— or add it yourself, last row[/]"
+        prefix, tail = self._read_as(), " [dim]— or add it yourself, last row[/]"
         if missing:
             # An unconfigured source returns an empty list exactly like a real miss, so
             # without this the answer to "why is Dune not here" is indistinguishable from
             # "Dune does not exist". Name what was never asked.
             named = "; ".join(sorted(missing.values()))
-            return f"[yellow]nothing matched[/] [dim]— {named}[/]{tail}"
+            return f"{prefix}[yellow]nothing matched[/] [dim]— {named}[/]{tail}"
         # Only worth saying when it would actually change the outcome: a hinted search
         # already scoped itself, and a name we recognised as a device has already been
         # retried as tech, so telling either to add `kind:tech` sends them nowhere.
         already_tried = key[1] is not None or looks_like_tech(key[0])
         hint = "" if already_tried else " [dim]— for a device, add[/] [bold]kind:tech[/]"
-        return f"[yellow]no matches[/]{hint}{tail}"
+        return f"{prefix}[yellow]no matches[/]{hint}{tail}"
 
     # --- capturing -----------------------------------------------------------------
     @on(OptionList.OptionSelected, "#candidates")
@@ -321,8 +374,17 @@ class AddScreen(ModalScreen[Entity | None]):
             return
         if 0 <= index < len(self._hits):
             kind, cand = self._hits[index]
-            parsed = query.parse(self.query_one("#add-query", Input).value)
-            self._review(drafts.for_candidate(parsed.text.strip() or cand.title, kind, cand))
+            typed = self._typed()
+            self._review(
+                drafts.for_candidate(
+                    typed.text.strip() or cand.title,
+                    kind,
+                    cand,
+                    season=typed.season,
+                    part=typed.part,
+                    reasons=typed.reasons,
+                )
+            )
         elif self._freeform is not None and index == len(self._hits):
             self._review(self._freeform)
 
@@ -346,19 +408,21 @@ class AddScreen(ModalScreen[Entity | None]):
         from release_tracker.tui.app import RdtApp
 
         assert isinstance(self.app, RdtApp)
-        parsed = query.parse(self.query_one("#add-query", Input).value)
-        self._busy(True, f"[dim]adding “{cand.title}” — pulling dates and credits…[/]")
+        typed = self._typed()
+        season = typed.season if kind is MediaKind.TV else None
+        self._busy(True, f"[dim]adding “{cand.title}”{_season_tail(season)} — pulling dates…[/]")
         client = await self.app.http()
         try:
             report = await report_for_candidate(
-                client, parsed.text, kind, cand, self.app.settings, season=parsed.season_hint
+                client, typed.text, kind, cand, self.app.settings, season=season
             )
             entity = await capture_work(
                 self.app.db,
                 self.app.settings,
-                parsed.text,
+                typed.text,
                 report,
-                season=parsed.season_hint,
+                season=season,
+                part=typed.part if kind is MediaKind.TV else None,
                 client=client,
             )
         except Exception as exc:
