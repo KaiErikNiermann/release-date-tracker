@@ -33,7 +33,7 @@ from release_tracker.models import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only; avoids a runtime import cycle
-    from release_tracker.views import TrackRow
+    from release_tracker.views import PlatformLine, TrackRow
 
 __all__ = [
     "BARE_FIELD",
@@ -72,6 +72,7 @@ _CORE_FIELDS: frozenset[str] = frozenset(
         "is",
         "tag",
         "platform",
+        "region",
         "series",
         "person",
         "year",
@@ -94,6 +95,9 @@ _FIELD_ALIASES: dict[str, str] = {
     "title": BARE_FIELD,
     "on": "platform",
     "platforms": "platform",
+    "regions": "region",
+    "country": "region",
+    "in": "region",
     "credit": "person",
     "people": "person",
     "who": "person",
@@ -440,7 +444,10 @@ def _match_term(term: Term, row: TrackRow) -> bool:
         role = _ROLE_FIELDS[field]
         return _any_substr(values, (c.name for c in row.credits if c.role is role))
     if field == "platform":
-        return _any_substr(values, (p.name for p in row.platforms))
+        return any(_platform_hit(_split_platform(v), row.platforms) for v in values)
+    if field == "region":
+        wanted = frozenset(v.strip().upper() for v in values)
+        return any(wanted & frozenset(p.regions) for p in row.platforms)
     if field == "series":
         return _any_substr(values, row.series)
     if field == "year":
@@ -450,6 +457,37 @@ def _match_term(term: Term, row: TrackRow) -> bool:
     if field == "part":
         return _match_num(term.ranges, () if row.part is None else (row.part,))
     return True  # pragma: no cover - unreachable while FIELDS and _match_term agree
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformTerm:
+    """A ``platform:`` value split into the service and the market it is scoped to."""
+
+    name: str  # "" means any platform
+    region: str | None = None  # ISO-2, upper; None means any market
+
+
+def _split_platform(value: str) -> PlatformTerm:
+    """``netflix@us`` -> ('netflix', 'US'); ``netflix`` -> ('netflix', None).
+
+    The ``@`` form exists because ``platform:netflix region:us`` is a conjunction of two
+    independent row predicates — "has a Netflix edge" AND "has a US edge" — which matches a
+    row on Netflix in Germany and Paramount+ in the States. That is a false positive on the
+    exact question the syntax is for.
+    """
+    name, sep, region = value.strip().partition("@")
+    return PlatformTerm(name.strip().casefold(), region.strip().upper() if sep and region else None)
+
+
+def _platform_hit(term: PlatformTerm, lines: Sequence[PlatformLine]) -> bool:
+    """One platform term against a row's where-lines."""
+    return any(
+        (not term.name or term.name in p.name.casefold())
+        # An unscoped line matches only an unscoped query: "we don't know where" cannot
+        # honestly answer "is it live in the US".
+        and (term.region is None or term.region in p.regions)
+        for p in lines
+    )
 
 
 def matches(q: Query, row: TrackRow) -> bool:
@@ -503,6 +541,9 @@ class Vocabulary:
     people: tuple[VocabEntry, ...] = ()
     orgs: tuple[VocabEntry, ...] = ()
     platforms: tuple[VocabEntry, ...] = ()
+    # the markets where-edges are actually scoped to, so `region:` completes against reality
+    # rather than against a list of every ISO-2 in the world
+    regions: tuple[VocabEntry, ...] = ()
     series: tuple[VocabEntry, ...] = ()
     titles: tuple[VocabEntry, ...] = ()
     # keyed by role, because `director:` completing against every person in the graph
@@ -541,6 +582,8 @@ def _values_for(field: str, vocab: Vocabulary) -> list[tuple[VocabEntry, str]]:
         return _dynamic((e for e in vocab.descriptors if e.descriptor_kind is want), want.value)
     if field == "platform":
         return _dynamic(vocab.platforms, "platform")
+    if field == "region":
+        return _dynamic(vocab.regions, "region")
     if field == "series":
         return _dynamic(vocab.series, "series")
     if field == "person":

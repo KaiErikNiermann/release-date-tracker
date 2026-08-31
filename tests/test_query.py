@@ -476,3 +476,49 @@ def test_every_consumption_state_has_a_label() -> None:
     # the two the watched view has always coloured must keep their hues
     assert labels[ConsumptionState.DROPPED] == "[red]dropped[/]"
     assert labels[ConsumptionState.SKIPPED] == "[yellow]skipped[/]"
+
+
+# --- region-scoped platform filtering -----------------------------------------------------
+def _where(*lines: tuple[str, tuple[str, ...]]) -> tuple[PlatformLine, ...]:
+    return tuple(PlatformLine(n, predicted=False, regions=r) for n, r in lines)
+
+
+def test_platform_at_region_binds_the_two_together() -> None:
+    """`on:netflix@us` asks one question about one edge."""
+    row = _row(platforms=_where(("Netflix", ("US", "CA"))))
+    assert query.matches(query.parse("on:netflix@us"), row)
+    assert not query.matches(query.parse("on:netflix@jp"), row)
+
+
+def test_the_at_form_avoids_the_cross_product_the_separate_filters_allow() -> None:
+    """This is why `@` exists: two independent predicates both hold on the wrong row."""
+    row = _row(platforms=_where(("Netflix", ("DE",)), ("Paramount+", ("US",))))
+    # both loose filters hold — a Netflix edge exists, a US edge exists — but not together
+    assert query.matches(query.parse("on:netflix region:us"), row)
+    assert not query.matches(query.parse("on:netflix@us"), row)
+
+
+def test_a_bare_platform_term_stays_region_agnostic() -> None:
+    """Back-compat: `on:netflix` must keep matching regardless of market."""
+    assert query.matches(query.parse("on:netflix"), _row(platforms=_where(("Netflix", ("JP",)))))
+
+
+def test_an_unscoped_platform_cannot_answer_a_region_question() -> None:
+    """ "We don't know where" is not "yes, in the US" — a network must not claim a market."""
+    row = _row(platforms=_where(("Showtime", ())))
+    assert query.matches(query.parse("on:showtime"), row)
+    assert not query.matches(query.parse("on:showtime@us"), row)
+    assert not query.matches(query.parse("region:us"), row)
+
+
+def test_a_bare_region_asks_only_where() -> None:
+    row = _row(platforms=_where(("U-NEXT", ("JP",))))
+    assert query.matches(query.parse("region:jp"), row)
+    assert query.matches(query.parse("in:jp"), row)  # alias
+    assert not query.matches(query.parse("region:us"), row)
+
+
+def test_region_scoped_platforms_negate() -> None:
+    row = _row(platforms=_where(("Netflix", ("US",))))
+    assert not query.matches(query.parse("-on:netflix@us"), row)
+    assert query.matches(query.parse("-on:netflix@jp"), row)

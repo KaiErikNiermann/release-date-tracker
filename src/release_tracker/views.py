@@ -485,6 +485,7 @@ def build_vocabulary(db: Database) -> Vocabulary:
         people=entries(NodeKind.PERSON),
         orgs=entries(NodeKind.ORG),
         platforms=entries(NodeKind.PLATFORM),
+        regions=tuple(VocabEntry(value=r, uses=u) for r, u in db.availability_regions()),
         series=entries(NodeKind.SERIES),
         titles=tuple(VocabEntry(value=e.title) for e in db.iter_entities()),
     )

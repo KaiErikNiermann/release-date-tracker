@@ -682,6 +682,18 @@ class Database:
             cur = conn.execute("DELETE FROM edges WHERE id = ?", (edge_id,))
             return cur.rowcount > 0
 
+    def availability_regions(self) -> list[tuple[str, int]]:
+        """Every market a where-edge is scoped to, with how many edges name it (most first)."""
+        return [
+            (row["region"], row["uses"])
+            for row in self._conn.execute(
+                "SELECT region, COUNT(*) AS uses FROM edges "
+                "WHERE relation = ? AND region IS NOT NULL "
+                "GROUP BY region ORDER BY uses DESC, region",
+                (RelationKind.AVAILABLE_ON.value,),
+            )
+        ]
+
     def delete_edges(self, src_id: str, relation: RelationKind, providers: tuple[str, ...]) -> int:
         """Drop an entity's edges of one relation for the providers about to rewrite them.
 

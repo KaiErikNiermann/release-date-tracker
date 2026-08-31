@@ -167,12 +167,20 @@ rdt upcoming 'tag:"body horror" year:2026..2028'
 | `tag:` | any descriptor; `genre:` `theme:` `mood:` `style:` `origin:` narrow it |
 | `director:` `cast:` `writer:` `studio:` `network:` … | one credit role each (derived from `CreditRole`, so a new role is a new field) |
 | `person:` | any credit, any role |
-| `platform:` / `on:`, `series:` | consumption platform, series |
+| `platform:` / `on:`, `series:` | consumption platform, series; `on:netflix@us` scopes it to a market |
+| `region:` / `in:` | a market something is streamable in at all |
 | `year:` | any release year — `2026`, `2020..2026`, `>=2026`, `<2030` |
 | `season:` `part:` | season / mid-season coords |
 
 `is:` is a different axis from `state:`: the *bucket* `watched` spans
 `watched|dropped|skipped`, while the *state* `watched` is only one of them.
+
+`on:netflix@us` and `on:netflix region:us` are **not** the same question. The second is a
+conjunction of two independent row predicates — *has a Netflix edge* and *has a US edge* — so
+it matches a show that is on Netflix in Germany and Paramount+ in the States. The `@` form
+binds them to one edge, which is what you want when you are picking a VPN target. A platform
+we hold no market for (a broadcast network) answers `on:showtime` but never `on:showtime@us`:
+"we don't know where" is not "yes, in the US".
 
 ## TUI
 
