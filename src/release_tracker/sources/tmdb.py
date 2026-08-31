@@ -207,7 +207,7 @@ class TmdbSource:
                 # The one place a second GET is paid for, and only on the anomaly: an in-range
                 # pull — every row in a `refresh` batch — costs exactly what it did before.
                 shape = await self.tv_shape(client, key, tmdb_id)
-                verdict = check_season(shape, season_no, utc_today(), show=show_title)
+                verdict = check_season(shape, season_no, utc_today())
                 notes = verdict.reasons
                 log.info(
                     "tmdb.season_absent",
@@ -524,6 +524,7 @@ class TmdbSource:
             "dict[str, Any]",
             await get_json(client, f"{BASE}/tv/{tmdb_id}", params={"api_key": key}),
         )
+        name = detail.get("name")
         status = detail.get("status")
         listed = detail.get("number_of_seasons")
         seasons = [
@@ -538,6 +539,7 @@ class TmdbSource:
         ]
         ordered = tuple(sorted(seasons, key=lambda s: (s.number == 0, s.number)))
         return ShowShape(
+            name=str(name) if isinstance(name, str) else None,
             status=str(status) if isinstance(status, str) else None,
             seasons=ordered,
             listed=listed if isinstance(listed, int) else len(ordered),

@@ -247,7 +247,7 @@ def listed(monkeypatch: pytest.MonkeyPatch) -> dict[str, tuple[SeasonRef, ...]]:
 
     async def _tv_shape(_self: object, _c: object, _k: str, tmdb_id: str) -> Any:
         seasons = table.get(tmdb_id, ())
-        return ShowShape("Returning Series", seasons, len(seasons))
+        return ShowShape("A Show", "Returning Series", seasons, len(seasons))
 
     monkeypatch.setattr(add_module.TmdbSource, "tv_shape", _tv_shape)
     return table

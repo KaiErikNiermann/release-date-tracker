@@ -89,6 +89,7 @@ class ShowShape:
     paraphrased into something the source did not say.
     """
 
+    name: str | None  # the source's own title, so a quote is its words and not the query's
     status: str | None
     seasons: tuple[SeasonRef, ...]
     listed: int  # `number_of_seasons` as reported — counts announced ones
@@ -176,13 +177,18 @@ def _standing(shape: ShowShape, season: int, stance: ShowStance) -> SeasonStandi
     )
 
 
-def check_season(shape: ShowShape, season: int, today: date, *, show: str) -> SeasonVerdict:
+def check_season(
+    shape: ShowShape, season: int, today: date, *, show: str | None = None
+) -> SeasonVerdict:
     """Where season N stands against what the source lists, phrased as the source's claim.
 
     Firm only when the source calls the show over — and firm still never blocks a capture. The
     reader may know something the source does not, which is exactly the Pluribus case in the
     other direction.
     """
+    # The source's own title unless the caller insists: quoting the query back ("pluribus")
+    # reads as our claim, where TMDB's own "Pluribus" reads as theirs.
+    show = show or shape.name or "this show"
     stance = stance_of(shape, today)
     standing = _standing(shape, season, stance)
     row = shape.row(season)

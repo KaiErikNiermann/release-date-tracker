@@ -265,6 +265,10 @@ async def report_for_candidate(
     results: list[SourceResult] = [r for r in pulled if r is not None]  # gather keeps order
     observations = [obs for r in results for obs in r.observations]
     canonical: dict[str, str] = {cand.id_key: cand.canonical_id}
+    # What the sources want said about this pull, before any of the claim logic runs. The
+    # season check lives here: it is the difference between "no air date yet" and "that
+    # season is not on this show", and only the source that looked can tell them apart.
+    source_notes = tuple(note for r in results for note in r.notes)
     for r in results:
         canonical.update(r.external_ids)
 
@@ -277,7 +281,9 @@ async def report_for_candidate(
             )
             price = None
         case MediaKind.TV:
-            claims, streaming, notes = await _tv_claims(client, settings, tmdb_id, observations)
+            claims, streaming, notes = await _tv_claims(
+                client, settings, tmdb_id, observations, absent=bool(source_notes)
+            )
             price = None
         case MediaKind.TECH:
             # never _game_claims: that path narrows on a *publisher's* release timing and
@@ -377,7 +383,9 @@ async def report_for_candidate(
         streaming=streaming,
         predicted_platform=predicted,
         price=price,
-        notes=tuple(notes),
+        # the sources' own words first: they explain an empty result the claim layer can only
+        # describe. `_tv_claims` already stands down when one of these is present.
+        notes=(*source_notes, *notes),
         # matched the title but no dates surfaced — same gap a manual search would fill
         web_info=None if claims else await instant_answer(client, query),
         # always pin the Wikipedia page; mine its facets only when sources were sparse
@@ -1057,7 +1065,10 @@ async def _tv_claims(
     settings: Settings,
     tmdb_id: str | None,
     obs: list[ReleaseObservation],
+    *,
+    absent: bool = False,
 ) -> tuple[list[Claim], tuple[str, ...], list[str]]:
+    """Claims for a TV work. ``absent`` means the source already explained the empty result."""
     notes: list[str] = []
     claims: list[Claim] = []
     dated = [o for o in obs if o.release_date]
@@ -1080,7 +1091,10 @@ async def _tv_claims(
         # Saying "TMDB has no date" when TMDB was never asked sends the reader off to
         # check a source that was never consulted.
         notes.extend(sorted(missing.values()))
-    else:
+    elif not absent:
+        # Only when nothing better is known. A season the show does not carry has already
+        # been explained by the source, and "no air date yet" would contradict it — the date
+        # is not late, the season is not there.
         notes.append("No air date on TMDB yet.")
 
     streaming: tuple[str, ...] = ()

@@ -32,7 +32,7 @@ def _s(number: int, air: str | None = None, episodes: int = 10) -> SeasonRef:
 
 
 def _shape(status: str | None, *seasons: SeasonRef) -> ShowShape:
-    return ShowShape(status, seasons, len(seasons))
+    return ShowShape("A Show", status, seasons, len(seasons))
 
 
 # real shapes, measured
@@ -158,3 +158,13 @@ def test_a_show_with_no_seasons_listed_is_still_soft() -> None:
     verdict = check_season(_shape("Returning Series"), 1, TODAY, show="Announced Thing")
     assert verdict.highest == 0
     assert not verdict.firm
+
+
+def test_the_quote_is_the_sources_own_title() -> None:
+    """Quoting the query back ("pluribus") reads as our claim; TMDB's "Pluribus" reads as theirs."""
+    shape = ShowShape("Pluribus", "Returning Series", (_s(1, "2025-11-06", 9),), 1)
+    assert "“Pluribus”" in check_season(shape, 2, TODAY).reasons[0]
+    # an explicit caller still wins, and a nameless shape degrades rather than crashing
+    assert "“Mine”" in check_season(shape, 2, TODAY, show="Mine").reasons[0]
+    nameless = ShowShape(None, "Returning Series", (_s(1, "2025-11-06", 9),), 1)
+    assert "this show" in check_season(nameless, 2, TODAY).reasons[0]
