@@ -15,12 +15,13 @@ from typing import Any
 import pytest
 from textual.widgets import Input, OptionList, Static
 
-from conftest import until
+from conftest import until, with_keys
 from release_tracker import drafts
-from release_tracker.config import Settings, get_settings
+from release_tracker.config import get_settings
 from release_tracker.db import Database
 from release_tracker.models import Entity, MediaKind
 from release_tracker.sources.base import Candidate
+from release_tracker.sources.tmdb import SeasonRef
 from release_tracker.tui import add as add_module
 from release_tracker.tui.add import AddScreen, resolve
 from release_tracker.tui.app import RdtApp
@@ -47,8 +48,9 @@ def _show(title: str = "Yellowjackets") -> list[tuple[MediaKind, Candidate]]:
 
 @pytest.fixture
 def app(tmp_path: Path) -> RdtApp:
-    settings: Settings = get_settings()
-    return RdtApp(settings=settings, db=Database(tmp_path / "s.db"), today=TODAY)
+    # keys present: the subject here is *routing* (does a season reach the capture), and an
+    # unconfigured TMDB would correctly report what is missing instead of listing seasons.
+    return RdtApp(settings=with_keys(get_settings()), db=Database(tmp_path / "s.db"), today=TODAY)
 
 
 @pytest.fixture
@@ -221,3 +223,136 @@ async def test_committing_a_reviewed_candidate_passes_its_coords_through(
     db.close()
 
     assert seen == {"report_season": 2, "capture_season": 2, "capture_part": 1}
+
+
+# --- the season picker ---------------------------------------------------------------------
+def _seasons(*numbers: int, specials: bool = True) -> tuple[SeasonRef, ...]:
+    import datetime as _dt
+
+    rows = [SeasonRef(n, f"Season {n}", _dt.date(2020 + n, 1, 1), 10) for n in numbers]
+    if specials:
+        rows.append(SeasonRef(0, "Specials", _dt.date(2022, 7, 19), 3))
+    return tuple(rows)
+
+
+@pytest.fixture
+def listed(monkeypatch: pytest.MonkeyPatch) -> dict[str, tuple[SeasonRef, ...]]:
+    """Answer `tv_seasons` from a table keyed by tmdb id, with no network."""
+    table: dict[str, tuple[SeasonRef, ...]] = {}
+
+    async def _tv_seasons(_self: object, _c: object, _k: str, tmdb_id: str) -> Any:
+        return table.get(tmdb_id, ())
+
+    monkeypatch.setattr(add_module.TmdbSource, "tv_seasons", _tv_seasons)
+    return table
+
+
+async def _press_s(app: RdtApp, pilot: Any, screen: AddScreen) -> None:
+    screen.query_one("#candidates", OptionList).highlighted = 0
+    screen.action_seasons()
+    await until(pilot, lambda: not screen.query_one("#candidates", OptionList).loading, "seasons")
+    await pilot.pause()
+
+
+def _rows(screen: AddScreen) -> list[str]:
+    options = screen.query_one("#candidates", OptionList)
+    return [str(options.get_option_at_index(i).prompt) for i in range(options.option_count)]
+
+
+async def test_s_lists_the_seasons_under_a_whole_show_row(
+    app: RdtApp, tv_hit: list[str], listed: dict[str, tuple[SeasonRef, ...]]
+) -> None:
+    """The show stays first and selectable — picking a season is opt-in, never forced."""
+    listed["117488"] = _seasons(1, 2, 3, 4)
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _open(app, pilot, "yellowjackets")
+        await _press_s(app, pilot, screen)
+        rows = _rows(screen)
+    assert "whole show" in rows[0]
+    assert [r for r in rows if "Season 2" in r]
+    assert not [r for r in rows if "Specials" in r]  # season 0 is reachable via `season:0`
+
+
+async def test_a_limited_series_is_not_pushed_into_a_season(
+    app: RdtApp, tv_hit: list[str], listed: dict[str, tuple[SeasonRef, ...]]
+) -> None:
+    """One season means no choice to make; a one-row picker reads as a broken keybinding."""
+    listed["117488"] = _seasons(1, specials=False)
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _open(app, pilot, "yellowjackets")
+        await _press_s(app, pilot, screen)
+        status = str(screen.query_one("#add-status", Static).content)
+        assert screen._seasons is None  # pyright: ignore[reportPrivateUsage]
+    assert "one season" in status
+
+
+async def test_s_declines_on_a_film(app: RdtApp, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _search(*_a: object, **_k: object) -> Any:
+        return [
+            (
+                MediaKind.MOVIE,
+                Candidate(
+                    source="tmdb",
+                    id_key="tmdb",
+                    canonical_id="1",
+                    title="Dune",
+                    year=2026,
+                    score=0.9,
+                ),
+            )
+        ]
+
+    async def _no_client(_self: RdtApp) -> None: ...
+
+    monkeypatch.setattr(add_module, "capture_candidates", _search)
+    monkeypatch.setattr(RdtApp, "http", _no_client)
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _open(app, pilot, "dune")
+        screen.query_one("#candidates", OptionList).highlighted = 0
+        screen.action_seasons()
+        await pilot.pause()
+        assert screen._seasons is None  # pyright: ignore[reportPrivateUsage]
+        assert "not a series" in str(screen.query_one("#add-status", Static).content)
+
+
+async def test_picking_a_season_row_captures_that_season(
+    app: RdtApp,
+    tv_hit: list[str],
+    listed: dict[str, tuple[SeasonRef, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole point of the picker: row N adds season N, row 0 adds the show."""
+    listed["117488"] = _seasons(1, 2, 3, 4)
+    seen: list[int | None] = []
+
+    async def _report(*_a: object, **kw: object) -> object:
+        return object()
+
+    async def _capture(*_a: object, **kw: object) -> Entity:
+        seen.append(kw.get("season"))  # type: ignore[arg-type]
+        return Entity.create("Yellowjackets: Season 2", MediaKind.TV, season=2)
+
+    monkeypatch.setattr(add_module, "report_for_candidate", _report)
+    monkeypatch.setattr(add_module, "capture_work", _capture)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _open(app, pilot, "yellowjackets")
+        await _press_s(app, pilot, screen)
+        screen.query_one("#candidates", OptionList).highlighted = 2  # row 0 = show, 1 = S1
+        await pilot.press("enter")
+        await until(pilot, lambda: bool(seen), "the capture to land")
+    assert seen == [2]
+
+
+async def test_escape_leaves_the_seasons_before_it_leaves_the_screen(
+    app: RdtApp, tv_hit: list[str], listed: dict[str, tuple[SeasonRef, ...]]
+) -> None:
+    """Escape walks out one level at a time, as it already did for the bar."""
+    listed["117488"] = _seasons(1, 2, 3)
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _open(app, pilot, "yellowjackets")
+        await _press_s(app, pilot, screen)
+        screen.action_back()
+        await pilot.pause()
+        assert screen._seasons is None  # pyright: ignore[reportPrivateUsage]
+        assert isinstance(app.screen, AddScreen)  # back to the hits, not out of the palette

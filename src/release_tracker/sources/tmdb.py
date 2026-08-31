@@ -88,6 +88,21 @@ _TYPE_TO_CHANNEL: dict[int, ReleaseChannel] = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class SeasonRef:
+    """One season of a show as TMDB lists it on the show detail."""
+
+    number: int
+    name: str
+    air_date: date | None
+    episodes: int
+
+    @property
+    def specials(self) -> bool:
+        """Season 0 — a specials bucket, not a season anyone means by "season"."""
+        return self.number == 0
+
+
 class TmdbSource:
     name = "tmdb"
 
@@ -459,6 +474,32 @@ class TmdbSource:
             summary=str(detail["overview"]) if detail.get("overview") else None,
             is_anime=is_anime(detail, genres),
         )
+
+    async def tv_seasons(
+        self, client: httpx.AsyncClient, key: str, tmdb_id: str
+    ) -> tuple[SeasonRef, ...]:
+        """Every season TMDB lists for a show, in order, specials last.
+
+        Read off the show detail the platform lookup already fetches, so a picker row gets its
+        air date and episode count for free. The numbering matters as much as the list: it is
+        the same numbering ``_pull_tv`` later resolves against at ``/tv/{id}/season/{n}``, so
+        anything offered here is a season the puller can actually fetch.
+        """
+        detail = cast(
+            "dict[str, Any]",
+            await get_json(client, f"{BASE}/tv/{tmdb_id}", params={"api_key": key}),
+        )
+        seasons = [
+            SeasonRef(
+                number=number,
+                name=str(raw.get("name") or f"Season {number}").strip(),
+                air_date=_parse_tmdb_date(raw.get("air_date")),
+                episodes=int(raw.get("episode_count") or 0),
+            )
+            for raw in cast("list[dict[str, Any]]", detail.get("seasons") or [])
+            if isinstance(number := raw.get("season_number"), int)
+        ]
+        return tuple(sorted(seasons, key=lambda s: (s.number == 0, s.number)))
 
     async def tv_platforms(
         self, client: httpx.AsyncClient, key: str, tmdb_id: str, regions: tuple[str, ...]

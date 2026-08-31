@@ -27,6 +27,7 @@ from textual.widgets.option_list import Option
 
 from release_tracker import drafts, query
 from release_tracker.capture import capture_work
+from release_tracker.config import secret
 from release_tracker.drafts import Draft
 from release_tracker.lookup import (
     DETECT_KINDS,
@@ -37,6 +38,7 @@ from release_tracker.lookup import (
 from release_tracker.models import Entity, MediaKind
 from release_tracker.sources import unavailable_for
 from release_tracker.sources.base import Candidate
+from release_tracker.sources.tmdb import SeasonRef, TmdbSource
 from release_tracker.tech import looks_like_tech
 from release_tracker.titles import strip_trailing_season
 from release_tracker.tui.draft import DraftScreen
@@ -95,6 +97,23 @@ _MIN_CHARS = 3
 _MEMO_TTL = 120.0
 
 
+@dataclass(frozen=True, slots=True)
+class _SeasonList:
+    """The picker's state: whose seasons these are, and what TMDB listed.
+
+    Rendered into the same OptionList rather than a new modal — the pick has to come back to
+    `AddScreen.capture` either way, and a second screen would need its own copy of that.
+    """
+
+    kind: MediaKind
+    candidate: Candidate
+    seasons: tuple[SeasonRef, ...]
+
+    def at(self, index: int) -> SeasonRef | None:
+        """The season a row index selects; ``None`` for row 0, the whole-show row."""
+        return self.seasons[index - 1] if 1 <= index <= len(self.seasons) else None
+
+
 def _season_tail(season: int | None) -> str:
     """The " · Season N" a row wears once a season is in play, or nothing."""
     return f" · Season {season}" if season is not None else ""
@@ -113,6 +132,7 @@ class AddScreen(ModalScreen[Entity | None]):
         Binding("j", "highlight(1)", "Down", show=False),
         Binding("k", "highlight(-1)", "Up", show=False),
         Binding("e", "review", "Review before adding", show=False),
+        Binding("s", "seasons", "Browse this show's seasons", show=False),
         Binding("slash", "focus_query", "Search", show=False),
         Binding("tab", "move_focus(1)", "Focus next", show=False),
         Binding("shift+tab", "move_focus(-1)", "Focus previous", show=False),
@@ -132,6 +152,9 @@ class AddScreen(ModalScreen[Entity | None]):
         # Session-scoped, so backspacing through a query costs nothing. Deliberately not
         # in the library: a process-global search cache would surprise CLI callers.
         self._memo: dict[KeyT, tuple[float, list[tuple[MediaKind, Candidate]], Draft]] = {}
+        # Set while the list is showing a show's seasons instead of the search hits.
+        self._seasons: _SeasonList | None = None
+        self._season_memo: dict[str, tuple[SeasonRef, ...]] = {}
 
     def compose(self) -> ComposeResult:
         with Vertical(id="add"):
@@ -269,6 +292,7 @@ class AddScreen(ModalScreen[Entity | None]):
         self._hits = hits
         self._freeform = freeform
         self._shown_key = key
+        self._seasons = None  # these hits are not the show whose seasons were open
         season = self._typed().season
         options = self._candidates
         options.loading = False
@@ -353,10 +377,108 @@ class AddScreen(ModalScreen[Entity | None]):
         hint = "" if already_tried else " [dim]— for a device, add[/] [bold]kind:tech[/]"
         return f"{prefix}[yellow]no matches[/]{hint}{tail}"
 
+    # --- seasons -------------------------------------------------------------------
+    def action_seasons(self) -> None:
+        """Open (or close) the highlighted show's season list.
+
+        A show is the default and stays selectable — a limited series must never be pushed
+        into a season it does not have — so this is opt-in, and says why when it declines.
+        """
+        if self._seasons is not None:  # already open: `s` toggles back to the hits
+            self._close_seasons()
+            return
+        index = self._candidates.highlighted
+        if index is None or not 0 <= index < len(self._hits):
+            return
+        kind, cand = self._hits[index]
+        if kind is not MediaKind.TV:
+            self._status("[dim]seasons are a TV idea — this row is not a series[/]")
+            return
+        if cand.id_key != "tmdb":
+            self._status("[dim]no TMDB id on this match — nothing to list seasons from[/]")
+            return
+        self.load_seasons(kind, cand)
+
+    @work(exclusive=True, group="add-seasons")
+    async def load_seasons(self, kind: MediaKind, cand: Candidate) -> None:
+        """Fetch the show's seasons and swap the list over to them.
+
+        Its own worker group: sharing `add-search` would let the keystroke that opened this
+        cancel the fetch, and sharing `add-capture` would let it cancel a write.
+        """
+        from release_tracker.tui.app import RdtApp
+
+        assert isinstance(self.app, RdtApp)
+        key = secret(self.app.settings.tmdb_api_key)
+        if not key:
+            self._status("[yellow]TMDB is not configured[/] [dim]— `rdt doctor`[/]")
+            return
+        seasons = self._season_memo.get(cand.canonical_id)
+        if seasons is None:
+            self._candidates.loading = True
+            try:
+                seasons = await TmdbSource().tv_seasons(
+                    await self.app.http(), key, cand.canonical_id
+                )
+            except Exception as exc:
+                self._candidates.loading = False
+                self._status(f"[red]could not list seasons:[/] {exc}")
+                return
+            self._season_memo[cand.canonical_id] = seasons
+            self._candidates.loading = False
+        # A limited series has exactly one season and no choice to make. Say so rather than
+        # opening a one-row picker, which reads as a broken keybinding.
+        if len([x for x in seasons if not x.specials]) <= 1:
+            self._status(f"[dim]“{cand.title}” has one season — the row is the whole thing[/]")
+            return
+        self._seasons = _SeasonList(kind, cand, seasons)
+        self._show_seasons()
+
+    def _show_seasons(self) -> None:
+        """Render the season rows: the whole show first, then each season."""
+        sl = self._seasons
+        if sl is None:
+            return
+        # Specials are listed by TMDB but are not what anyone means by "season"; reachable
+        # deliberately via `season:0`, not by sitting in the middle of this list.
+        wanted = [x for x in sl.seasons if not x.specials]
+        self._seasons = _SeasonList(sl.kind, sl.candidate, tuple(wanted))
+        options = self._candidates
+        options.clear_options()
+        options.add_option(
+            Option(
+                Text.from_markup(
+                    f"[bold]◂ {sl.candidate.title}[/]  [dim]the whole show · stays the default[/]"
+                )
+            )
+        )
+        for season in wanted:
+            when = season.air_date.isoformat() if season.air_date else "[dim]—[/]"
+            eps = f"[dim]{season.episodes} ep[/]" if season.episodes else ""
+            options.add_option(
+                Option(Text.from_markup(f"  [bold]Season {season.number}[/]  {when}  {eps}"))
+            )
+        options.highlighted = 0
+        options.focus()
+        self._status(
+            f"[dim]{len(wanted)} seasons of[/] [bold]{sl.candidate.title}[/]"
+            " [dim]· enter adds one, e reviews first, s or esc back[/]"
+        )
+
+    def _close_seasons(self) -> None:
+        """Back to the search hits, exactly as they were."""
+        self._seasons = None
+        if self._freeform is not None and self._shown_key is not None:
+            self._show(self._hits, self._shown_key, self._freeform)
+        self._candidates.focus()
+
     # --- capturing -----------------------------------------------------------------
     @on(OptionList.OptionSelected, "#candidates")
     def _on_pick(self, event: OptionList.OptionSelected) -> None:
-        if 0 <= event.option_index < len(self._hits):
+        if (sl := self._seasons) is not None:
+            season = sl.at(event.option_index)
+            self.capture(sl.kind, sl.candidate, season=season.number if season else None)
+        elif 0 <= event.option_index < len(self._hits):
             kind, cand = self._hits[event.option_index]
             self.capture(kind, cand)
         elif self._freeform is not None and event.option_index == len(self._hits):
@@ -371,6 +493,20 @@ class AddScreen(ModalScreen[Entity | None]):
         """
         index = self._candidates.highlighted
         if index is None:
+            return
+        if (sl := self._seasons) is not None:
+            season = sl.at(index)
+            self._review(
+                drafts.for_candidate(
+                    sl.candidate.title,
+                    sl.kind,
+                    sl.candidate,
+                    season=season.number if season else None,
+                    reasons=(f"season {season.number} picked from the show's season list",)
+                    if season
+                    else (),
+                )
+            )
             return
         if 0 <= index < len(self._hits):
             kind, cand = self._hits[index]
@@ -398,7 +534,7 @@ class AddScreen(ModalScreen[Entity | None]):
         self.app.push_screen(DraftScreen(draft), done)
 
     @work(exclusive=True, group="add-capture")
-    async def capture(self, kind: MediaKind, cand: Candidate) -> None:
+    async def capture(self, kind: MediaKind, cand: Candidate, *, season: int | None = None) -> None:
         """Report on the *chosen* candidate then persist — no second search.
 
         Its own worker group. Sharing the default one with `search` meant a keystroke
@@ -409,7 +545,9 @@ class AddScreen(ModalScreen[Entity | None]):
 
         assert isinstance(self.app, RdtApp)
         typed = self._typed()
-        season = typed.season if kind is MediaKind.TV else None
+        # An explicit pick off the season list is an act on this screen, so it outranks
+        # whatever the bar says; the bar still supplies the coord on the ordinary path.
+        season = (season if season is not None else typed.season) if kind is MediaKind.TV else None
         self._busy(True, f"[dim]adding “{cand.title}”{_season_tail(season)} — pulling dates…[/]")
         client = await self.app.http()
         try:
@@ -480,7 +618,10 @@ class AddScreen(ModalScreen[Entity | None]):
             self.focus_previous()
 
     def action_back(self) -> None:
-        """Escape walks out: candidates -> query bar, then closes the palette."""
+        """Escape walks out: seasons -> candidates -> query bar, then closes the palette."""
+        if self._seasons is not None:
+            self._close_seasons()
+            return
         bar = self.query_one("#add-query", Input)
         if self.focused is not bar:
             bar.focus()
