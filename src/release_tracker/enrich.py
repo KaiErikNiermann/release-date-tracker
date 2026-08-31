@@ -42,7 +42,7 @@ from release_tracker.models import (
     ReleaseObservation,
     SourceTier,
 )
-from release_tracker.platforms import learn_predicted_platform
+from release_tracker.platforms import canonical_platform, learn_predicted_platform
 from release_tracker.resolve import commercial_anchor, earliest_premiere
 from release_tracker.sources.base import Credit, MediaGraph, PlatformOffer, pinned_id
 from release_tracker.sources.igdb import IgdbSource
@@ -275,9 +275,13 @@ def _write_series(
 def _write_platform(
     db: Database, entity: Entity, offer: PlatformOffer, provider: str, now: datetime
 ) -> None:
-    """One where-edge, scoped to the market the offer was read from (None = unscoped)."""
+    """One where-edge, scoped to the market the offer was read from (None = unscoped).
+
+    The name is canonicalised on the way in so a provider's dressing ("Paramount Plus
+    Premium") lands on the same node as everyone else's spelling of that service.
+    """
     predicted = offer.predicted
-    node = Node.create(NodeKind.PLATFORM, offer.name, owned=False)
+    node = Node.create(NodeKind.PLATFORM, canonical_platform(offer.name), owned=False)
     db.upsert_node(node)
     db.upsert_edge(
         Edge(

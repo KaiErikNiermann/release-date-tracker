@@ -5,9 +5,12 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from release_tracker.platforms import (
     UNDETERMINED,
     PlatformStore,
+    canonical_platform,
     resolve_predicted_platform,
 )
 
@@ -83,3 +86,35 @@ def test_cannot_learn_skips_resolver(tmp_path: Path) -> None:
     assert out is None
     assert resolver.calls == []
     assert store.get("unknown co") is None  # nothing poisoned
+
+
+# --- cross-provider naming ----------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("raw", "want"),
+    [
+        ("Paramount Plus Premium", "Paramount+"),
+        ("Paramount+ with Showtime", "Paramount+"),
+        ("Paramount Plus Basic with Ads", "Paramount+"),
+        ("Netflix Standard with Ads", "Netflix"),
+        ("Paramount+ Amazon Channel", "Paramount+"),
+        ("Max", "HBO Max"),
+        ("Amazon Prime Video", "Prime Video"),
+    ],
+)
+def test_canonical_platform_collapses_provider_dressing(raw: str, want: str) -> None:
+    """TMDB and JustWatch spell one service several ways; each became its own node."""
+    assert canonical_platform(raw) == want
+
+
+@pytest.mark.parametrize(
+    "name", ["Canal+ Séries", "Movistar Plus+ Ficción Total", "U-NEXT", "fuboTV"]
+)
+def test_canonical_platform_leaves_an_unknown_name_alone(name: str) -> None:
+    """No fuzzy matching: a wrong merge silently claims a service carries something it does
+    not and is invisible in the UI, so an unrecognised name passes through verbatim."""
+    assert canonical_platform(name) == name
+
+
+def test_canonical_platform_does_not_strip_a_tier_word_that_is_the_name() -> None:
+    """ "Showtime" ends in no tier; a greedy suffix strip would have to leave it whole."""
+    assert canonical_platform("Showtime") == "Showtime"

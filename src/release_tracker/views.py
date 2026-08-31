@@ -116,7 +116,7 @@ class PlatformLine:
         """How many of ``home``'s markets this platform is known to cover (0 when unscoped)."""
         return len(frozenset(self.regions) & frozenset(home))
 
-    def rank(self, home: Iterable[str]) -> tuple[int, int, int, str]:
+    def rank(self, home: Iterable[str]) -> tuple[int, int, int, int, str]:
         """Display order for a truncated list, most useful first.
 
         The column answers *where can I watch this*, so a market-verified offer outranks an
@@ -124,11 +124,15 @@ class PlatformLine:
         Ordering is therefore reachable-here, then unscoped (still true, just unlocated), then
         somewhere you cannot get to — and predictions after all three, since a guess must
         never displace a fact off the end of a two-name column.
+
+        Between platforms equally reachable from ``home``, the wider one leads: carrying a
+        title across eight markets is what a primary home looks like, and it beats sorting
+        a one-market reseller first purely on its initial.
         """
         home = frozenset(home)
         covered = self.reach_in(home)
         tier = 0 if covered else (1 if not self.regions else 2)
-        return (int(self.predicted), tier, -covered, self.name.casefold())
+        return (int(self.predicted), tier, -covered, -len(self.regions), self.name.casefold())
 
     def live_in(self, regions: Iterable[str]) -> bool:
         """True when this platform is live in any of ``regions`` — or is unscoped.

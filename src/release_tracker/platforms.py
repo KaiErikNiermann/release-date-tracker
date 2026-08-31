@@ -38,6 +38,59 @@ PLATFORM_TTL_DAYS: Final[int] = 120
 
 Resolver = Callable[[str], Awaitable[str | None]]
 
+# --- cross-provider platform naming -------------------------------------------------------
+# TMDB and JustWatch dress the same service differently ("Paramount+ with Showtime",
+# "Paramount Plus Premium", "Paramount Plus"), and every spelling becomes its own PLATFORM
+# node, so one show lists a service three times and the truncated Where column spends all of
+# itself on one company. Mechanical first — strip the subscription tier and reseller wrapper —
+# then a small literal table for what no rule catches.
+#
+# Deliberately not fuzzy. A wrong merge silently asserts a service carries something it does
+# not, and is invisible in the UI; two rows that look like duplicates are the much cheaper
+# mistake. Anything unmatched keeps the provider's own string verbatim.
+_TIER_SUFFIXES: Final[tuple[str, ...]] = (
+    "standard with ads",
+    "basic with ads",
+    "with ads",
+    "premium",
+    "basic",
+    "amazon channel",
+    "apple tv channel",
+    "roku premium channel",
+)
+_PLATFORM_ALIASES: Final[dict[str, str]] = {
+    "paramount plus": "Paramount+",
+    "paramount+": "Paramount+",
+    "paramount plus with showtime": "Paramount+",
+    "paramount+ with showtime": "Paramount+",
+    "disney plus": "Disney+",
+    "apple tv plus": "Apple TV+",
+    "apple tv": "Apple TV+",
+    "max": "HBO Max",
+    "hbo max": "HBO Max",
+    "amazon prime video": "Prime Video",
+    "prime video": "Prime Video",
+    "netflix": "Netflix",
+}
+
+
+def canonical_platform(name: str) -> str:
+    """One display name per service, across TMDB's and JustWatch's spellings.
+
+    Strips a trailing subscription tier or reseller wrapper, then applies the alias table.
+    An unrecognised name comes back untouched, tier and all — better a stray duplicate than
+    a silent claim that two different services are one.
+    """
+    stem = " ".join(name.split()).strip()
+    lowered = stem.casefold()
+    for suffix in _TIER_SUFFIXES:
+        if lowered.endswith(f" {suffix}"):
+            stem = stem[: -(len(suffix) + 1)].rstrip()
+            lowered = stem.casefold()
+            break
+    return _PLATFORM_ALIASES.get(lowered, stem)
+
+
 _SCHEMA: Final[str] = """
 CREATE TABLE IF NOT EXISTS learned_platforms (
     studio_key   TEXT PRIMARY KEY,
