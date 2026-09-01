@@ -121,14 +121,12 @@ def rank_candidate(cand: Candidate, *, weight: float = POPULARITY_WEIGHT) -> flo
 
 def build_worklist(db: Database, today: date, *, include_released: bool = False) -> list[Entity]:
     """Entities that are resolvable, not yet pinned, and (by default) still upcoming."""
-    out: list[Entity] = []
-    for entity in db.iter_entities(watched_only=True):
-        if not needs_resolution(entity):
-            continue
-        if not include_released and is_released(db.observation_dates(entity.id), today):
-            continue
-        out.append(entity)
-    return out
+    return [
+        entity
+        for entity in db.iter_entities(watched_only=True)
+        if needs_resolution(entity)
+        and (include_released or not is_released(db.observation_dates(entity.id), today))
+    ]
 
 
 async def candidates_for(

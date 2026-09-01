@@ -576,27 +576,32 @@ def _render_report(r: RdReport) -> None:
         for note in r.notes:
             console.print(f"[dim]• {note}[/]")
         return
-    if not r.found and not r.claims:
+    # `matched_title`, not `found`, is what separates "we could not identify this" from "we
+    # identified it and it has no dates". The second is a real answer — a cancelled game has
+    # no release date precisely *because* it was cancelled — and calling it a failed search
+    # buries the sentence that explains it.
+    if r.matched_title is None:
         console.print(f"[yellow]No confident match[/] for '{r.query}'. {' '.join(r.notes)}")
         _render_web_info(r.web_info)
         raise typer.Exit(2)
     kind_label = r.kind.value if r.kind else "?"
     console.print(f"[bold]{r.matched_title}[/] [dim]({kind_label})[/]")
-    table = Table(show_header=True, header_style="bold")
-    for col in ("What", "Date", "± days", "Stance", "Conf.", "Basis"):
-        table.add_column(col)
-    for c in r.claims:
-        label = "confirmed" if c.stance == "confirmed" else "speculative"
-        stance = f"[{stance_color(c.stance == 'confirmed')}]{label}[/]"
-        table.add_row(
-            c.label,
-            c.when.isoformat() if c.when else "—",
-            str(c.margin_days) if c.margin_days else "—",
-            stance,
-            f"{c.confidence:.2f}",
-            c.basis,
-        )
-    console.print(table)
+    if r.claims:
+        table = Table(show_header=True, header_style="bold")
+        for col in ("What", "Date", "± days", "Stance", "Conf.", "Basis"):
+            table.add_column(col)
+        for c in r.claims:
+            label = "confirmed" if c.stance == "confirmed" else "speculative"
+            stance = f"[{stance_color(c.stance == 'confirmed')}]{label}[/]"
+            table.add_row(
+                c.label,
+                c.when.isoformat() if c.when else "—",
+                str(c.margin_days) if c.margin_days else "—",
+                stance,
+                f"{c.confidence:.2f}",
+                c.basis,
+            )
+        console.print(table)
     if r.streaming:
         console.print(f"[bold]Streaming:[/] {', '.join(r.streaming)} [dim](confirmed)[/]")
     elif r.predicted_platform:
@@ -2182,12 +2187,20 @@ def _apply_filter(rows: list[views.TrackRow], expr: str | None) -> list[views.Tr
 
 
 def _bucket_label(bucket: Bucket) -> str:
+    """Every member spelled out, with no catch-all.
+
+    A wildcard here silently relabelled the first bucket added after it was written —
+    `shelved` rows rendered as "watched" while filtering correctly, so the table
+    contradicted the query that produced it. Exhaustive means the next one is a type error.
+    """
     match bucket:
         case Bucket.AVAILABLE:
             return "[cyan]available[/]"
         case Bucket.UPCOMING:
             return "[orange1]upcoming[/]"
-        case _:
+        case Bucket.SHELVED:
+            return "[red]shelved[/]"
+        case Bucket.WATCHED:
             return "[dim]watched[/]"
 
 

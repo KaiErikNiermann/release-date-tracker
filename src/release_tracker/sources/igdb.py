@@ -30,6 +30,7 @@ from release_tracker.models import (
     ReleaseChannel,
     ReleaseObservation,
     SourceTier,
+    Stance,
 )
 from release_tracker.sources.base import (
     Candidate,
@@ -65,6 +66,46 @@ _CATEGORY_TO_PRECISION: dict[int, DatePrecision] = {
     6: DatePrecision.QUARTER,  # YYYYQ4
     7: DatePrecision.TBA,  # TBD
 }
+
+# IGDB's game-level status (`game_statuses`). Absent is the common case and means nothing
+# unusual — a plain released game reads None rather than 0 — so this is an exception flag,
+# which is the same fail-open shape `seasons.stance_of` uses for TMDB's status words.
+#
+# Only the values that answer "is this coming at all" become a stance. Alpha/Beta/Early
+# Access/Offline/Delisted all describe a game that *did* ship, so they are worth saying and
+# have no business moving it out of the upcoming queue.
+GAME_STANCE: Final[dict[int, Stance]] = {
+    0: Stance.RELEASED,
+    6: Stance.SHELVED,  # Cancelled
+    7: Stance.UNCERTAIN,  # Rumored — announced by nobody official
+}
+_GAME_STATUS_NOTE: Final[dict[int, str]] = {
+    2: "IGDB marks this “Alpha”",
+    3: "IGDB marks this “Beta”",
+    4: "IGDB marks this “Early Access”",
+    5: "IGDB marks this “Offline” — it shipped, and its servers are gone",
+    6: "IGDB marks this “Cancelled”",
+    7: "IGDB marks this “Rumored” — no official announcement backs it",
+    8: "IGDB marks this “Delisted” — it shipped and is no longer sold",
+}
+
+# `release_dates.status` is a *different* enum (`release_date_statuses`) scoped to one
+# platform and region. 5 is "cancelled for this platform", which makes the row's date the one
+# it would have landed on — not one it did. Recording that as a release invents a date for a
+# game that has none: Prey 2 lists three such rows and produced three 2014 observations.
+#
+# (4 "Offline" is the same shape pointing the other way — its date is when the game went
+# away, not when it arrived — but that is a question about shutdowns, not cancellations.)
+_RELEASE_CANCELLED: Final[int] = 5
+
+# IGDB's `company_statuses`. Only a studio that is *gone* is worth mentioning: renamed and
+# merged companies still ship games under a new banner.
+#
+# Trustworthy when it fires and silent otherwise — Telltale, Visceral and Arkane Austin all
+# carry their real shutdown dates, while Maxis (shut in 2015) still reads active. So it can
+# support a sentence and must never move a stance: a studio closing does not cancel a game,
+# and plenty of games outlive the team that started them.
+_COMPANY_DEFUNCT: Final[int] = 1
 
 # precisions coarse enough to benefit from a studio-timing bias (a known month/day
 # is already as good as the trend prior, so it is left untouched).
@@ -130,6 +171,61 @@ _DERIVATIVE_TYPES: Final[dict[int, str]] = {
     13: "an add-on pack",
     14: "an update to another game",
 }
+
+
+def status_notes(
+    status: int | None,
+    rows: list[dict[str, Any]],
+    observations: list[ReleaseObservation],
+    today: date,
+) -> tuple[str, ...]:
+    """What IGDB's status words are worth saying, in IGDB's own words.
+
+    The game-level word carries the claim; the per-platform rows corroborate it. That split
+    matters because the game-level field has holes — Hytale was cancelled in 2025 and still
+    reads "Early Access" — so a cancellation is worth more when both agree, and the reader
+    is the one who should see that rather than a confidence number that hides it.
+    """
+    out: list[str] = []
+    if status is not None and (said := _GAME_STATUS_NOTE.get(status)):
+        out.append(said)
+    cancelled = [r for r in rows if r.get("status") == _RELEASE_CANCELLED]
+    if cancelled:
+        where = ", ".join(
+            sorted({str(p["name"]) for r in cancelled if isinstance(p := r.get("platform"), dict)})
+        )
+        every = " (every release it lists)" if len(cancelled) == len(rows) else ""
+        out.append(f"IGDB marks its release cancelled{every}" + (f" — {where}" if where else ""))
+    # Only worth raising while something is still being waited on. A studio closing says
+    # nothing about a game you can already buy — Telltale shut down and The Walking Dead's
+    # final season still shipped — so this is context for a wait, not a verdict on a release.
+    shipped = any(o.release_date is not None and o.release_date <= today for o in observations)
+    if not shipped and (gone := _defunct_developer(rows)) is not None:
+        name, when = gone
+        out.append(
+            f"IGDB marks its developer {name} defunct"
+            + (f" since {when.isoformat()}" if when else "")
+        )
+    return tuple(out)
+
+
+def _defunct_developer(rows: list[dict[str, Any]]) -> tuple[str, date | None] | None:
+    """The first credited developer IGDB says no longer exists, if any."""
+    for row in rows:
+        game = row.get("game")
+        if not isinstance(game, dict):
+            continue
+        involved = cast("dict[str, Any]", game).get("involved_companies")
+        for entry in cast("list[Any]", involved or []):
+            if not isinstance(entry, dict) or not entry.get("developer"):
+                continue
+            company = cast("dict[str, Any]", entry).get("company")
+            if not isinstance(company, dict):
+                continue
+            firm = cast("dict[str, Any]", company)
+            if firm.get("status") == _COMPANY_DEFUNCT and firm.get("name"):
+                return str(firm["name"]), _ts_to_date(firm.get("change_date"))
+    return None
 
 
 def caveats_for(row: dict[str, Any], ratings: float, hypes: float) -> tuple[str, ...]:
@@ -221,15 +317,23 @@ class IgdbSource:
         # Wikidata's P5794 stores the slug too — so pinning it both fixes the source_url
         # (`igdb_slug` was already read at row_to_observation but never written) and lets the
         # Wikidata id-hub join find the game.
+        # game.game_status rides along on the query we already make: the game-level status
+        # (Cancelled / Rumored / Early Access) costs nothing extra because this request
+        # already expands `game`.
         body = (
             "fields date,human,category,region,status,"
-            "platform.name,game.name,game.slug; "
+            "platform.name,game.name,game.slug,game.game_status,"
+            "game.involved_companies.developer,"
+            "game.involved_companies.company.name,"
+            "game.involved_companies.company.status,"
+            "game.involved_companies.company.change_date; "
             f"where game = {game_id}; limit 50;"
         )
         rows = cast(
             "list[dict[str, Any]]",
             await post_text(client, RELEASE_DATES_URL, content=body, headers=headers),
         )
+        status = await self._game_status(client, headers, game_id, rows)
         now = utc_now()
         observations = [
             obs
@@ -245,8 +349,56 @@ class IgdbSource:
         ids: dict[str, str] = {"igdb": str(game_id)}
         if (slug := _slug_of(rows)) is not None:
             ids["igdb_slug"] = slug
-        log.info("igdb.game", entity=entity.title, igdb_id=game_id, observations=len(observations))
-        return SourceResult(observations=observations, external_ids=ids)
+        stance = GAME_STANCE.get(status) if status is not None else None
+        log.info(
+            "igdb.game",
+            entity=entity.title,
+            igdb_id=game_id,
+            observations=len(observations),
+            status=status,
+            stance=stance.value if stance else None,
+        )
+        return SourceResult(
+            observations=observations,
+            external_ids=ids,
+            notes=status_notes(status, rows, observations, utc_today()),
+            stance=stance,
+        )
+
+    async def _game_status(
+        self,
+        client: httpx.AsyncClient,
+        headers: dict[str, str],
+        game_id: str | int,
+        rows: list[dict[str, Any]],
+    ) -> int | None:
+        """IGDB's game-level status, expanded off the rows we already have.
+
+        The extra request is paid only when there are no rows to expand it from — which is
+        exactly the interesting case, since a game nobody has scheduled is the shape of one
+        that may never arrive (Half-Life 3 lists no release dates and reads "Rumored"). A
+        healthy catalog full of dated games pays nothing, the way `_pull_tv` only fetches a
+        show's shape on the 404.
+        """
+        for row in rows:
+            game = row.get("game")
+            if isinstance(game, dict):
+                got = cast("dict[str, Any]", game).get("game_status")
+                if isinstance(got, int):
+                    return got
+        if rows:
+            return None
+        found = cast(
+            "list[dict[str, Any]]",
+            await post_text(
+                client,
+                GAMES_URL,
+                content=f"fields game_status; where id = {game_id};",
+                headers=headers,
+            ),
+        )
+        got = found[0].get("game_status") if found else None
+        return got if isinstance(got, int) else None
 
     async def _trend_refinement(
         self,
@@ -513,7 +665,13 @@ def row_to_observation(
     Derives certainty from precision (only an exact, announced day is *confirmed*; a
     coarse "2026"/"Q3 2026" is an ``ESTIMATED`` window) and normalises a "TBD" row that
     still carries a placeholder timestamp down to a coarse YEAR at the period start.
+
+    A row cancelled for its platform is not a release and yields nothing: its date is the
+    one the game would have had. The stance says why, so the reader is told rather than
+    left with a title that simply has no dates.
     """
+    if row.get("status") == _RELEASE_CANCELLED:
+        return None
     precision = _CATEGORY_TO_PRECISION.get(int(row.get("category", 7)), DatePrecision.TBA)
     rel = _ts_to_date(row.get("date"))
     if rel is None and precision is not DatePrecision.TBA:

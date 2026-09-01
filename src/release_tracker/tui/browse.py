@@ -32,7 +32,12 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from release_tracker.tui.app import RdtApp
 
 COLUMNS = ("Date", "⟳", "Title", "Kind", "State", "Who", "Where", "What")
-_BUCKET_KEYS = {"1": Bucket.AVAILABLE, "2": Bucket.UPCOMING, "3": Bucket.WATCHED}
+_BUCKET_KEYS = {
+    "1": Bucket.AVAILABLE,
+    "2": Bucket.UPCOMING,
+    "3": Bucket.WATCHED,
+    "4": Bucket.SHELVED,
+}
 
 
 class BrowseScreen(Screen[None]):
@@ -44,6 +49,7 @@ class BrowseScreen(Screen[None]):
         Binding("1", "bucket('available')", "Available", show=False),
         Binding("2", "bucket('upcoming')", "Upcoming", show=False),
         Binding("3", "bucket('watched')", "Watched", show=False),
+        Binding("4", "bucket('shelved')", "Shelved", show=False),
         Binding("j", "cursor(1)", "Down", show=False),
         Binding("k", "cursor(-1)", "Up", show=False),
         Binding("slash", "focus_query", "Search", show=False),
@@ -168,7 +174,7 @@ class BrowseScreen(Screen[None]):
         parts = [
             f"{len(self._visible)}/{len(self.rdt.snapshot.rows)}",
             f"[bold]{bucket.value}[/]" if bucket else "all buckets",
-            "[dim]1/2/3 bucket · a add · enter card · / search · s settings · r reload · q quit[/]",
+            "[dim]1-4 bucket · a add · enter card · / search · s settings · r reload · q quit[/]",
         ]
         if parsed.unknown_fields:
             parts.insert(1, f"[yellow]?{','.join(parsed.unknown_fields)}[/]")

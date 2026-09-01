@@ -197,3 +197,24 @@ def test_migration_adds_the_column_to_a_pre_stance_db(tmp_path: Path) -> None:
     assert survivor.title == "Scalebound"
     assert survivor.stance is None  # nobody has been asked yet, which is not UNKNOWN
     db.close()
+
+
+# --- the surfaces must agree with the partition ---------------------------------------------
+def test_every_bucket_has_its_own_label() -> None:
+    """A wildcard `case _` here relabelled `shelved` as "watched": the row filtered correctly
+    under `is:shelved` and then contradicted itself in the Bucket column. Distinct labels are
+    what make that visible."""
+    from release_tracker.cli import _bucket_label  # pyright: ignore[reportPrivateUsage]
+
+    labels = {b: _bucket_label(b) for b in Bucket}
+    assert len(set(labels.values())) == len(Bucket)
+    for bucket, label in labels.items():
+        assert bucket.value in label
+
+
+def test_the_tui_offers_a_tab_for_every_bucket() -> None:
+    """The bucket tabs are sugar over `is:`, so a bucket with no key is one the query
+    language can reach and the keyboard cannot."""
+    from release_tracker.tui.browse import _BUCKET_KEYS  # pyright: ignore[reportPrivateUsage]
+
+    assert set(_BUCKET_KEYS.values()) == set(Bucket)

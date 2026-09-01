@@ -295,7 +295,7 @@ async def report_for_candidate(
             price, streaming = None, ()
         case _:  # game
             claims, price, notes = await _game_claims(
-                client, settings, canonical.get("igdb"), observations
+                client, settings, canonical.get("igdb"), observations, absent=bool(source_notes)
             )
             streaming = ()
 
@@ -1114,7 +1114,16 @@ async def _game_claims(
     settings: Settings,
     igdb_id: str | None,
     obs: list[ReleaseObservation],
+    *,
+    absent: bool = False,
 ) -> tuple[list[Claim], str | None, list[str]]:
+    """Claims for a game, plus its price and whatever needs saying about the answer.
+
+    ``absent`` means a source already explained the shape of this result in its own words —
+    it read "Cancelled" off IGDB, say. The generic "no date yet" line then has to stand
+    down, because a cancelled game and an unannounced one are not the same answer and
+    saying both would contradict the source that actually knows.
+    """
     notes: list[str] = []
     claims: list[Claim] = []
     price = next((str(o.price) for o in obs if o.price is not None), None)
@@ -1148,6 +1157,8 @@ async def _game_claims(
         )
         if refined is not None:
             notes.append("Estimate biased toward the publisher's historical release timing.")
+    elif absent:
+        pass  # the source said why; a second, vaguer sentence would only muddy it
     elif obs:
         notes.append("Listed but no concrete date yet (TBA).")
     elif missing := unavailable_for((MediaKind.GAME,), settings):
