@@ -9,6 +9,7 @@ and never loses completed work.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 import httpx
@@ -30,6 +31,7 @@ from release_tracker.models import (
     ReleaseChannel,
     ReleaseObservation,
     SourceTier,
+    Stance,
 )
 from release_tracker.platforms import canonical_platform
 from release_tracker.resolve import best_estimates
@@ -87,6 +89,7 @@ async def _pull_entity(
             return_exceptions=True,
         )
     merged_ids: dict[str, str] = {}
+    stances: list[Stance] = []
     # refresh: clear this entity's prior rows for the providers that answered, so re-pulls
     # (e.g. after re-pinning a canonical id) don't leave wrong-match ghosts.
     #
@@ -115,11 +118,32 @@ async def _pull_entity(
             log.info("pipeline.source_skipped", source=src.name, reason=result.skipped)
             continue
         merged_ids.update(result.external_ids)
+        if result.stance is not None:
+            stances.append(result.stance)
         if result.observations:
             stats.observations += db.upsert_observations(result.observations)
     if merged_ids:
         db.merge_external_ids(entity.id, merged_ids)
+    # Only sources that actually answered get a say, so an unconfigured one cannot un-shelve
+    # a work by staying silent — the same reason `succeeded` gates the observation delete.
+    # Writing on every successful pull (including back to None) is what lets a work that was
+    # shelved and then revived stop being shelved.
+    if succeeded:
+        db.set_stance(entity.id, _agreed_stance(stances))
     stats.entities += 1
+
+
+def _agreed_stance(stances: Sequence[Stance]) -> Stance | None:
+    """One stance from however many sources spoke.
+
+    ``SHELVED`` wins outright: a source that positively says a work is dead knows something
+    the others' silence does not, and the sources that carry the signal at all (IGDB) are
+    not the ones that would contradict it. Otherwise the first opinion stands, and no
+    opinion stays None.
+    """
+    if Stance.SHELVED in stances:
+        return Stance.SHELVED
+    return stances[0] if stances else None
 
 
 async def pull_entity(

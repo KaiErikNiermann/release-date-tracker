@@ -29,6 +29,8 @@ from dataclasses import dataclass, replace
 from datetime import date
 from typing import Final
 
+from release_tracker.models import Stance
+
 __all__ = [
     "MIN_SHARED_CAST",
     "TOP_CAST",
@@ -70,12 +72,35 @@ class SeasonRef:
 
 
 class ShowStance(enum.StrEnum):
-    """What the source claims about whether more is coming."""
+    """What the source claims about whether more is coming.
+
+    Finer-grained than the persisted :class:`~release_tracker.models.Stance`, and about the
+    *series* rather than the work: "is season N+1 coming" is a different question from "will
+    this ever come out", and only TV can ask it. :attr:`stance` is the lossy projection onto
+    the vocabulary films and games also speak.
+    """
 
     FINISHED = "finished"  # it says the show is over
     CONFIRMED_NEXT = "confirmed_next"  # running, and a row exists for the next one
     UNCERTAIN = "uncertain"  # running, nothing listed — renewed, or merely quiet
     UNKNOWN = "unknown"  # no status, or a word we do not recognise
+
+    @property
+    def stance(self) -> Stance:
+        """The shared, persisted vocabulary.
+
+        A finished show maps to ``FINISHED``, never ``SHELVED`` — it ran, and its rows are
+        ordinary ones. Nothing TMDB says about a series shelves it.
+        """
+        match self:
+            case ShowStance.FINISHED:
+                return Stance.FINISHED
+            case ShowStance.CONFIRMED_NEXT:
+                return Stance.COMING
+            case ShowStance.UNCERTAIN:
+                return Stance.UNCERTAIN
+            case ShowStance.UNKNOWN:
+                return Stance.UNKNOWN
 
 
 class SeasonStanding(enum.StrEnum):

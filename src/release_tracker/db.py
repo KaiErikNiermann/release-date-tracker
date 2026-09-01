@@ -40,6 +40,7 @@ from release_tracker.models import (
     ReleaseObservation,
     SocialPlatform,
     SourceTier,
+    Stance,
     WorkRelation,
 )
 
@@ -54,6 +55,7 @@ CREATE TABLE IF NOT EXISTS entities (
     notes           TEXT,
     watch           INTEGER NOT NULL DEFAULT 1,
     consumption_state TEXT NOT NULL DEFAULT 'unset',
+    stance          TEXT,
     season          INTEGER,
     part            INTEGER,
     part_label      TEXT,
@@ -203,6 +205,8 @@ class Database:
             self._conn.execute("ALTER TABLE entities ADD COLUMN part INTEGER")
         if "part_label" not in entity_cols:
             self._conn.execute("ALTER TABLE entities ADD COLUMN part_label TEXT")
+        if "stance" not in entity_cols:
+            self._conn.execute("ALTER TABLE entities ADD COLUMN stance TEXT")
         node_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(nodes)")}
         if "followed" not in node_cols:
             self._conn.execute("ALTER TABLE nodes ADD COLUMN followed INTEGER NOT NULL DEFAULT 0")
@@ -231,10 +235,10 @@ class Database:
             conn.execute(
                 """
                 INSERT INTO entities (id, title, kind, aliases, external_ids,
-                    notion_page_id, notes, watch, consumption_state, season, part, part_label,
-                    created_at, updated_at)
+                    notion_page_id, notes, watch, consumption_state, stance,
+                    season, part, part_label, created_at, updated_at)
                 VALUES (:id, :title, :kind, :aliases, :external_ids,
-                    :notion_page_id, :notes, :watch, :consumption_state, :season, :part,
+                    :notion_page_id, :notes, :watch, :consumption_state, :stance, :season, :part,
                     :part_label, :now, :now)
                 ON CONFLICT(id) DO UPDATE SET
                     title=excluded.title,
@@ -250,6 +254,10 @@ class Database:
                     consumption_state=CASE
                         WHEN excluded.consumption_state = 'unset' THEN entities.consumption_state
                         ELSE excluded.consumption_state END,
+                    -- likewise the stance: a capture that asked no source leaves it None and
+                    -- must not erase what a pull learned. Only `set_stance` overwrites, which
+                    -- is what lets a shelved work come back.
+                    stance=COALESCE(excluded.stance, entities.stance),
                     -- season/part are explicit coords; a stateless pull leaves them None, so
                     -- COALESCE keeps any previously-set value rather than wiping it.
                     season=COALESCE(excluded.season, entities.season),
@@ -267,6 +275,7 @@ class Database:
                     "notes": entity.notes,
                     "watch": int(entity.watch),
                     "consumption_state": entity.consumption_state.value,
+                    "stance": entity.stance.value if entity.stance else None,
                     "season": entity.season,
                     "part": entity.part,
                     "part_label": entity.part_label,
@@ -294,6 +303,21 @@ class Database:
             cur = conn.execute(
                 "UPDATE entities SET consumption_state = ?, updated_at = ? WHERE id = ?",
                 (state.value, utc_now().isoformat(), entity_id),
+            )
+            return cur.rowcount > 0
+
+    def set_stance(self, entity_id: str, stance: Stance | None) -> bool:
+        """Record what a source last said about whether this work is coming.
+
+        Overwrites unconditionally, where `upsert_entity` COALESCEs — that asymmetry is the
+        point. A capture that asked nobody must not erase a known stance, but a pull that
+        *did* ask has to be able to say "released after all", or a work shelved once would
+        stay shelved through every later refresh that contradicts it.
+        """
+        with self._tx() as conn:
+            cur = conn.execute(
+                "UPDATE entities SET stance = ?, updated_at = ? WHERE id = ?",
+                (stance.value if stance else None, utc_now().isoformat(), entity_id),
             )
             return cur.rowcount > 0
 
@@ -917,6 +941,7 @@ def _row_to_entity(row: sqlite3.Row) -> Entity:
         notes=row["notes"],
         watch=bool(row["watch"]),
         consumption_state=ConsumptionState(row["consumption_state"]),
+        stance=Stance(row["stance"]) if row["stance"] else None,
         season=row["season"],
         part=row["part"],
         part_label=row["part_label"],

@@ -41,6 +41,7 @@ from release_tracker.models import (
     ReleaseChannel,
     SocialPlatform,
     SourceTier,
+    Stance,
     WorkRelation,
 )
 from release_tracker.query import VocabEntry, Vocabulary
@@ -436,7 +437,7 @@ def _track_row(
         season=season,
         part=part,
         franchise=franchise,
-        bucket=bucket_of(entity.consumption_state, available_to_me, today),
+        bucket=bucket_of(entity.consumption_state, available_to_me, today, entity.stance),
         freshness=freshness(pivot.fetched_at if pivot else None, today, settings),
         has_notes=has_notes,
         state=entity.consumption_state,
@@ -610,16 +611,25 @@ def _series_names(db: Database, entity_id: str) -> tuple[str, ...]:
 
 
 # --- public builders ------------------------------------------------------
-# the three consumption buckets are exhaustive + disjoint, so nothing falls into limbo:
-#   finished (watched/dropped/skipped) -> `watched`;  out + active -> `available`;
-#   everything else not-finished -> `upcoming` (dated, or an explicit "no date yet").
+# the four consumption buckets are exhaustive + disjoint, so nothing falls into limbo:
+#   finished (watched/dropped/skipped) -> `watched`;  a source says it is not coming ->
+#   `shelved`;  out + active -> `available`;  everything else not-finished -> `upcoming`
+#   (dated, or an explicit "no date yet").
 # skipped is "done with it" even for an unreleased title: a conscious pass keeps it out of
 # the upcoming queue while preserving the preference (vs. `forget`, which deletes it).
 _FINISHED = (ConsumptionState.WATCHED, ConsumptionState.DROPPED, ConsumptionState.SKIPPED)
 _ACTIVE = (ConsumptionState.WANT, ConsumptionState.WATCHING)
+# The stances that mean "stop waiting for this". `FINISHED` is deliberately absent: a series
+# that ended still released, and its rows are ordinary watched/available ones.
+_NOT_COMING = (Stance.SHELVED,)
 
 
-def bucket_of(state: ConsumptionState, available: Resolution, today: date) -> Bucket:
+def bucket_of(
+    state: ConsumptionState,
+    available: Resolution,
+    today: date,
+    stance: Stance | None = None,
+) -> Bucket:
     """Classify a work into exactly one consumption bucket.
 
     The single partition rule, shared by the CLI views, the query language's ``is:`` field
@@ -628,11 +638,18 @@ def bucket_of(state: ConsumptionState, available: Resolution, today: date) -> Bu
     speculative past date does not count (we don't know it released), and neither does a
     theatrical release under a digital preference — only the strict ``available`` governs.
 
+    Order is load-bearing. What you did with a work outranks what happened to it, so a
+    cancelled game you already played stays ``watched``. ``shelved`` comes next, because a
+    work nobody will release has no date that could ever move it on: before this bucket
+    existed it sat in ``upcoming`` forever.
+
     Note ``UNSET`` is in neither ``_FINISHED`` nor ``_ACTIVE``, so an unset work is never
     *available*; it falls to ``upcoming`` regardless of its date, until you state an intent.
     """
     if state in _FINISHED:
         return Bucket.WATCHED
+    if stance in _NOT_COMING:
+        return Bucket.SHELVED
     if (
         available.when is not None
         and available.when < today

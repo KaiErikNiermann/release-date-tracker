@@ -125,16 +125,41 @@ class ConsumptionState(enum.StrEnum):
     SKIPPED = "skipped"  # consciously passed on (not for me) — preserved, not deleted
 
 
+class Stance(enum.StrEnum):
+    """What a source says about whether a work is coming — the source's word, not our verdict.
+
+    Persisted (``Entity.stance``) rather than recomputed, because the problem it solves is a
+    *stale row*: a work whose production died has no date to move it out of ``upcoming``, and
+    without a remembered stance it sits in the queue forever.
+
+    ``SHELVED`` is deliberately vaguer than "cancelled". Sources disagree about which deaths
+    are formal — IGDB marks Scalebound ``Cancelled`` but still calls the cancelled Hytale
+    ``Early Access``, and TMDB carries no cancelled film at all (it drops the record). One word
+    covers cancelled, indefinitely held and quietly vanished without claiming to know which.
+
+    ``UNKNOWN`` and absence are different: absence means nobody was asked.
+    """
+
+    RELEASED = "released"  # it is out
+    COMING = "coming"  # confirmed: dated, or the source says it is in production
+    UNCERTAIN = "uncertain"  # announced, with nothing scheduled behind it
+    SHELVED = "shelved"  # the source says it was cancelled, or it stopped existing
+    FINISHED = "finished"  # it ran and ended — a series with no next season
+    UNKNOWN = "unknown"  # asked, and the answer was a word we do not recognise
+
+
 class Bucket(enum.StrEnum):
-    """Which of the three consumption surfaces a tracked work lands on.
+    """Which consumption surface a tracked work lands on.
 
     Exhaustive and disjoint: every work is in exactly one, so there is no limbo. Derived
-    from ``ConsumptionState`` + the resolved availability date (see ``views.bucket_of``),
-    which is the single classifier both the CLI views and the query language use.
+    from ``ConsumptionState`` + the resolved availability date + ``Stance`` (see
+    ``views.bucket_of``), which is the single classifier the CLI views, the query language
+    and the TUI all share.
     """
 
     AVAILABLE = "available"  # out, confirmed, and you haven't finished it
     UPCOMING = "upcoming"  # not out yet (or out but not available to you), incl. the TBA tail
+    SHELVED = "shelved"  # a source says it is not coming — otherwise this waits forever
     WATCHED = "watched"  # finished with: watched / dropped / skipped
 
 
@@ -230,6 +255,9 @@ class Entity(BaseModel):
     watch: bool = True
     # the user's watch/play progress (seeded from Notion Status, set via `rdt state`)
     consumption_state: ConsumptionState = ConsumptionState.UNSET
+    # what a source last said about whether this is coming at all. Written by the pull, never
+    # by hand; None means no source has spoken, which is not the same as `Stance.UNKNOWN`.
+    stance: Stance | None = None
     # structured season/part coordinates for a TV-season entry (the explicit `--season`/`--part`
     # path). Authoritative over title parsing: pullers and enrichment prefer these, falling back
     # to `split_season(title)`/`extract_part(title)` only when they're None (back-compat shorthand).

@@ -16,7 +16,14 @@ from tenacity import (
 )
 
 from release_tracker.config import Settings
-from release_tracker.models import CreditRole, Entity, MediaKind, NodeKind, ReleaseObservation
+from release_tracker.models import (
+    CreditRole,
+    Entity,
+    MediaKind,
+    NodeKind,
+    ReleaseObservation,
+    Stance,
+)
 
 USER_AGENT = "release-date-tracker/0.1 (+https://github.com/KaiErikNiermann/release-date-tracker)"
 DEFAULT_TIMEOUT = httpx.Timeout(20.0, connect=10.0)
@@ -90,6 +97,11 @@ class SourceResult:
     # this is "I looked, I answered, and something about the answer needs attributing".
     # Printed verbatim, never parsed.
     notes: tuple[str, ...] = ()
+    # What this source says about whether the work is coming at all. Unlike `notes`, this is
+    # *persisted* (`Entity.stance`) and queryable, because it has to survive to the next
+    # refresh: a work nobody will ever release has no date to move it out of `upcoming`.
+    # None means this source has no opinion, which never overwrites one that does.
+    stance: Stance | None = None
 
 
 @dataclass(slots=True)
