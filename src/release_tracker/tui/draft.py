@@ -36,6 +36,7 @@ from release_tracker.tech import TechCategory
 from release_tracker.titles import DEFAULT_PART_LABEL
 from release_tracker.tui.cycle import Cycle
 from release_tracker.tui.edit import DATE_HELP, Row, TitleRow
+from release_tracker.tui.inputs import TextInput
 
 
 def _num(value: int | None) -> str:
@@ -94,12 +95,12 @@ class DraftScreen(ModalScreen[Entity | None]):
                     tuple(c.value for c in _CATEGORIES),
                     (self.draft.category or TechCategory.OTHER).value,
                 )
-                yield Row("date", Input(value=self.draft.edtf, placeholder=DATE_HELP))
-                yield Row("season", Input(value=_num(self.draft.season), placeholder="e.g. 2"))
-                yield Row("part", Input(value=_num(self.draft.part), placeholder="e.g. 1"))
+                yield Row("date", TextInput(value=self.draft.edtf, placeholder=DATE_HELP))
+                yield Row("season", TextInput(value=_num(self.draft.season), placeholder="e.g. 2"))
+                yield Row("part", TextInput(value=_num(self.draft.part), placeholder="e.g. 1"))
                 yield Row(
                     "part label",
-                    Input(value=self.draft.part_label or "", placeholder=DEFAULT_PART_LABEL),
+                    TextInput(value=self.draft.part_label or "", placeholder=DEFAULT_PART_LABEL),
                 )
             # Docked as one container — see the note in `edit.py`; docked siblings overlap.
             with Vertical(id="draft-chrome"):

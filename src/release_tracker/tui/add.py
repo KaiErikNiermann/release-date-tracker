@@ -59,6 +59,7 @@ from release_tracker.sources.tmdb import TmdbSource
 from release_tracker.tech import looks_like_tech
 from release_tracker.titles import extract_slice, slice_suffix, strip_trailing_season
 from release_tracker.tui.draft import DraftScreen
+from release_tracker.tui.inputs import TextInput
 
 log = get_logger("tui.add")
 
@@ -311,7 +312,7 @@ class AddScreen(ModalScreen[Entity | None]):
             yield Static(
                 Text.from_markup("[bold]Add a title[/]  [dim]— searches TMDB / IGDB / Steam[/]")
             )
-            yield Input(placeholder="e.g. dune kind:movie year:2026", id="add-query")
+            yield TextInput(placeholder="e.g. dune kind:movie year:2026", id="add-query")
             yield Static("", id="add-status")
             yield OptionList(id="candidates")
 

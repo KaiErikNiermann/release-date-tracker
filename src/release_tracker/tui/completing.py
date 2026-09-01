@@ -21,9 +21,9 @@ from rich.text import Text
 from textual import events
 from textual.binding import Binding, BindingType
 from textual.message import Message
-from textual.widgets import Input
 
 from release_tracker import query
+from release_tracker.tui.inputs import TextInput
 
 __all__ = ["CompletingInput", "Suggester", "completion_hint", "field_suggester"]
 
@@ -95,7 +95,7 @@ class _Walk:
     chosen: bool = False
 
 
-class CompletingInput(Input):
+class CompletingInput(TextInput):
     """An Input that offers a completion as a dim tail; tab takes it, tab again walks.
 
     Tab is always the explicit way to take an offer. ``implicit_accept`` adds the two
@@ -104,22 +104,13 @@ class CompletingInput(Input):
     would contradict the screen). Where the field is only text, they would swallow a
     deliberate freeform value that happens to be a prefix of a known one.
 
-    Beyond the completion itself it fixes one Textual default: ctrl+backspace deletes the
-    word to the *left*, where Textual binds it to ``delete_right_word``, which is not what
-    the chord means anywhere else. (It only arrives at all when the terminal disambiguates
-    it — kitty keyboard protocol; alt+backspace and ctrl+w are bound alongside for the
-    terminals that send ^H and cannot tell it from a plain backspace.)
+    Its word-delete chords come from :class:`~release_tracker.tui.inputs.TextInput`, so a
+    field that completes and one that does not edit alike.
     """
 
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("tab", "complete(1)", "Complete", show=False),
         Binding("shift+tab", "complete(-1)", "Complete back", show=False),
-        Binding(
-            "ctrl+backspace,ctrl+h,alt+backspace",
-            "delete_left_word",
-            "Delete word left",
-            show=False,
-        ),
     ]
 
     class Offered(Message):

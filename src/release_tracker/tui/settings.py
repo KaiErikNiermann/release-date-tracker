@@ -30,6 +30,7 @@ from release_tracker.config import Settings, field_name_for, get_settings, secre
 from release_tracker.config_file import FIELD_DOCS, FieldDoc
 from release_tracker.credentials import CheckResult, check_tmdb, check_twitch
 from release_tracker.tui.edit import Row
+from release_tracker.tui.inputs import TextInput
 
 __all__ = ["SettingsScreen"]
 
@@ -61,7 +62,7 @@ class SettingRow(Row):
 
     def __init__(self, doc: FieldDoc, current: str, origin: str) -> None:
         placeholder = current or doc.blurb
-        super().__init__(doc.alias, Input(placeholder=placeholder))
+        super().__init__(doc.alias, TextInput(placeholder=placeholder))
         self.doc = doc
         self.origin = origin
 

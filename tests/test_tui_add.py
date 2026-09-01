@@ -96,6 +96,28 @@ async def _search_for(pilot: Any, screen: AddScreen, text: str) -> None:
     )
 
 
+# --- editing the query ---------------------------------------------------------------
+
+
+async def test_the_bar_deletes_the_word_to_the_left(app: RdtApp) -> None:
+    """The browse bar's chord, on the add bar. Textual binds ctrl+backspace and
+    alt+backspace to `delete_right_word`; at the end of a line — where a query is
+    normally being edited — that has nothing to delete, so the chord reads as dead."""
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _open_add(app, pilot)
+        bar = screen.query_one("#add-query", Input)
+        bar.focus()
+        await pilot.press(*"dune kind:movie")
+
+        await pilot.press("alt+backspace")
+        await pilot.pause()
+        assert bar.value == "dune kind:"
+
+        await pilot.press("ctrl+backspace")
+        await pilot.pause()
+        assert bar.value == "dune "  # the field's own chord, which the terminal may send instead
+
+
 # --- moving between the bar and the candidates --------------------------------------
 
 

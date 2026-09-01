@@ -48,6 +48,7 @@ from release_tracker.tui.completing import (
     field_suggester,
 )
 from release_tracker.tui.cycle import Cycle
+from release_tracker.tui.inputs import TextInput
 from release_tracker.views import DateChange, WorkCard
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -168,7 +169,7 @@ class _CompletingRow(Row):
 
 class TitleRow(Row):
     def __init__(self, title: str) -> None:
-        super().__init__("title", Input(value=title))
+        super().__init__("title", TextInput(value=title))
 
 
 def _num(value: int | None) -> str:
@@ -187,7 +188,7 @@ class CoordRow(Row):
 
     def __init__(self, field: Literal["season", "part", "part label"], value: str) -> None:
         placeholder = DEFAULT_PART_LABEL if field == "part label" else "e.g. 2"
-        super().__init__(field, Input(value=value, placeholder=placeholder))
+        super().__init__(field, TextInput(value=value, placeholder=placeholder))
         self.field_name = field
 
 
@@ -225,7 +226,7 @@ class DateRow(Row):
         picker = None if channel is not None else Cycle([c.value for c in _CHANNELS])
         super().__init__(
             channel.value if channel is not None else "",
-            Input(value=edtf, placeholder=pulled or DATE_HELP),
+            TextInput(value=edtf, placeholder=pulled or DATE_HELP),
             picker=picker,
         )
         self.channel = channel
@@ -297,7 +298,7 @@ class PlatformRow(_CompletingRow):
 
 class NoteAddRow(Row):
     def __init__(self) -> None:
-        super().__init__("note", Input(placeholder="add a note…"))
+        super().__init__("note", TextInput(placeholder="add a note…"))
 
 
 class NoteRow(Static):
