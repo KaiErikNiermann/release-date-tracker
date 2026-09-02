@@ -16,13 +16,22 @@ from release_tracker.sources.base import MediaGraph
 
 # --- LLM themes: a standing billing/auth failure is not paid for twice -----------------------
 def _api_error(code: str, err_type: str = "insufficient_quota") -> Exception:
-    """A 429 shaped like OpenAI's. `code`/`type` are the two fields the gate reads."""
+    """A 429 shaped like OpenAI's. `code`/`type` are the two fields the gate reads.
+
+    Built with ``httpx2``, not our own ``httpx``. The two coexist: openai 3.x moved to
+    httpx 2.x, which ships under a *new distribution name* rather than as an upgrade, so
+    ``APIStatusError.__init__`` is annotated against a ``Response`` class that is not the
+    one our client uses. It is duck-typed at runtime and both work, but naming the wrong
+    one here would be a type error over a response nothing reads — the gate looks only at
+    the body. ``httpx`` stays right below for ``ConnectError``, which really is ours.
+    """
+    import httpx2
     from openai import RateLimitError
 
-    request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+    request = httpx2.Request("POST", "https://api.openai.com/v1/chat/completions")
     return RateLimitError(
         "429",
-        response=httpx.Response(429, request=request),
+        response=httpx2.Response(429, request=request),
         body={"message": "rate limited", "type": err_type, "code": code},
     )
 
