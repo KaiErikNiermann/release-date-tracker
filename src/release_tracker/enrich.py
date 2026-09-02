@@ -27,6 +27,7 @@ from release_tracker.deltas import (
     estimate_theatrical_from_premiere,
     match_studio,
 )
+from release_tracker.edits import add_series
 from release_tracker.logging import get_logger
 from release_tracker.models import (
     Certainty,
@@ -265,20 +266,17 @@ def _write_series(
     part: int | None = None,
 ) -> None:
     name, source_id = series
-    node = Node.create(NodeKind.SERIES, name, source=provider, source_id=source_id, owned=False)
-    db.upsert_node(node)
-    db.upsert_edge(
-        Edge(
-            src_id=entity.id,
-            dst_id=node.id,
-            relation=RelationKind.PART_OF_SERIES,
-            ordinal=ordinal,  # the season number, for "all seasons of X" queries
-            part=part,  # the mid-season cut (Part/Volume/Cour N) within the season
-            source_provider=provider,
-            source_tier=SourceTier.AGGREGATOR,
-            confidence=0.9,
-            fetched_at=now,
-        )
+    add_series(
+        db,
+        entity,
+        name,
+        source=provider,
+        source_id=source_id,
+        ordinal=ordinal,
+        part=part,
+        tier=SourceTier.AGGREGATOR,
+        confidence=0.9,
+        fetched_at=now,
     )
 
 

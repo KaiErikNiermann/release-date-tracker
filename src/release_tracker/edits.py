@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Collection
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 
 from release_tracker.clock import utc_now
 from release_tracker.dates_edtf import parse_edtf, to_edtf
@@ -50,6 +50,7 @@ __all__ = [
     "NoSeriesError",
     "add_credit",
     "add_platform",
+    "add_series",
     "add_tag",
     "clear_date",
     "manual_dates",
@@ -334,20 +335,73 @@ def add_credit(
 
 
 def add_tag(
-    db: Database, entity: Entity, name: str, kind: DescriptorKind = DescriptorKind.GENRE
+    db: Database,
+    entity: Entity,
+    name: str,
+    kind: DescriptorKind = DescriptorKind.GENRE,
+    *,
+    inferred: bool = False,
 ) -> Node:
-    """Tag a work with a genre, theme, mood, style or origin (a what-edge)."""
-    node = Node.create(NodeKind.DESCRIPTOR, name, descriptor_kind=kind, owned=True)
+    """Tag a work with a genre, theme, mood, style or origin (a what-edge).
+
+    ``inferred`` is the same distinction :func:`add_platform` draws with ``predicted``: a tag
+    carried from a sequel's predecessor is our guess, not the author's statement, so it goes
+    in unowned at MODEL tier and a later pull that reads the real genres outranks it.
+    """
+    node = Node.create(NodeKind.DESCRIPTOR, name, descriptor_kind=kind, owned=not inferred)
     db.upsert_node(node)
     db.upsert_edge(
         Edge(
             src_id=entity.id,
             dst_id=node.id,
             relation=RelationKind.EXHIBITS,
-            source_provider=USER_PROVIDER,
-            source_tier=SourceTier.OFFICIAL,
-            confidence=1.0,
-            owned=True,
+            source_provider="model" if inferred else USER_PROVIDER,
+            source_tier=SourceTier.MODEL if inferred else SourceTier.OFFICIAL,
+            confidence=0.4 if inferred else 1.0,
+            owned=not inferred,
+        )
+    )
+    return node
+
+
+def add_series(
+    db: Database,
+    entity: Entity,
+    name: str,
+    *,
+    source: str,
+    source_id: str | None = None,
+    ordinal: int | None = None,
+    part: int | None = None,
+    tier: SourceTier = SourceTier.OFFICIAL,
+    confidence: float = 1.0,
+    fetched_at: datetime | None = None,
+) -> Node:
+    """Put a work in a series, at whatever provenance the caller can honestly claim.
+
+    The one writer of ``PART_OF_SERIES``, because the node id is the part that has to agree
+    across callers: :func:`set_continuation` mints predecessor nodes as
+    ``series:<source>:<source_id>`` and a series written any other way would never collapse
+    with them, leaving the continuation chain broken at a name it cannot match.
+
+    ``ordinal`` means the season number for TV and the release-order entry for a film; both
+    are the source's own sequence rather than a title parse. ``tier`` is how a *carried*
+    link stays distinguishable from a read one — a sequel positioned against its predecessor
+    goes in at ``MODEL``, so a later pull that actually reads the franchise outranks it.
+    """
+    node = Node.create(NodeKind.SERIES, name, source=source, source_id=source_id, owned=False)
+    db.upsert_node(node)
+    db.upsert_edge(
+        Edge(
+            src_id=entity.id,
+            dst_id=node.id,
+            relation=RelationKind.PART_OF_SERIES,
+            ordinal=ordinal,  # the season number, for "all seasons of X" queries
+            part=part,  # the mid-season cut (Part/Volume/Cour N) within the season
+            source_provider=source,
+            source_tier=tier,
+            confidence=confidence,
+            fetched_at=fetched_at,
         )
     )
     return node

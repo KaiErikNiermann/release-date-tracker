@@ -421,6 +421,7 @@ class AddScreen(ModalScreen[Entity | None]):
                 year_hint=typed.year,
                 season_hint=typed.season,
                 hits=hits,
+                settings=self.app.settings,
             )
         except Exception as exc:  # a dead provider must not kill the palette
             # The escape hatch matters most when the search itself is down, so the row still

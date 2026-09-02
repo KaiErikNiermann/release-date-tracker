@@ -21,14 +21,16 @@ from release_tracker.db import Database
 from release_tracker.drafts import PREDECESSOR_KEY, Draft
 from release_tracker.models import (
     ConsumptionState,
+    CreditRole,
     Entity,
     MediaKind,
     Node,
     NodeKind,
     RelationKind,
+    SourceTier,
     WorkRelation,
 )
-from release_tracker.sources.base import Candidate
+from release_tracker.sources.base import Candidate, Credit, MediaGraph
 from release_tracker.sources.wikidata import Lineage
 from release_tracker.tech import CATEGORY_OVERRIDE_KEY, TechCategory, category_of
 from release_tracker.titles import slice_title
@@ -401,3 +403,186 @@ async def test_no_edge_is_written_when_the_family_is_not_tracked(
     assert entity is not None
     assert db.edges_from(entity.id, RelationKind.DERIVED_FROM) == []
     assert db.get_entity(Entity.make_id("Steam Deck", MediaKind.TECH)) is None
+
+
+# --- what a predecessor lends an entry nobody has listed ----------------------------------
+@pytest.fixture
+def sibling(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every sibling comes back in the Fallout collection, with no client and no network."""
+
+    async def _graph(*_a: object, **_k: object) -> MediaGraph:
+        return MediaGraph(
+            genres=("RPG", "Shooter"),
+            series=("Fallout", "1234"),
+            credits=(Credit(NodeKind.ORG, CreditRole.DEVELOPER, "Bethesda Game Studios"),),
+        )
+
+    monkeypatch.setattr(drafts, "_sibling_graph", _graph)
+
+
+@pytest.fixture
+def standalone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The sibling exists but is in no collection — a name match and nothing else."""
+
+    async def _graph(*_a: object, **_k: object) -> MediaGraph:
+        return MediaGraph(genres=("RPG",), series=None)
+
+    monkeypatch.setattr(drafts, "_sibling_graph", _graph)
+
+
+_FALLOUT_4 = _hit("Fallout 4", MediaKind.GAME, 0.9)
+
+
+async def test_a_sequel_carries_its_predecessors_franchise(
+    sibling: None, settings: Settings
+) -> None:
+    """The `fallout 5` case. Nothing has listed it, but the search for it still returned the
+    rest of the series, and that sibling knows what franchise this belongs to."""
+    del sibling
+    carried = await drafts.infer_franchise(None, settings, MediaKind.GAME, [_FALLOUT_4])  # type: ignore[arg-type]
+    assert carried is not None
+    assert carried.predecessor == "Fallout 4"
+    assert carried.series == ("Fallout", "1234")
+    assert carried.genres == ("RPG", "Shooter")
+
+
+async def test_the_studio_is_never_carried(sibling: None, settings: Settings) -> None:
+    """Contradicted 3 times in 10 measured pairs — New Vegas to Fallout 4 among them. The
+    graph hands us a developer and `Carried` has nowhere to put it, which is the point."""
+    del sibling
+    carried = await drafts.infer_franchise(None, settings, MediaKind.GAME, [_FALLOUT_4])  # type: ignore[arg-type]
+    assert carried is not None
+    assert not any("Bethesda" in r for r in carried.reasons)
+
+
+async def test_a_sibling_in_no_collection_carries_nothing(
+    standalone: None, settings: Settings
+) -> None:
+    """The gate that separates this from a prefix rule. A shared word is not a franchise, so
+    a genre must never come across on the strength of one."""
+    del standalone
+    assert await drafts.infer_franchise(None, settings, MediaKind.GAME, [_FALLOUT_4]) is None  # type: ignore[arg-type]
+
+
+async def test_a_weak_sibling_is_not_a_sibling(sibling: None, settings: Settings) -> None:
+    """`MATCH_FLOOR` is the same line the capture path uses for "we don't trust this match" —
+    below it the hit says nothing about what you typed, franchise included."""
+    del sibling
+    weak = [_hit("Fallout 4", MediaKind.GAME, 0.2)]
+    assert await drafts.infer_franchise(None, settings, MediaKind.GAME, weak) is None  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("kind", [MediaKind.TV, MediaKind.BOOK, MediaKind.TECH])
+async def test_only_films_and_games_have_a_collection_to_read(
+    kind: MediaKind, sibling: None, settings: Settings
+) -> None:
+    """TV carries its franchise through seasons, and the rest have no collection anywhere."""
+    del sibling
+    hits = [_hit("Whatever", kind, 0.9)]
+    assert await drafts.infer_franchise(None, settings, kind, hits) is None  # type: ignore[arg-type]
+
+
+async def test_a_dead_source_costs_the_franchise_and_not_the_row(
+    monkeypatch: pytest.MonkeyPatch, settings: Settings
+) -> None:
+    """This runs on every keystroke's search. Losing the entry — and the hit list with it —
+    because a genre lookup timed out is the wrong end of that trade."""
+
+    async def _boom(*_a: object, **_k: object) -> MediaGraph:
+        raise TimeoutError("igdb is having a day")
+
+    monkeypatch.setattr(drafts, "_sibling_graph", _boom)
+    assert await drafts.infer_franchise(None, settings, MediaKind.GAME, [_FALLOUT_4]) is None  # type: ignore[arg-type]
+
+
+async def test_every_carried_field_names_what_it_came_from(
+    sibling: None, settings: Settings
+) -> None:
+    """The review screen prints these verbatim; an unattributed prefill is one the reader has
+    to re-derive to trust, and then it has saved nothing."""
+    del sibling
+    carried = await drafts.infer_franchise(None, settings, MediaKind.GAME, [_FALLOUT_4])  # type: ignore[arg-type]
+    assert carried is not None
+    assert len(carried.reasons) == 2
+    assert all("Fallout 4" in reason for reason in carried.reasons)
+
+
+async def test_the_carry_reaches_the_freeform_draft(sibling: None, settings: Settings) -> None:
+    """The ladder's own rung, not a helper nobody calls: the reasons have to land on the
+    draft the review screen is handed."""
+    del sibling
+    draft = await drafts.infer_freeform(
+        None,  # type: ignore[arg-type]
+        "Fallout 5",
+        hits=[_FALLOUT_4],
+        settings=settings,
+    )
+    assert draft.kind is MediaKind.GAME  # read off the sibling, by the existing rung
+    assert draft.carried is not None
+    assert any("franchise carried from" in r for r in draft.reasons)
+
+
+async def test_without_settings_the_franchise_rung_does_not_fire(sibling: None) -> None:
+    """Same shape as an unconfigured source: no credentials, no claim."""
+    del sibling
+    draft = await drafts.infer_freeform(None, "Fallout 5", hits=[_FALLOUT_4])  # type: ignore[arg-type]
+    assert draft.carried is None
+
+
+# --- and what it writes -------------------------------------------------------------------
+async def test_a_carried_franchise_is_written_as_a_guess(
+    db: Database, settings: Settings, sibling: None
+) -> None:
+    """MODEL tier and unowned, so the day IGDB lists this entry its own pull outranks us.
+    Marking a guess as the user's own statement would make it permanent."""
+    del sibling
+    draft = await drafts.infer_freeform(
+        None,  # type: ignore[arg-type]
+        "Fallout 5",
+        hits=[_FALLOUT_4],
+        settings=settings,
+    )
+    entity = await drafts.commit(db, settings, draft, None)  # type: ignore[arg-type]
+    assert entity is not None
+
+    (series,) = db.edges_from(entity.id, RelationKind.PART_OF_SERIES)
+    assert series.source_tier is SourceTier.MODEL
+    assert not series.owned
+    node = db.get_nodes([series.dst_id])[series.dst_id]
+    assert node.name == "Fallout"
+
+    tags = db.edges_from(entity.id, RelationKind.EXHIBITS)
+    named = {db.get_nodes([e.dst_id])[e.dst_id].name for e in tags}
+    assert named == {"RPG", "Shooter"}
+    assert all(e.source_tier is SourceTier.MODEL and not e.owned for e in tags)
+    db.close()
+
+
+async def test_the_series_node_is_keyed_so_a_later_pull_collapses_onto_it(
+    db: Database, settings: Settings, sibling: None
+) -> None:
+    """The whole reason `add_series` is one function: a node minted from the name alone would
+    never merge with the one enrichment writes, leaving two Fallouts in the graph."""
+    del sibling
+    draft = await drafts.infer_freeform(
+        None,  # type: ignore[arg-type]
+        "Fallout 5",
+        hits=[_FALLOUT_4],
+        settings=settings,
+    )
+    entity = await drafts.commit(db, settings, draft, None)  # type: ignore[arg-type]
+    assert entity is not None
+    (series,) = db.edges_from(entity.id, RelationKind.PART_OF_SERIES)
+    want = Node.make_id(NodeKind.SERIES, "Fallout", source="model", source_id="1234")
+    assert series.dst_id == want
+    db.close()
+
+
+async def test_a_draft_with_nothing_carried_writes_nothing(
+    db: Database, settings: Settings
+) -> None:
+    entity = await drafts.commit(db, settings, Draft("Whatever", MediaKind.GAME), None)  # type: ignore[arg-type]
+    assert entity is not None
+    assert db.edges_from(entity.id, RelationKind.PART_OF_SERIES) == []
+    assert db.edges_from(entity.id, RelationKind.EXHIBITS) == []
+    db.close()

@@ -27,13 +27,14 @@ from dataclasses import dataclass, replace
 import httpx
 
 from release_tracker.capture import capture_work, write_work
-from release_tracker.config import Settings
+from release_tracker.config import Settings, secret
 from release_tracker.db import Database
-from release_tracker.edits import USER_PROVIDER, set_date
+from release_tracker.edits import USER_PROVIDER, add_series, add_tag, set_date
 from release_tracker.logging import get_logger
 from release_tracker.lookup import MATCH_FLOOR, report_for_candidate
 from release_tracker.models import (
     ConsumptionState,
+    DescriptorKind,
     Edge,
     Entity,
     MediaKind,
@@ -42,7 +43,9 @@ from release_tracker.models import (
     SourceTier,
     WorkRelation,
 )
-from release_tracker.sources.base import Candidate
+from release_tracker.sources.base import Candidate, MediaGraph
+from release_tracker.sources.igdb import IgdbSource
+from release_tracker.sources.tmdb import TmdbSource
 from release_tracker.sources.wikidata import Lineage, find_lineage
 from release_tracker.tech import (
     CATEGORY_OVERRIDE_KEY,
@@ -54,9 +57,11 @@ from release_tracker.titles import Version, slice_title, split_version
 
 __all__ = [
     "PREDECESSOR_KEY",
+    "Carried",
     "Draft",
     "commit",
     "for_candidate",
+    "infer_franchise",
     "infer_freeform",
     "infer_synthetic",
     "prefill",
@@ -73,6 +78,44 @@ PREDECESSOR_KEY = "wikidata_predecessor"
 # first. Store and retail channels are a puller's business.
 _DRAFT_CHANNEL = ReleaseChannel.PRIMARY
 
+# Provenance for a carried franchise link: ours, not the source's and not the user's. It
+# shares `enrich`'s predicted-platform provider so the two render alike — both are things we
+# worked out rather than read.
+_INFERRED_PROVIDER = "model"
+
+
+@dataclass(frozen=True, slots=True)
+class Carried:
+    """What a sibling lends an entry no database has heard of yet.
+
+    Two fields, and the shortness is the measurement rather than caution. Across ten sequel
+    pairs the developer was contradicted 3 times and the publisher 4 — New Vegas to Fallout
+    4, Portal to Portal 2, Wizard of Legend to its sequel — while genre held 0 for 10,
+    including the three 2D-to-3D jumps (Risk of Rain 2, Wizard of Legend 2, Enter the
+    Gungeon 2) that keep overlapping genres anyway. So the franchise link and the genres
+    come across; the studio never does.
+
+    The franchise link is also the *licence* for the rest. A sibling in no collection lends
+    nothing however close its name reads, which is what keeps "Fallout: New Vegas" from
+    telling us about "Fallout 5" on the strength of a shared word.
+    """
+
+    predecessor: str  # the sibling's title, named in every line this produces
+    series: tuple[str, str | None]  # (name, source_id), as `MediaGraph.series` carries it
+    genres: tuple[str, ...] = ()
+
+    @property
+    def reasons(self) -> tuple[str, ...]:
+        """One line per field carried, each naming what it was carried from.
+
+        The review screen prints these verbatim, which is the whole licence for guessing:
+        a prefill costs one keystroke to correct *if* you can see it is a guess.
+        """
+        said = [f"franchise carried from “{self.predecessor}”, which is in the same collection"]
+        if self.genres:
+            said.append(f"genre carried from “{self.predecessor}”: {', '.join(self.genres)}")
+        return tuple(said)
+
 
 @dataclass(frozen=True, slots=True)
 class Draft:
@@ -88,6 +131,7 @@ class Draft:
     season: int | None = None  # TV only; structured coords, as `rdt add --season` writes them
     part: int | None = None  # TV only; the mid-season cut within the season
     part_label: str | None = None  # what that cut was called — "Part"/"Act"/"Vol"
+    carried: Carried | None = None  # what a predecessor lends a sequel nothing has listed
     # Why each field looks the way it does, one line per inference that fired. The review
     # screen prints these verbatim: a prefill nobody can account for is worse than none.
     reasons: tuple[str, ...] = ()
@@ -216,13 +260,18 @@ async def infer_freeform(
     year_hint: int | None = None,
     season_hint: int | None = None,
     hits: Sequence[tuple[MediaKind, Candidate]] = (),
+    settings: Settings | None = None,
 ) -> Draft:
-    """:func:`prefill`, plus the one inference that needs the network.
+    """:func:`prefill`, plus the inferences that need the network.
 
-    Tech is the only kind with a lineage worth chasing, so when the ladder lands on tech the
-    device path runs on top and folds in the generation marker and the predecessor. One row
-    comes out either way — the unannounced-device case is the richest rung of this ladder,
-    not a feature sitting beside it.
+    Two of them, one per kind of unlisted thing. Tech has a lineage worth chasing, so when
+    the ladder lands on tech the device path runs on top and folds in the generation marker
+    and the predecessor. Films and games have a *franchise* worth chasing instead, and the
+    sibling that carries it is already in ``hits``. One row comes out either way — the
+    unannounced case is the richest rung of this ladder, not a feature beside it.
+
+    ``settings`` is what the franchise rung needs to reach IGDB and TMDB; without it that
+    rung simply does not fire, which is the same shape as a source being unconfigured.
     """
     draft = prefill(
         text,
@@ -231,14 +280,74 @@ async def infer_freeform(
         season_hint=season_hint,
         hits=hits,
     )
-    if draft.kind is not MediaKind.TECH:
+    if draft.kind is MediaKind.TECH:
+        device = await infer_synthetic(client, draft.title)
+        if device is None:  # no generation marker — nothing to look a family up by
+            return draft
+        # The lineage speaks for itself on the review screen (`follows <predecessor>`), so it
+        # adds no reason line here; only the fields it actually filled come across.
+        return replace(draft, version=device.version, predecessor=device.predecessor)
+    if settings is None:
         return draft
-    device = await infer_synthetic(client, draft.title)
-    if device is None:  # no generation marker — nothing to look a family up by
+    carried = await infer_franchise(client, settings, draft.kind, hits)
+    if carried is None:
         return draft
-    # The lineage speaks for itself on the review screen (`follows <predecessor>`), so it adds
-    # no reason line here; only the fields it actually filled come across.
-    return replace(draft, version=device.version, predecessor=device.predecessor)
+    return replace(draft, carried=carried, reasons=(*draft.reasons, *carried.reasons))
+
+
+async def infer_franchise(
+    client: httpx.AsyncClient,
+    settings: Settings,
+    kind: MediaKind,
+    hits: Sequence[tuple[MediaKind, Candidate]],
+) -> Carried | None:
+    """What the strongest sibling in the search results lends an unlisted sequel.
+
+    No stem search and no prefix rule, because neither is needed: searching a film or a game
+    that has not been listed yet already surfaces the rest of its series, which is the same
+    observation :func:`_consensus_kind` makes about the kind. "Fallout 5" returns Fallout 4.
+
+    What licenses the carry is the sibling being in a **collection**, not its name looking
+    similar. A sibling in none lends nothing however close it reads — that is the gate
+    between "Fallout 5 follows Fallout 4" and the thing it must never say, which is that
+    "Fallout: New Vegas" is a Fallout-numbered game.
+
+    None whenever any link in that chain is missing, and never an exception: this runs on
+    every keystroke's search in the add screen, and a franchise it cannot read is not a
+    reason to lose the row.
+    """
+    if kind not in (MediaKind.MOVIE, MediaKind.GAME):
+        return None  # TV carries its franchise through seasons; the rest have no collection
+    sibling = next((c for k, c in hits if k is kind and c.score >= MATCH_FLOOR), None)
+    if sibling is None:
+        return None
+    try:
+        graph = await _sibling_graph(client, settings, kind, sibling.canonical_id)
+    except Exception as exc:
+        # This rides on top of an already-good draft and runs on every keystroke's search.
+        # Losing the row — and with it the hit list the caller's own handler resets — because
+        # a genre lookup timed out is far worse than adding an entry with no franchise on it.
+        log.warning("drafts.franchise_failed", predecessor=sibling.title, error=str(exc))
+        return None
+    if graph is None or graph.series is None:
+        return None
+    log.info(
+        "drafts.franchise",
+        predecessor=sibling.title,
+        series=graph.series[0],
+        genres=len(graph.genres),
+    )
+    return Carried(predecessor=sibling.title, series=graph.series, genres=graph.genres)
+
+
+async def _sibling_graph(
+    client: httpx.AsyncClient, settings: Settings, kind: MediaKind, source_id: str
+) -> MediaGraph | None:
+    """The who/what/series a source already assembles, for one sibling — one request."""
+    if kind is MediaKind.MOVIE:
+        key = secret(settings.tmdb_api_key)
+        return await TmdbSource().movie_graph(client, key, source_id) if key else None
+    return await IgdbSource().game_graph(client, settings, source_id)
 
 
 async def infer_synthetic(client: httpx.AsyncClient, text: str) -> Draft | None:
@@ -336,8 +445,39 @@ async def commit(
         except ValueError as exc:
             log.warning("drafts.bad_edtf", title=draft.title, edtf=draft.edtf, error=str(exc))
     _link_predecessor(db, entity, draft)
+    _write_carried(db, entity, draft)
     log.info("drafts.committed", title=draft.title, kind=draft.kind.value)
     return entity
+
+
+def _write_carried(db: Database, entity: Entity, draft: Draft) -> None:
+    """Persist what the predecessor lent, at the provenance of a guess.
+
+    MODEL tier and unowned, the same footing ``add_platform(predicted=True)`` uses. That is
+    not hedging for its own sake: the day IGDB or TMDB lists this entry, its own pull reads
+    the real franchise and genres, and a carried edge has to be the one that loses. Marking
+    these as the user's own statement would make them permanent.
+    """
+    if draft.carried is None:
+        return
+    name, source_id = draft.carried.series
+    add_series(
+        db,
+        entity,
+        name,
+        source=_INFERRED_PROVIDER,
+        source_id=source_id,
+        tier=SourceTier.MODEL,
+        confidence=0.4,
+    )
+    for genre in draft.carried.genres:
+        add_tag(db, entity, genre, DescriptorKind.GENRE, inferred=True)
+    log.info(
+        "drafts.carried",
+        entity=entity.title,
+        predecessor=draft.carried.predecessor,
+        genres=len(draft.carried.genres),
+    )
 
 
 def _link_predecessor(db: Database, entity: Entity, draft: Draft) -> None:
