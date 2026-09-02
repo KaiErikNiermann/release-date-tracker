@@ -1,6 +1,6 @@
 [project]
 name = "release-date-tracker"
-version = "0.1.0"
+version = "0.2.0"
 description = "Aggregate and resolve concrete release dates (theatrical, digital, store, retail), locations and prices for movies/TV/games/tech from structured APIs first, scraped rumors second."
 authors = [{ name = "Kai Niermann", email = "kai.niermann@googlemail.com" }]
 readme = "README.md"
