@@ -74,6 +74,7 @@ _CORE_FIELDS: frozenset[str] = frozenset(
         "platform",
         "region",
         "series",
+        "stance",
         "person",
         "year",
         "season",
@@ -433,6 +434,10 @@ def _match_term(term: Term, row: TrackRow) -> bool:
         )
     if field == "state":
         return _any_exact(values, row.state.value)
+    if field == "stance":
+        # Absent is not a value: nobody has asked a source about this row yet, which is a
+        # different thing from every stance a source can take. So it matches nothing.
+        return row.stance is not None and _any_exact(values, row.stance.value)
     if field == "is":
         return _match_is(values, row)
     if field == "tag":

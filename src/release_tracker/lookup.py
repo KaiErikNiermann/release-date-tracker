@@ -26,6 +26,7 @@ from typing import Literal
 
 import httpx
 
+from release_tracker.clock import utc_today
 from release_tracker.config import Settings, secret
 from release_tracker.contingency import REGION_WILDCARD
 from release_tracker.deltas import (
@@ -54,6 +55,7 @@ from release_tracker.resolve import (
     earliest_confirmed_theatrical,
     earliest_premiere,
 )
+from release_tracker.seasons import DidYouMean, check_season
 from release_tracker.sources import justwatch, sources_for, unavailable_for
 from release_tracker.sources.base import (
     Candidate,
@@ -238,6 +240,82 @@ async def lookup(
         return await report_for_candidate(
             client, query, kind, cand, settings, season=season, franchise=franchise
         )
+
+
+@dataclass(slots=True, frozen=True)
+class ContinuityAnswer:
+    """What carries a season the show itself does not, for one asked question.
+
+    ``mean`` is None whenever there is nothing to offer, and ``reasons`` then says which of
+    the several reasons it was: no match, no id to compare casts from, or — the common and
+    correct one — the show carries that season perfectly well.
+    """
+
+    query: str
+    season: int
+    base: Candidate | None = None
+    mean: DidYouMean | None = None
+    reasons: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "query": self.query,
+            "season": self.season,
+            "matched_title": self.base.title if self.base else None,
+            "offer": [
+                {
+                    "title": s.title,
+                    "id": s.key,
+                    "year": s.year,
+                    "lands_on_season": self.mean.native(s) if self.mean else None,
+                    "shared_cast": s.shared_cast,
+                    "reasons": list(s.reasons),
+                }
+                for s in (self.mean.offer if self.mean else ())
+            ],
+            "after": self.mean.after if self.mean else None,
+            "reasons": [*(self.mean.verdict.reasons if self.mean else ()), *self.reasons],
+        }
+
+
+async def continuity(query: str, settings: Settings, season: int) -> ContinuityAnswer:
+    """Which same-named show carries season N, ranked by how much cast it shares.
+
+    The CLI half of the add screen's picker, resolved through the same
+    :meth:`TmdbSource.continuations` so the two cannot rank a franchise differently. Never
+    decides: a list a human picks from, exactly as :class:`DidYouMean` documents.
+    """
+    async with make_client() as client:
+        cands = await _search_kind(client, query, MediaKind.TV, settings)
+        if not cands or cands[0].score < MATCH_FLOOR:
+            said = f"No confident TV match for {query!r}."
+            return ContinuityAnswer(query, season, reasons=(said,))
+        base = cands[0]
+        key = secret(settings.tmdb_api_key)
+        if not key or base.id_key != "tmdb":
+            return ContinuityAnswer(
+                query,
+                season,
+                base,
+                reasons=("Comparing casts needs a TMDB id and key — neither is available here.",),
+            )
+        src = TmdbSource()
+        shape = await src.tv_shape(client, key, base.canonical_id)
+        verdict = check_season(shape, season, utc_today())
+        if not verdict.out_of_range:
+            return ContinuityAnswer(
+                query,
+                season,
+                base,
+                reasons=(
+                    f"TMDB lists season {season} of “{base.title}” — nothing else carries it.",
+                ),
+            )
+        # Everything else the same search returned: the reboot came back beside the base show,
+        # which is why this costs no second search.
+        pool = [c for c in cands[1:] if c.id_key == "tmdb"]
+        offer, why = await src.continuations(client, key, base, pool)
+        return ContinuityAnswer(query, season, base, DidYouMean(verdict, offer, why))
 
 
 async def report_for_candidate(

@@ -29,8 +29,8 @@ from textual.timer import Timer
 from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
 
-from release_tracker import drafts, edits, query
-from release_tracker.capture import capture_work
+from release_tracker import drafts, query
+from release_tracker.capture import capture_work, take_continuation
 from release_tracker.config import secret
 from release_tracker.drafts import Draft
 from release_tracker.logging import get_logger
@@ -49,7 +49,6 @@ from release_tracker.seasons import (
     ShowStance,
     Successor,
     check_season,
-    rank_successors,
     stance_of,
 )
 from release_tracker.slices import SliceProposal, SliceScan, scan_slices
@@ -275,6 +274,7 @@ class AddScreen(ModalScreen[Entity | None]):
         Binding("k", "highlight(-1)", "Up", show=False),
         Binding("e", "review", "Review before adding", show=False),
         Binding("s", "seasons", "Browse this show's seasons", show=False),
+        Binding("f", "continues", "What carries this season", show=False),
         # Only meaningful inside the picker; inert elsewhere, like `e` on the bar.
         Binding("right", "expand", "Open a season's cuts", show=False),
         Binding("space", "expand", "Open a season's cuts", show=False),
@@ -535,9 +535,12 @@ class AddScreen(ModalScreen[Entity | None]):
         replacement for it — an empty result still has to say why it was empty, or a typo and
         an unconfigured source both read as "this thing does not exist"."""
         if hits:
+            # `f` is only advertised once a season is in play, which is the only time it has
+            # a question to ask — an unqualified key nobody can use reads as a broken one.
+            carries = " f: what carries it," if self._typed().season is not None else ""
             return (
                 f"{self._read_as()}[dim]{len(hits)} candidate(s) · ↓ into the list, enter adds,"
-                " e reviews first · esc back[/]"
+                f"{carries} e reviews first · esc back[/]"
             )
         prefix, tail = self._read_as(), " [dim]— or add it yourself, last row[/]"
         if missing:
@@ -574,6 +577,51 @@ class AddScreen(ModalScreen[Entity | None]):
             self._status("[dim]no TMDB id on this match — nothing to list seasons from[/]")
             return
         self.load_seasons(kind, cand)
+
+    def action_continues(self) -> None:
+        """Ask what carries the season in the bar, for the highlighted show.
+
+        The capture path asks this on its own, but only when TMDB marks the show *ended* —
+        the Dexter shape. A show TMDB still calls running can be renumbered too (Pluribus was
+        renewed before its first season aired), and there the reader has to be able to ask.
+        """
+        index = self._candidates.highlighted
+        if index is None or not 0 <= index < len(self._hits):
+            return
+        kind, cand = self._hits[index]
+        if kind is not MediaKind.TV:
+            self._status("[dim]continuity is a TV idea — this row is not a series[/]")
+            return
+        if cand.id_key != "tmdb":
+            self._status("[dim]no TMDB id on this match — nothing to compare casts from[/]")
+            return
+        if (season := self._typed().season) is None:
+            self._status("[dim]type `season:N` first — this asks what carries a season[/]")
+            return
+        self.ask_continuation(kind, cand, season)
+
+    @work(exclusive=True, group="add-continuity")
+    async def ask_continuation(self, kind: MediaKind, cand: Candidate, season: int) -> None:
+        """Check the season, then offer what carries it — or say it is already listed.
+
+        Its own worker group, the one `offer_continuation` uses: this must not be cancelled
+        by the next keystroke, and must never cancel a capture.
+        """
+        from release_tracker.tui.app import RdtApp
+
+        assert isinstance(self.app, RdtApp)
+        verdict = await self._check_season(await self.app.http(), kind, cand, season)
+        if verdict is None:
+            self._status("[dim]nothing to check this season against[/]")
+            return
+        if not verdict.out_of_range:
+            # Nothing to carry it: the show has it. Saying so beats an empty picker, and beats
+            # offering to renumber a season onto a stranger that happens to share a name.
+            self._status(
+                f"[dim]TMDB lists season {season} of “{cand.title}” — nothing else carries it[/]"
+            )
+            return
+        self.offer_continuation(cand, verdict)
 
     @work(exclusive=True, group="add-seasons")
     async def load_seasons(self, kind: MediaKind, cand: Candidate) -> None:
@@ -939,31 +987,19 @@ class AddScreen(ModalScreen[Entity | None]):
             return
         self._candidates.loading = True
         try:
-            client = await self.app.http()
-            base_cast = await self._cast(client, key, base)
-            shared = [(c, len(base_cast & await self._cast(client, key, c))) for c in pool]
+            offer, why = await TmdbSource().continuations(
+                await self.app.http(), key, base, pool, cast_memo=self._cast_memo
+            )
         except Exception as exc:
             self._candidates.loading = False
             log.warning("add.cast_error", error=str(exc))
             return
         self._candidates.loading = False
-        offer, why = rank_successors(
-            base.title,
-            [Successor(c.title, c.canonical_id, c.year, 0, n) for c, n in shared],
-        )
         if not offer:
             self.capture(picker_kind, base, season=verdict.season, checked=verdict)
             return
         self._mean = MeanPicker(MediaKind.TV, base, DidYouMean(verdict, offer, why))
         self._show_mean()
-
-    async def _cast(self, client: httpx.AsyncClient, key: str, cand: Candidate) -> frozenset[str]:
-        """A show's top cast, fetched once per session."""
-        if cand.canonical_id not in self._cast_memo:
-            self._cast_memo[cand.canonical_id] = await TmdbSource().tv_cast(
-                client, key, cand.canonical_id
-            )
-        return self._cast_memo[cand.canonical_id]
 
     def _show_mean(self) -> None:
         """Render the offer: add it anyway, or take the show that carries that season."""
@@ -1057,20 +1093,17 @@ class AddScreen(ModalScreen[Entity | None]):
         from release_tracker.tui.app import RdtApp
 
         assert isinstance(self.app, RdtApp)
-        cand = replace(picker.base, title=successor.title, canonical_id=successor.key)
         self._busy(True, f"[dim]adding “{successor.title}” — pulling dates…[/]")
-        client = await self.app.http()
         try:
-            report = await report_for_candidate(
-                client, successor.title, picker.kind, cand, self.app.settings, season=native
-            )
-            entity = await capture_work(
+            entity = await take_continuation(
                 self.app.db,
                 self.app.settings,
-                successor.title,
-                report,
-                season=native,
-                client=client,
+                kind=picker.kind,
+                base=picker.base,
+                successor=successor,
+                after=picker.ask.after,
+                native=native,
+                client=await self.app.http(),
             )
         except Exception as exc:
             self._busy(False, f"[red]add failed:[/] {exc}")
@@ -1078,18 +1111,6 @@ class AddScreen(ModalScreen[Entity | None]):
         if entity is None:
             self._busy(False, "[yellow]not tracked[/] — no canonical id to pin")
             return
-        try:
-            edits.set_continuation(
-                self.app.db,
-                entity,
-                predecessor=picker.base.title,
-                after=picker.ask.after,
-                source="tmdb",
-                source_id=picker.base.canonical_id,
-            )
-        except edits.NoSeriesError as exc:
-            # The work is captured either way; only the lineage could not be recorded.
-            log.warning("add.continuation_skipped", entity=entity.title, error=str(exc))
         self.dismiss(entity)
 
     def _busy(self, flag: bool, markup: str) -> None:

@@ -11,14 +11,16 @@ search instead of paying for a fresh TLS handshake on every capture.
 from __future__ import annotations
 
 import contextlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import httpx
 
 from release_tracker import matching
 from release_tracker.config import Settings
 from release_tracker.db import Database
+from release_tracker.edits import NoSeriesError, set_continuation
 from release_tracker.enrich import enrich_work
+from release_tracker.logging import get_logger
 from release_tracker.lookup import (
     RdReport,
     capture_candidates,
@@ -28,8 +30,11 @@ from release_tracker.lookup import (
 )
 from release_tracker.models import ConsumptionState, Entity, MediaKind, Node, NodeKind
 from release_tracker.pipeline import pull_entity
+from release_tracker.seasons import Successor
 from release_tracker.sources.base import Candidate, make_client
 from release_tracker.titles import slice_title
+
+log = get_logger("capture")
 
 __all__ = ["CaptureOutcome", "capture_work", "entity_for", "run_capture", "write_work"]
 
@@ -166,6 +171,52 @@ async def capture_work(
                 entity,
                 entry=report.franchise.entry if report.franchise else None,
             )  # who/where/what
+    return entity
+
+
+async def take_continuation(
+    db: Database,
+    settings: Settings,
+    *,
+    kind: MediaKind,
+    base: Candidate,
+    successor: Successor,
+    after: int,
+    native: int | None,
+    client: httpx.AsyncClient | None = None,
+) -> Entity | None:
+    """Capture the show that carries a season, and record that it continues the base.
+
+    Writing the edge is the point rather than a side effect: the guess happens once, here,
+    and :func:`views.franchise_position` then answers "which season of the franchise is
+    this" straight off the graph with no inference left in it.
+
+    Shared by the TUI's picker and ``rdt rd --continuity --track`` so the two write the
+    identical pair of facts. A capture that succeeds with no edge behind it is still returned
+    — the work is tracked either way, and only the lineage was lost.
+    """
+    cand = replace(base, title=successor.title, canonical_id=successor.key)
+    async with contextlib.AsyncExitStack() as stack:
+        http = client or await stack.enter_async_context(make_client())
+        report = await report_for_candidate(
+            http, successor.title, kind, cand, settings, season=native
+        )
+        entity = await capture_work(
+            db, settings, successor.title, report, season=native, client=http
+        )
+    if entity is None:
+        return None
+    try:
+        set_continuation(
+            db,
+            entity,
+            predecessor=base.title,
+            after=after,
+            source=base.id_key,
+            source_id=base.canonical_id,
+        )
+    except NoSeriesError as exc:
+        log.warning("capture.continuation_skipped", entity=entity.title, error=str(exc))
     return entity
 
 

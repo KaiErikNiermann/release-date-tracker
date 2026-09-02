@@ -11,6 +11,7 @@ Free API key: https://www.themoviedb.org/settings/api
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, cast
@@ -31,8 +32,17 @@ from release_tracker.models import (
     ReleaseChannel,
     ReleaseObservation,
     SourceTier,
+    Stance,
 )
-from release_tracker.seasons import TOP_CAST, SeasonRef, ShowShape, check_season
+from release_tracker.seasons import (
+    TOP_CAST,
+    SeasonRef,
+    ShowShape,
+    Successor,
+    check_season,
+    rank_successors,
+    stance_of,
+)
 from release_tracker.slices import Episode
 from release_tracker.sources.base import (
     Candidate,
@@ -236,6 +246,7 @@ class TmdbSource:
         url = f"https://www.themoviedb.org/tv/{tmdb_id}"
         air: date | None = None
         notes: tuple[str, ...] = ()
+        stance: Stance | None = None
 
         if season_no is not None:
             # a specific season: use ITS air_date only. A future season with no date
@@ -263,6 +274,11 @@ class TmdbSource:
                 shape = await self.tv_shape(client, key, tmdb_id)
                 verdict = check_season(shape, season_no, utc_today())
                 notes = verdict.reasons
+                # The shape is already paid for on this branch, so the stance rides free.
+                # An in-range season pull takes none: it fetches only the season, and a
+                # show-level GET per row of a refresh batch is exactly the cost this whole
+                # branch exists to avoid paying. Silence, not a claim.
+                stance = verdict.stance.stance  # ShowStance -> the shared vocabulary
                 log.info(
                     "tmdb.season_absent",
                     tmdb_id=tmdb_id,
@@ -280,6 +296,9 @@ class TmdbSource:
             air = _parse_tmdb_date(
                 nxt.get("air_date") if isinstance(nxt, dict) else detail.get("first_air_date")
             )
+            # This payload has always carried `status` and the season list; reading them here
+            # is what lets `stance:finished` find a show that ended, at no extra request.
+            stance = stance_of(_tv_shape_of(detail), utc_today()).stance
 
         if air is not None:
             observations.append(
@@ -306,7 +325,10 @@ class TmdbSource:
             observations=len(observations),
         )
         return SourceResult(
-            observations=observations, external_ids={"tmdb": str(tmdb_id)}, notes=notes
+            observations=observations,
+            external_ids={"tmdb": str(tmdb_id)},
+            notes=notes,
+            stance=stance,
         )
 
     # -- search ------------------------------------------------------------
@@ -568,6 +590,43 @@ class TmdbSource:
         ]
         return tuple(sorted(dated, key=lambda e: e.number))
 
+    async def continuations(
+        self,
+        client: httpx.AsyncClient,
+        key: str,
+        base: Candidate,
+        pool: Sequence[Candidate],
+        *,
+        cast_memo: dict[str, frozenset[str]] | None = None,
+    ) -> tuple[tuple[Successor, ...], tuple[str, ...]]:
+        """Which same-named show carries on from this one, ranked by how much cast it shares.
+
+        The shared half of the continuity answer. The TUI's picker and ``rdt rd --continuity``
+        rank through this one function because the alternative — two orderings of the same
+        question — is the single thing a parity feature must not do.
+
+        One ``/aggregate_credits`` per candidate, so it stays behind a deliberate trigger.
+        ``cast_memo`` lets a long-lived caller keep those across asks; the TUI does.
+        """
+        memo = cast_memo if cast_memo is not None else {}
+
+        async def top(cand: Candidate) -> frozenset[str]:
+            if cand.canonical_id not in memo:
+                memo[cand.canonical_id] = await self.tv_cast(client, key, cand.canonical_id)
+            return memo[cand.canonical_id]
+
+        base_cast = await top(base)
+        # Concurrent: each candidate's credits depend on nothing but its own id, and walked
+        # serially this is one round trip per same-named show before anything renders.
+        shared = await asyncio.gather(*(top(c) for c in pool))
+        return rank_successors(
+            base.title,
+            [
+                Successor(c.title, c.canonical_id, c.year, 0, len(base_cast & names))
+                for c, names in zip(pool, shared, strict=True)
+            ],
+        )
+
     async def tv_cast(self, client: httpx.AsyncClient, key: str, tmdb_id: str) -> frozenset[str]:
         """Top-billed cast of a show, as TMDB person ids.
 
@@ -660,26 +719,7 @@ class TmdbSource:
             "dict[str, Any]",
             await get_json(client, f"{BASE}/tv/{tmdb_id}", params={"api_key": key}),
         )
-        name = detail.get("name")
-        status = detail.get("status")
-        listed = detail.get("number_of_seasons")
-        seasons = [
-            SeasonRef(
-                number=number,
-                name=str(raw.get("name") or f"Season {number}").strip(),
-                air_date=_parse_tmdb_date(raw.get("air_date")),
-                episodes=int(raw.get("episode_count") or 0),
-            )
-            for raw in cast("list[dict[str, Any]]", detail.get("seasons") or [])
-            if isinstance(number := raw.get("season_number"), int)
-        ]
-        ordered = tuple(sorted(seasons, key=lambda s: (s.number == 0, s.number)))
-        return ShowShape(
-            name=str(name) if isinstance(name, str) else None,
-            status=str(status) if isinstance(status, str) else None,
-            seasons=ordered,
-            listed=listed if isinstance(listed, int) else len(ordered),
-        )
+        return _tv_shape_of(detail)
 
     async def tv_platforms(
         self, client: httpx.AsyncClient, key: str, tmdb_id: str, regions: tuple[str, ...]
@@ -847,3 +887,32 @@ def _parse_tmdb_date(value: object) -> date | None:
             return date.fromisoformat(value[:10])
         except ValueError:
             return None
+
+
+def _tv_shape_of(detail: dict[str, Any]) -> ShowShape:
+    """Read a show's shape out of a ``/tv/{id}`` payload.
+
+    Split from the fetch because ``_pull_tv`` already has this exact payload in hand on the
+    whole-show path, and re-requesting it to learn whether the show has ended would double
+    every refresh that touches a series.
+    """
+    name = detail.get("name")
+    status = detail.get("status")
+    listed = detail.get("number_of_seasons")
+    seasons = [
+        SeasonRef(
+            number=number,
+            name=str(raw.get("name") or f"Season {number}").strip(),
+            air_date=_parse_tmdb_date(raw.get("air_date")),
+            episodes=int(raw.get("episode_count") or 0),
+        )
+        for raw in cast("list[dict[str, Any]]", detail.get("seasons") or [])
+        if isinstance(number := raw.get("season_number"), int)
+    ]
+    ordered = tuple(sorted(seasons, key=lambda s: (s.number == 0, s.number)))
+    return ShowShape(
+        name=str(name) if isinstance(name, str) else None,
+        status=str(status) if isinstance(status, str) else None,
+        seasons=ordered,
+        listed=listed if isinstance(listed, int) else len(ordered),
+    )

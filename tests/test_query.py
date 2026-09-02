@@ -19,6 +19,7 @@ from release_tracker.models import (
     DatePrecision,
     DescriptorKind,
     MediaKind,
+    Stance,
 )
 from release_tracker.views import CreditLine, DateCell, PlatformLine, TagLine, TrackRow
 
@@ -36,6 +37,7 @@ def _row(
     part: int | None = None,
     franchise: int | None = None,
     bucket: Bucket = Bucket.UPCOMING,
+    stance: Stance | None = None,
     state: ConsumptionState = ConsumptionState.WANT,
     theatrical: date | None = None,
     digital: date | None = None,
@@ -72,6 +74,7 @@ def _row(
         part=part,
         franchise=franchise,
         bucket=bucket,
+        stance=stance,
         freshness=None,
         has_notes=has_notes,
         state=state,
@@ -524,3 +527,42 @@ def test_region_scoped_platforms_negate() -> None:
     row = _row(platforms=_where(("Netflix", ("US",))))
     assert not query.matches(query.parse("-on:netflix@us"), row)
     assert query.matches(query.parse("-on:netflix@jp"), row)
+
+
+# --- stance ---------------------------------------------------------------------------------
+def test_stance_asks_a_finer_question_than_the_bucket() -> None:
+    """`is:shelved` answers "will this ever arrive"; only `stance:` can ask about a film TMDB
+    calls Rumored, which lands in the ordinary upcoming queue and should."""
+    rumoured = _row(title="Gladiator III", stance=Stance.UNCERTAIN)
+    coming = _row(title="Dune: Part Three", stance=Stance.COMING)
+    assert _keep("stance:uncertain", rumoured, coming) == ["Gladiator III"]
+    assert _keep("is:upcoming", rumoured, coming) == ["Gladiator III", "Dune: Part Three"]
+
+
+def test_a_row_nobody_has_asked_about_matches_no_stance() -> None:
+    """Absent is not a value. Every pre-existing row has `stance=None`, and matching those
+    against any word would make the field answer questions it has no evidence for."""
+    silent = _row(title="Untouched")
+    for word in Stance:
+        assert _keep(f"stance:{word.value}", silent) == []
+
+
+def test_stance_is_exact_where_a_tag_is_a_substring() -> None:
+    """A closed vocabulary, like `state:` and unlike `tag:` — `stance:release` is a typo, not
+    a prefix search that quietly returns every released work."""
+    out = _row(title="Dune", stance=Stance.RELEASED)
+    assert _keep("stance:released", out) == ["Dune"]
+    assert _keep("stance:release", out) == []
+
+
+def test_every_stance_is_reachable_from_the_query_language() -> None:
+    """A persisted word with no way to ask for it is a column nobody can act on."""
+    rows = [_row(title=s.value, stance=s) for s in Stance]
+    for s in Stance:
+        assert _keep(f"stance:{s.value}", *rows) == [s.value]
+
+
+def test_stance_negates_like_every_other_field() -> None:
+    shelved = _row(title="Scalebound", stance=Stance.SHELVED)
+    coming = _row(title="Silksong", stance=Stance.COMING)
+    assert _keep("-stance:shelved", shelved, coming) == ["Silksong"]

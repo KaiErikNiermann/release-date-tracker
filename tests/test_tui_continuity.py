@@ -15,10 +15,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from textual.widgets import OptionList
+from textual.widgets import OptionList, Static
 
 from conftest import until, with_keys
-from release_tracker import views
+from release_tracker import capture as capture_module
+from release_tracker import edits, views
 from release_tracker.config import get_settings
 from release_tracker.db import Database
 from release_tracker.models import (
@@ -157,6 +158,8 @@ async def test_adding_anyway_still_writes_the_season_as_typed(
         seen.append(kw.get("season"))  # type: ignore[arg-type]
         return Entity.create("Daredevil: Season 4", MediaKind.TV, season=4)
 
+    # The anyway row is an ordinary capture off the add screen, so it goes through `add`'s
+    # own names — unlike taking a successor, which shares `capture.take_continuation`.
     monkeypatch.setattr(add_module, "report_for_candidate", _report)
     monkeypatch.setattr(add_module, "capture_work", _capture)
 
@@ -197,9 +200,11 @@ async def test_taking_the_successor_captures_it_and_records_the_continuation(
         made.append(entity)
         return entity
 
-    monkeypatch.setattr(add_module, "report_for_candidate", _report)
-    monkeypatch.setattr(add_module, "capture_work", _capture)
-    monkeypatch.setattr(add_module.edits.log, "info", lambda *_a, **_k: None)  # type: ignore[misc]
+    # Patched on `capture`, not on `add`: taking a successor is shared with
+    # `rdt rd --continuity --track`, so the seam it goes through is `capture.take_continuation`.
+    monkeypatch.setattr(capture_module, "report_for_candidate", _report)
+    monkeypatch.setattr(capture_module, "capture_work", _capture)
+    monkeypatch.setattr(edits.log, "info", lambda *_a, **_k: None)  # type: ignore[misc]
 
     async with app.run_test(size=(120, 40)) as pilot:
         screen = await _open_offer(app, pilot)
@@ -233,3 +238,60 @@ async def test_escape_walks_back_to_the_candidates(
         await pilot.pause()
         assert screen._mean is None  # pyright: ignore[reportPrivateUsage]
         assert isinstance(app.screen, AddScreen)
+
+
+# --- asking for it, rather than being offered it ---------------------------------------------
+async def test_f_offers_the_successors_for_the_season_in_the_bar(
+    app: RdtApp, world: dict[str, frozenset[str]]
+) -> None:
+    """The capture path asks this on its own, but only for a show TMDB marks ended. A running
+    show can be renumbered too, and there the reader has to be able to ask."""
+    del world
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _ask(app, pilot, "daredevil season:4")
+        options = screen.query_one("#candidates", OptionList)
+        options.highlighted = 0
+        options.focus()  # printable keys are swallowed while the bar has focus
+        await pilot.pause()
+        await pilot.press("f")
+        await until(pilot, lambda: screen._mean is not None, "the offer")  # pyright: ignore[reportPrivateUsage]
+        picker = screen._mean  # pyright: ignore[reportPrivateUsage]
+        assert picker is not None
+        assert [r.successor.title for r in picker.rows if isinstance(r, SuccessorRow)] == [_HEIR[0]]
+
+
+async def test_f_says_so_rather_than_offering_a_season_the_show_has(
+    app: RdtApp, world: dict[str, frozenset[str]]
+) -> None:
+    """Offering to renumber season 2 onto another show would be actively wrong, and an empty
+    picker would read as "we did not look"."""
+    del world
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _ask(app, pilot, "daredevil season:2")
+        options = screen.query_one("#candidates", OptionList)
+        options.highlighted = 0
+        options.focus()  # printable keys are swallowed while the bar has focus
+        await pilot.pause()
+        await pilot.press("f")
+        await until(
+            pilot,
+            lambda: "lists season 2" in str(screen.query_one("#add-status", Static).content),
+            "the decline",
+        )
+        assert screen._mean is None  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_f_needs_a_season_to_ask_about(app: RdtApp, world: dict[str, frozenset[str]]) -> None:
+    """Without one there is no question — and an unqualified key that silently does nothing
+    reads as a broken one."""
+    del world
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _ask(app, pilot, "daredevil")
+        options = screen.query_one("#candidates", OptionList)
+        options.highlighted = 0
+        options.focus()  # printable keys are swallowed while the bar has focus
+        await pilot.pause()
+        await pilot.press("f")
+        await pilot.pause()
+        assert "season:N" in str(screen.query_one("#add-status", Static).content)
+        assert screen._mean is None  # pyright: ignore[reportPrivateUsage]

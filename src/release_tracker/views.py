@@ -191,6 +191,10 @@ class TrackRow:
     # continuity position once a renumbering reset is walked back; None when there is none
     franchise: int | None
     bucket: Bucket  # which consumption surface this lands on — the one partition rule
+    # What the sources say about whether this is coming at all, as `pipeline` last agreed it.
+    # Finer than the bucket: `shelved` is the only stance that moves a row, but `uncertain`
+    # (a Rumored film, a game IGDB marks rumoured) is worth being able to ask for on its own.
+    stance: Stance | None
     freshness: Freshness | None
     has_notes: bool
     state: ConsumptionState
@@ -438,6 +442,7 @@ def _track_row(
         part=part,
         franchise=franchise,
         bucket=bucket_of(entity.consumption_state, available_to_me, today, entity.stance),
+        stance=entity.stance,
         freshness=freshness(pivot.fetched_at if pivot else None, today, settings),
         has_notes=has_notes,
         state=entity.consumption_state,

@@ -53,6 +53,7 @@ __all__ = [
     "add_series",
     "add_tag",
     "clear_date",
+    "link_lineage",
     "manual_dates",
     "remove_credits",
     "remove_platforms",
@@ -119,12 +120,35 @@ def set_continuation(
         NodeKind.SERIES, predecessor.strip(), source=source, source_id=source_id, owned=False
     )
     db.upsert_node(prior)
+    link_lineage(db, edges[0].dst_id, prior.id, WorkRelation.CONTINUES, after=after)
+    log.info("edits.continuation", entity=entity.title, predecessor=prior.name, after=after)
+    return prior
+
+
+def link_lineage(
+    db: Database,
+    src_id: str,
+    dst_id: str,
+    role: WorkRelation,
+    *,
+    after: int | None = None,
+) -> None:
+    """Record that one work or series derives from another, on the author's own say-so.
+
+    The single writer of a hand-authored ``DERIVED_FROM``. ``rdt relate`` and
+    :func:`set_continuation` differ only in how they find the two ends — the first resolves
+    both against the graph, the second mints the far one from a name — and had drifted to
+    writing the same edge under two different provider strings.
+
+    ``after`` is the season count a ``continues`` reset skips, and means nothing on any other
+    role; the callers are where that is refused, since each has a better error to give.
+    """
     db.upsert_edge(
         Edge(
-            src_id=edges[0].dst_id,
-            dst_id=prior.id,
+            src_id=src_id,
+            dst_id=dst_id,
             relation=RelationKind.DERIVED_FROM,
-            role=WorkRelation.CONTINUES,
+            role=role,
             ordinal=after,
             source_provider=USER_PROVIDER,
             source_tier=SourceTier.OFFICIAL,
@@ -132,8 +156,6 @@ def set_continuation(
             owned=True,
         )
     )
-    log.info("edits.continuation", entity=entity.title, predecessor=prior.name, after=after)
-    return prior
 
 
 def set_coords(

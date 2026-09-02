@@ -42,7 +42,7 @@ from release_tracker.artists import (
     parse_link_spec,
     refresh_artist,
 )
-from release_tracker.capture import CaptureOutcome, run_capture, write_work
+from release_tracker.capture import CaptureOutcome, run_capture, take_continuation, write_work
 from release_tracker.clock import utc_now, utc_today
 from release_tracker.config import (
     Settings,
@@ -58,7 +58,9 @@ from release_tracker.enrich import EnrichSummary, enrich_work
 from release_tracker.franchise import Placement
 from release_tracker.logging import configure_logging
 from release_tracker.lookup import (
+    ContinuityAnswer,
     RdReport,
+    continuity,
     lookup,
 )
 from release_tracker.models import (
@@ -470,6 +472,10 @@ def rd(
         bool,
         typer.Option("--franchise", help="films: number this one within its collection"),
     ] = False,
+    continuity: Annotated[
+        bool,
+        typer.Option("--continuity", help="TV: what carries --season N, ranked by shared cast"),
+    ] = False,
     as_json: Annotated[
         bool, typer.Option("--json", help="emit machine-readable JSON (for the /rd skill)")
     ] = False,
@@ -488,6 +494,11 @@ def rd(
     --franchise is the film counterpart of --season: it says which entry this is, counted by
     release date with TMDB's spin-offs left out. Opt-in because it costs a request per film in
     the collection, and because the number is ours — TMDB numbers none of them.
+
+    --continuity asks the other TV question: when a show does not carry --season N, which
+    same-named show does. Dexter's ninth season is New Blood's first. Add --track --id
+    tmdb=<the offered id> to take one of the answers — it captures that show at the season the
+    number lands on and records that it continues the one you asked about.
     """
     configure_logging()
     settings = get_settings()
@@ -495,6 +506,11 @@ def rd(
     if (latest or year is not None or id_pick is not None) and not track:
         raise typer.BadParameter("--latest / --year / --id only apply together with --track")
     pairs = _parse_pairs([id_pick]) if id_pick else None
+    if continuity:
+        if season is None:
+            raise typer.BadParameter("--continuity asks what carries a season — pass --season N")
+        _continuity(name, settings, season, track=track, pick=pairs, as_json=as_json)
+        return
     if not track:
         outcome = CaptureOutcome(
             report=asyncio.run(
@@ -570,6 +586,103 @@ def rd(
                 "[yellow]Not tracked[/] — couldn't tell what this is "
                 "(unknown kind, or a resolvable title that pinned no canonical id)."
             )
+
+
+def _continuity(
+    name: str,
+    settings: Settings,
+    season: int,
+    *,
+    track: bool,
+    pick: dict[str, str] | None,
+    as_json: bool,
+) -> None:
+    """Answer "what carries season N", and with --track take the id that was picked.
+
+    The pick is `--id`, reading as it does everywhere else — the canonical id of the thing to
+    add — which here is one of the offered shows rather than the one asked about. Nothing is
+    written without it: the whole point of the ranking is that a human chooses.
+    """
+    answer = asyncio.run(continuity(name, settings, season))
+    if as_json:
+        print(json.dumps(answer.to_dict(), indent=2))
+        return
+    _render_continuity(answer)
+    if not track:
+        return
+    if answer.mean is None or not answer.mean.offer:
+        console.print("[yellow]Nothing to take[/] — no successor was offered.")
+        raise typer.Exit(2)
+    wanted = (pick or {}).get("tmdb")
+    taken = next((s for s in answer.mean.offer if s.key == wanted), None)
+    if taken is None:
+        console.print(
+            "[dim]Pick one with[/] [bold]--id tmdb=<id>[/] "
+            "[dim]from the Id column above; nothing was written.[/]"
+        )
+        raise typer.Exit(2)
+    assert answer.base is not None
+    db = _db()
+    try:
+        entity = asyncio.run(
+            take_continuation(
+                db,
+                settings,
+                kind=MediaKind.TV,
+                base=answer.base,
+                successor=taken,
+                after=answer.mean.after,
+                native=answer.mean.native(taken),
+            )
+        )
+    finally:
+        db.close()
+    if entity is None:
+        console.print("[yellow]Not tracked[/] — no canonical id to pin.")
+        raise typer.Exit(2)
+    console.print(
+        f"[green]Tracked[/] {entity.title} [dim](continues “{answer.base.title}” "
+        f"after {answer.mean.after} seasons)[/]."
+    )
+
+
+def _render_continuity(answer: ContinuityAnswer) -> None:
+    """The ranked table, with the basis under it — the CLI face of the add screen's picker."""
+    if answer.base is None:
+        console.print(f"[yellow]No match[/] for '{answer.query}'. {' '.join(answer.reasons)}")
+        raise typer.Exit(2)
+    console.print(f"[bold]{answer.base.title}[/] [dim](tv · season {answer.season})[/]")
+    if answer.mean is None:
+        for reason in answer.reasons:
+            console.print(f"[dim]· {reason}[/]")
+        return
+    mean = answer.mean
+    if mean.offer:
+        table = Table(show_header=True, header_style="bold", title="What carries it")
+        for col in ("Show", "Year", "Id", "Lands on", "Shared cast", "Why"):
+            table.add_column(col)
+        for successor in mean.offer:
+            lands = mean.native(successor)
+            table.add_row(
+                successor.title,
+                str(successor.year) if successor.year else "—",
+                successor.key,
+                f"season {lands}" if lands is not None else "the show itself",
+                str(successor.shared_cast),
+                " · ".join(successor.reasons),
+            )
+        console.print(table)
+    for reason in (*mean.verdict.reasons, *mean.reasons, *answer.reasons):
+        console.print(f"[dim]· {reason}[/]")
+    if mean.offer:
+        console.print(
+            f"[dim]Take one with[/] [bold]--continuity --track --id tmdb=<id>[/] "
+            f"[dim]— it records `continues` after {mean.after} seasons.[/]"
+        )
+    else:
+        # The pool was searched and nothing in it shared a cast. Saying so beats an empty
+        # table, which reads as "we did not look".
+        console.print("[dim]Nothing else that shares this show's cast carries that season.[/]")
 
 
 def _candidate_json(kind: MediaKind, c: Candidate) -> dict[str, object]:
@@ -1382,19 +1495,7 @@ def relate(
             f"[yellow]Note[/]: '{other}' matched {len(other_matches)} works; linked to "
             f"[bold]{dst.name}[/]. Re-run with an id if that's not the intended source."
         )
-    db.upsert_edge(
-        Edge(
-            src_id=src.id,
-            dst_id=dst.id,
-            relation=RelationKind.DERIVED_FROM,
-            role=rel,
-            ordinal=after,
-            source_provider="user",
-            source_tier=SourceTier.OFFICIAL,
-            confidence=1.0,
-            owned=True,
-        )
-    )
+    edits.link_lineage(db, src.id, dst.id, rel, after=after)
     db.close()
     tail = f" [dim]after {after} season(s)[/]" if after is not None else ""
     console.print(f"[green]Linked[/] {src.name} [dim]({rel.value})[/] [bold]{dst.name}[/]{tail}.")
