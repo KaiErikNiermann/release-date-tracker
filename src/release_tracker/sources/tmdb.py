@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any, cast
+from typing import Any, Final, cast
 
 import httpx
 
@@ -29,6 +29,7 @@ from release_tracker.models import (
     ReleaseChannel,
     ReleaseObservation,
     SourceTier,
+    Stance,
 )
 from release_tracker.seasons import TOP_CAST, SeasonRef, ShowShape, check_season
 from release_tracker.slices import Episode
@@ -51,6 +52,53 @@ BASE = "https://api.themoviedb.org/3"
 
 # Phrased for a person, not a log line — it reaches the add screen and `rdt doctor`.
 NO_KEY = "TMDB_API_KEY is not set"
+
+
+# TMDB's movie `status` ladder. There is no cancelled film here in practice: TMDB drops the
+# record rather than marking it, so Batgirl, Scoob! Holiday Haunt, Superman: Flyby and
+# Justice League: Mortal have no entry at all and `Canceled` did not appear once in 120
+# sampled films. What the ladder actually carries is how *real* a production is, which is a
+# question TV has no analogue for — a series is renewed or it is not.
+#
+# `Canceled` is mapped anyway. It is documented, and an unmapped word would fail open to
+# UNKNOWN, which is the right default for a word we have never seen but the wrong one for
+# a word we know the meaning of.
+_MOVIE_STANCE: Final[dict[str, Stance]] = {
+    "Released": Stance.RELEASED,
+    "Post Production": Stance.COMING,
+    "In Production": Stance.COMING,
+    "Planned": Stance.COMING,
+    "Rumored": Stance.UNCERTAIN,
+    "Canceled": Stance.SHELVED,
+    "Cancelled": Stance.SHELVED,
+}
+
+# Only the words that change what the reader should believe. "Post Production" beside a date
+# adds nothing the date has not already said; "Rumored" beside one says the date is a
+# placeholder nobody has committed to.
+_MOVIE_STATUS_NOTE: Final[dict[str, str]] = {
+    "Rumored": "TMDB marks this “Rumored” — no official announcement backs it",
+    "Canceled": "TMDB marks this “Canceled”",
+    "Cancelled": "TMDB marks this “Cancelled”",
+}
+
+
+def movie_stance(status: str | None) -> Stance | None:
+    """What TMDB's status word says about whether a film is coming.
+
+    None when TMDB said nothing; ``UNKNOWN`` when it said a word we do not recognise, which
+    is the fail-open the TV path uses for the same reason — an unrecognised word is not
+    evidence, and treating it as one would shelve a film on a vocabulary change.
+    """
+    if not (status or "").strip():
+        return None
+    return _MOVIE_STANCE.get(status or "", Stance.UNKNOWN)
+
+
+def movie_status_notes(status: str | None) -> tuple[str, ...]:
+    """TMDB's own word, quoted back, where it is worth saying at all."""
+    said = _MOVIE_STATUS_NOTE.get((status or "").strip())
+    return (said,) if said else ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -118,6 +166,13 @@ class TmdbSource:
     async def _pull_movie(
         self, client: httpx.AsyncClient, entity: Entity, key: str
     ) -> SourceResult:
+        """Dates and production state off one GET, and a real answer when the id is gone.
+
+        ``append_to_response`` folds ``/movie/{id}/release_dates`` into the detail call, so
+        this costs exactly what the release-dates call alone used to and gains ``status`` —
+        plus a 404 that means something, since a missing detail really is a missing record
+        where a missing release-dates block is just a film with no dates yet.
+        """
         tmdb_id, skip = pinned_id(entity.external_ids, "tmdb")
         if skip:
             return SourceResult()
@@ -126,12 +181,26 @@ class TmdbSource:
         if tmdb_id is None:
             return SourceResult()
 
-        payload = cast(
-            "dict[str, Any]",
-            await get_json(
-                client, f"{BASE}/movie/{tmdb_id}/release_dates", params={"api_key": key}
+        detail = cast(
+            "dict[str, Any] | None",
+            await get_json_absentable(
+                client,
+                f"{BASE}/movie/{tmdb_id}",
+                params={"api_key": key, "append_to_response": "release_dates"},
             ),
         )
+        if detail is None:
+            # The pin no longer resolves. That is a fact about the id — TMDB merges and
+            # deletes duplicate records — and emphatically not about the film, so it is
+            # said and takes no stance.
+            log.info("tmdb.movie_absent", entity=entity.title, tmdb_id=tmdb_id)
+            return SourceResult(
+                external_ids={"tmdb": str(tmdb_id)},
+                notes=(f"TMDB no longer carries movie {tmdb_id} — the pinned id may have moved",),
+            )
+
+        status = str(detail["status"]) if detail.get("status") else None
+        payload = cast("dict[str, Any]", detail.get("release_dates", {}))
         now = utc_now()
         observations: list[ReleaseObservation] = []
         for block in cast("list[dict[str, Any]]", payload.get("results", [])):
@@ -159,8 +228,21 @@ class TmdbSource:
                         fetched_at=now,
                     )
                 )
-        log.info("tmdb.movie", entity=entity.title, tmdb_id=tmdb_id, observations=len(observations))
-        return SourceResult(observations=observations, external_ids={"tmdb": str(tmdb_id)})
+        stance = movie_stance(status)
+        log.info(
+            "tmdb.movie",
+            entity=entity.title,
+            tmdb_id=tmdb_id,
+            observations=len(observations),
+            status=status,
+            stance=stance.value if stance else None,
+        )
+        return SourceResult(
+            observations=observations,
+            external_ids={"tmdb": str(tmdb_id)},
+            notes=movie_status_notes(status),
+            stance=stance,
+        )
 
     # -- tv ----------------------------------------------------------------
     async def _pull_tv(self, client: httpx.AsyncClient, entity: Entity, key: str) -> SourceResult:

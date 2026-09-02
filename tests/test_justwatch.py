@@ -5,13 +5,20 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from typing import Any
 
-from release_tracker.lookup import justwatch_predates_theatrical, justwatch_year_mismatch
+import pytest
+
+from release_tracker.lookup import (
+    justwatch_offers_the_unmade,
+    justwatch_predates_theatrical,
+    justwatch_year_mismatch,
+)
 from release_tracker.models import (
     Certainty,
     DatePrecision,
     ReleaseChannel,
     ReleaseObservation,
     SourceTier,
+    Stance,
 )
 from release_tracker.sources.justwatch import (
     JustWatchAvailability,
@@ -259,6 +266,39 @@ def test_year_mismatch_passes_a_sane_match() -> None:
     assert justwatch_year_mismatch(_avail(date(2026, 12, 2), year=2026), 2026) is None
     # VOD in the release year itself is fine (day-and-date / early-window)
     assert justwatch_year_mismatch(_avail(date(2026, 1, 1), year=2026), 2026) is None
+
+
+# --- the guard for a film that does not exist yet -------------------------------------------
+# The year guard cannot reach this one. It anchors on the *matched* title's year when the film
+# has none of its own — which an unmade film never does — so a wrong match validates against
+# itself and passes. Gladiator III (TMDB "Rumored", empty release_date) matched *Gladiator* and
+# inherited its 2000-05-01 digital date, arriving as a confirmed claim.
+def test_the_year_guard_cannot_catch_an_offer_for_an_unmade_film() -> None:
+    """Pinned so the reason this second guard exists stays visible: both checks pass."""
+    wrong = _avail(date(2000, 5, 1), year=2000)
+    assert justwatch_year_mismatch(wrong, None) is None
+    assert justwatch_predates_theatrical(wrong, []) is False
+
+
+def test_an_offer_against_a_rumored_film_is_a_collision() -> None:
+    """Nothing that is only rumoured is for sale, whatever year the offer carries."""
+    said = justwatch_offers_the_unmade(_avail(date(2000, 5, 1), year=2000), Stance.UNCERTAIN)
+    assert said is not None
+    assert "2000-05-01" in said and "not made yet" in said
+
+
+@pytest.mark.parametrize(
+    "stance",
+    [None, Stance.RELEASED, Stance.COMING, Stance.FINISHED, Stance.UNKNOWN, Stance.SHELVED],
+)
+def test_every_other_stance_leaves_the_offer_alone(stance: Stance | None) -> None:
+    """Only "nobody has confirmed this exists" licenses the call. A shelved film may well have
+    been released once and still be for sale, and an unknown word is not evidence."""
+    assert justwatch_offers_the_unmade(_avail(date(2026, 1, 1), year=2026), stance) is None
+
+
+def test_a_rumored_film_with_no_offer_is_not_flagged() -> None:
+    assert justwatch_offers_the_unmade(_avail(None, year=2026), Stance.UNCERTAIN) is None
 
 
 def test_guard_flags_vod_before_theatrical() -> None:

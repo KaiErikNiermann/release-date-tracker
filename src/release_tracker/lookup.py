@@ -22,7 +22,7 @@ import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Literal
+from typing import Final, Literal
 
 import httpx
 
@@ -44,6 +44,7 @@ from release_tracker.models import (
     MediaKind,
     ReleaseChannel,
     ReleaseObservation,
+    Stance,
 )
 from release_tracker.platforms import canonical_platform, learn_predicted_platform
 from release_tracker.resolve import (
@@ -92,7 +93,10 @@ _TECH_OVERRIDE = 0.85
 # region tech falls back to when none is given (a home market must be assumed).
 _DEFAULT_TECH_REGION = "US"
 
-Stance = Literal["confirmed", "speculative"]
+# A *claim's* epistemic label, distinct from `models.Stance` (which is about the work: is
+# this coming at all). One says how much to trust a date; the other says whether to expect
+# one, and a claim can be confirmed about a film that is shelved.
+ClaimStance = Literal["confirmed", "speculative"]
 
 
 @dataclass(slots=True, frozen=True)
@@ -102,7 +106,7 @@ class Claim:
     label: str
     when: date | None
     precision: DatePrecision
-    stance: Stance
+    stance: ClaimStance
     confidence: float
     margin_days: int | None
     basis: str
@@ -269,6 +273,7 @@ async def report_for_candidate(
     # season check lives here: it is the difference between "no air date yet" and "that
     # season is not on this show", and only the source that looked can tell them apart.
     source_notes = tuple(note for r in results for note in r.notes)
+    source_stance = next((r.stance for r in results if r.stance is not None), None)
     for r in results:
         canonical.update(r.external_ids)
 
@@ -277,7 +282,7 @@ async def report_for_candidate(
     match kind:
         case MediaKind.MOVIE:
             claims, notes, streaming, predicted = await _movie_claims(
-                client, settings, tmdb_id, observations
+                client, settings, tmdb_id, observations, absent=bool(source_notes)
             )
             price = None
         case MediaKind.TV:
@@ -350,6 +355,9 @@ async def report_for_candidate(
             else _none()
         )
         avail, wts = await asyncio.gather(jw_task, wts_task)
+        if avail is not None and (unmade := justwatch_offers_the_unmade(avail, source_stance)):
+            notes = (*notes, unmade)
+            avail = None
         year_reason = justwatch_year_mismatch(avail, cand.year) if avail is not None else None
         if avail is not None and year_reason is not None:
             # the matched title's year is implausible for this film — a same-name collision.
@@ -714,6 +722,26 @@ def justwatch_year_mismatch(avail: JustWatchAvailability, film_year: int | None)
     return None
 
 
+def justwatch_offers_the_unmade(avail: JustWatchAvailability, stance: Stance | None) -> str | None:
+    """Reject a VOD offer for a film the source says has not been made.
+
+    The year guard cannot catch this one. It anchors on ``avail.year`` when the film has no
+    year of its own — which an unmade film never does — so a wrong match is checked against
+    itself and passes by construction: Gladiator III (TMDB "Rumored", no release date)
+    matched *Gladiator* and inherited its 2000-05-01 digital date.
+
+    A stance is the missing anchor. Nothing that is only rumoured is for sale, so an offer
+    against one is a same-name collision whatever its year says.
+    """
+    if stance is not Stance.UNCERTAIN or avail.earliest_vod is None:
+        return None
+    return (
+        f"JustWatch match discarded: it offers “{avail.title or 'a title'}” from "
+        f"{avail.earliest_vod.isoformat()}, but the source says this is not made yet"
+        " — likely a wrong title."
+    )
+
+
 # --- JustWatch wrong-title guard (a VOD date can't precede the cinema run) ----
 def justwatch_predates_theatrical(
     avail: JustWatchAvailability, obs: list[ReleaseObservation]
@@ -894,13 +922,28 @@ def _merge_whentostream(
     return claims, tuple(notes)
 
 
+# TMDB status words that mean nobody official has committed to the film. Its `release_date`
+# in that state is a placeholder — Gladiator III reads "Rumored" with an empty one — so a
+# to-the-day theatrical guess off it would invent a schedule out of a maybe.
+_UNBACKED: Final[frozenset[str]] = frozenset({"Rumored", "Canceled", "Cancelled"})
+
+
 # --- per-kind claim builders ---------------------------------------------
 async def _movie_claims(
     client: httpx.AsyncClient,
     settings: Settings,
     tmdb_id: str | None,
     obs: list[ReleaseObservation],
+    *,
+    absent: bool = False,
 ) -> tuple[list[Claim], list[str], tuple[str, ...], str | None]:
+    """Claims for a film, its notes, its streaming homes and a predicted one.
+
+    ``absent`` means a source already accounted for this answer in its own words — that the
+    pinned id no longer resolves, say. The generic "no date found" line then stands down,
+    the way the TV and game paths do, so the specific sentence is not buried under a vaguer
+    one that contradicts it.
+    """
     notes: list[str] = []
     claims: list[Claim] = []
     premiere = earliest_premiere(obs)  # festival/event premiere — informational, never an anchor
@@ -1006,8 +1049,10 @@ async def _movie_claims(
                 f"premiere-chained: {est.basis}",
             )
         )
-    elif meta and meta.primary_date:
-        # nothing concrete yet — best-guess theatrical off TMDB's primary date.
+    elif meta and meta.primary_date and meta.status not in _UNBACKED:
+        # nothing concrete yet — best-guess theatrical off TMDB's primary date. Withheld for
+        # a film TMDB itself only calls "Rumored": guessing a window to the day off a date
+        # nobody has committed to dresses a maybe up as a schedule.
         claims.append(
             Claim(
                 "Theatrical (guess)",
@@ -1031,7 +1076,7 @@ async def _movie_claims(
                 est.basis,
             )
         )
-    else:
+    elif not absent:
         notes.append("No theatrical or digital date found.")
 
     if studio:
