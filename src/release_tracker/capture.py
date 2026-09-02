@@ -157,7 +157,15 @@ async def capture_work(
         async with contextlib.AsyncExitStack() as stack:
             http = client or await stack.enter_async_context(make_client())
             await pull_entity(db, settings, entity, client=http)  # dates via the pinned ids
-            await enrich_work(http, db, settings, entity)  # who/where/what
+            # the franchise number rides along only when the caller asked for the walk —
+            # `report.franchise` is None on every path that did not pay for it.
+            await enrich_work(
+                http,
+                db,
+                settings,
+                entity,
+                entry=report.franchise.entry if report.franchise else None,
+            )  # who/where/what
     return entity
 
 
@@ -172,6 +180,7 @@ async def run_capture(
     latest: bool = False,
     want_year: int | None = None,
     id_pick: dict[str, str] | None = None,
+    franchise: bool = False,
     client: httpx.AsyncClient | None = None,
 ) -> CaptureOutcome:
     """Look a title up and persist it, refusing to guess when the name collides.
@@ -202,7 +211,14 @@ async def run_capture(
             )
         if pick.outcome == "no_match" or pick.cand is None:
             # nothing solid — same web-fallback report as a plain miss.
-            report = await lookup(name, settings, kind_hint=kind_hint, region=region, season=season)
+            report = await lookup(
+                name,
+                settings,
+                kind_hint=kind_hint,
+                region=region,
+                season=season,
+                franchise=franchise,
+            )
             # `select_candidate` also reports no_match when --latest/--year/--id filtered every
             # contender out. `lookup` re-runs the search *without* those, so it can come back
             # with a confident match for the very title the selector rejected — capturing that
@@ -216,7 +232,7 @@ async def run_capture(
             return CaptureOutcome(report=report, entity=entity)
         chosen = pick.cand
         report = await report_for_candidate(
-            http, name, kind_of[id(chosen)], chosen, settings, season=season
+            http, name, kind_of[id(chosen)], chosen, settings, season=season, franchise=franchise
         )
         entity = await capture_work(db, settings, name, report, season=season, client=http)
     return CaptureOutcome(report=report, entity=entity)

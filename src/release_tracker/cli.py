@@ -55,6 +55,7 @@ from release_tracker.contingency import ResolutionStatus
 from release_tracker.dates_edtf import parse_edtf, to_edtf
 from release_tracker.db import Database
 from release_tracker.enrich import EnrichSummary, enrich_work
+from release_tracker.franchise import Placement
 from release_tracker.logging import configure_logging
 from release_tracker.lookup import (
     RdReport,
@@ -465,6 +466,10 @@ def rd(
         str | None,
         typer.Option("--id", help="with --track: pick by canonical id, e.g. tmdb=1368337"),
     ] = None,
+    franchise: Annotated[
+        bool,
+        typer.Option("--franchise", help="films: number this one within its collection"),
+    ] = False,
     as_json: Annotated[
         bool, typer.Option("--json", help="emit machine-readable JSON (for the /rd skill)")
     ] = False,
@@ -479,6 +484,10 @@ def rd(
     On --track, a title with several plausible matches is **not** auto-added — the candidates
     are listed and you pick one with --latest (newest), --year YYYY, or --id key=id. A plain
     lookup (no --track) always takes the best single match, unchanged.
+
+    --franchise is the film counterpart of --season: it says which entry this is, counted by
+    release date with TMDB's spin-offs left out. Opt-in because it costs a request per film in
+    the collection, and because the number is ours — TMDB numbers none of them.
     """
     configure_logging()
     settings = get_settings()
@@ -489,7 +498,14 @@ def rd(
     if not track:
         outcome = CaptureOutcome(
             report=asyncio.run(
-                lookup(name, settings, kind_hint=kind_hint, region=region, season=season)
+                lookup(
+                    name,
+                    settings,
+                    kind_hint=kind_hint,
+                    region=region,
+                    season=season,
+                    franchise=franchise,
+                )
             )
         )
     else:
@@ -506,6 +522,7 @@ def rd(
                     latest=latest,
                     want_year=year,
                     id_pick=pairs,
+                    franchise=franchise,
                 )
             )
         finally:
@@ -610,6 +627,7 @@ def _render_report(r: RdReport) -> None:
         )
     if r.price:
         console.print(f"[bold]Price:[/] {r.price}")
+    _render_franchise(r.franchise)
     _render_availability(r.availability)
     _render_whentostream(r.whentostream)
     for note in r.notes:
@@ -617,6 +635,26 @@ def _render_report(r: RdReport) -> None:
     if r.url:
         console.print(f"[dim]{r.url}[/]")
     _render_web_info(r.web_info)
+
+
+def _render_franchise(placement: Placement | None) -> None:
+    """The franchise position, with what the number rests on printed under it.
+
+    The reasons are not optional decoration here as they are elsewhere: TMDB numbers none of
+    these films, so every number on this line is an inference off release order that a
+    mislabelled spin-off can move. Printing the basis is what makes it checkable.
+    """
+    if placement is None:
+        return
+    where = placement.name or "its franchise"
+    entry = (
+        f"entry {placement.entry} of {placement.highest}"
+        if placement.entry is not None
+        else f"unnumbered, beside {placement.highest} numbered"
+    )
+    console.print(f"[bold]Franchise:[/] {where} [cyan]· {entry}[/]")
+    for reason in placement.reasons:
+        console.print(f"  [dim]· {reason}[/]")
 
 
 def _render_whentostream(wts: WhenToStreamHints | None) -> None:

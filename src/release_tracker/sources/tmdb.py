@@ -10,14 +10,16 @@ Free API key: https://www.themoviedb.org/settings/api
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any, Final, cast
+from typing import Any, cast
 
 import httpx
 
 from release_tracker.clock import utc_now, utc_today
 from release_tracker.config import Settings, secret
+from release_tracker.franchise import Entry, FranchiseShape, movie_stance, movie_status_notes
 from release_tracker.logging import get_logger
 from release_tracker.models import (
     Certainty,
@@ -29,7 +31,6 @@ from release_tracker.models import (
     ReleaseChannel,
     ReleaseObservation,
     SourceTier,
-    Stance,
 )
 from release_tracker.seasons import TOP_CAST, SeasonRef, ShowShape, check_season
 from release_tracker.slices import Episode
@@ -54,51 +55,18 @@ BASE = "https://api.themoviedb.org/3"
 NO_KEY = "TMDB_API_KEY is not set"
 
 
-# TMDB's movie `status` ladder. There is no cancelled film here in practice: TMDB drops the
-# record rather than marking it, so Batgirl, Scoob! Holiday Haunt, Superman: Flyby and
-# Justice League: Mortal have no entry at all and `Canceled` did not appear once in 120
-# sampled films. What the ladder actually carries is how *real* a production is, which is a
-# question TV has no analogue for — a series is renewed or it is not.
-#
-# `Canceled` is mapped anyway. It is documented, and an unmapped word would fail open to
-# UNKNOWN, which is the right default for a word we have never seen but the wrong one for
-# a word we know the meaning of.
-_MOVIE_STANCE: Final[dict[str, Stance]] = {
-    "Released": Stance.RELEASED,
-    "Post Production": Stance.COMING,
-    "In Production": Stance.COMING,
-    "Planned": Stance.COMING,
-    "Rumored": Stance.UNCERTAIN,
-    "Canceled": Stance.SHELVED,
-    "Cancelled": Stance.SHELVED,
-}
+def collection_key(collection_id: object) -> str:
+    """Namespace a collection id so its series node cannot collide with a TV show's.
 
-# Only the words that change what the reader should believe. "Post Production" beside a date
-# adds nothing the date has not already said; "Rumored" beside one says the date is a
-# placeholder nobody has committed to.
-_MOVIE_STATUS_NOTE: Final[dict[str, str]] = {
-    "Rumored": "TMDB marks this “Rumored” — no official announcement backs it",
-    "Canceled": "TMDB marks this “Canceled”",
-    "Cancelled": "TMDB marks this “Cancelled”",
-}
+    ``Node.make_id`` renders a series node ``series:<provider>:<source_id>``, and TMDB's
+    collection and TV id spaces overlap almost completely — 7 of 8 sampled ids exist in
+    both. Bare, ``series:tmdb:10`` is the Star Wars Collection *and* the show "All in Good
+    Faith", so tracking one film and one unrelated series merged their franchises.
 
-
-def movie_stance(status: str | None) -> Stance | None:
-    """What TMDB's status word says about whether a film is coming.
-
-    None when TMDB said nothing; ``UNKNOWN`` when it said a word we do not recognise, which
-    is the fail-open the TV path uses for the same reason — an unrecognised word is not
-    evidence, and treating it as one would shelve a film on a vocabulary change.
+    The show side stays bare: ``edits.set_continuation`` documents ``series:tmdb:<show id>``
+    and mints predecessor nodes to match, so moving it would orphan every continuation edge.
     """
-    if not (status or "").strip():
-        return None
-    return _MOVIE_STANCE.get(status or "", Stance.UNKNOWN)
-
-
-def movie_status_notes(status: str | None) -> tuple[str, ...]:
-    """TMDB's own word, quoted back, where it is worth saying at all."""
-    said = _MOVIE_STATUS_NOTE.get((status or "").strip())
-    return (said,) if said else ()
+    return f"collection:{collection_id}"
 
 
 @dataclass(slots=True, frozen=True)
@@ -109,6 +77,10 @@ class MovieMeta:
     primary_date: date | None
     status: str | None
     title: str | None
+    # the collection this film belongs to, if any. Free — the detail payload has always
+    # carried it — and it is the only way in to `collection_shape`, which needs an id it
+    # cannot derive from the film.
+    collection_id: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -420,11 +392,17 @@ class TmdbSource:
         studios = tuple(str(c["name"]) for c in comps if c.get("name"))
         status = str(detail["status"]) if detail.get("status") else None
         title = str(detail["title"]) if detail.get("title") else None
+        collection = detail.get("belongs_to_collection")
         return MovieMeta(
             studios=studios,
             primary_date=_parse_tmdb_date(detail.get("release_date")),
             status=status,
             title=title,
+            collection_id=(
+                str(collection["id"])
+                if isinstance(collection, dict) and collection.get("id")
+                else None
+            ),
         )
 
     async def search_person(self, client: httpx.AsyncClient, key: str, name: str) -> str | None:
@@ -527,7 +505,7 @@ class TmdbSource:
         orgs = _company_orgs(detail.get("production_companies"), CreditRole.STUDIO)
         collection = detail.get("belongs_to_collection")
         series = (
-            (str(collection["name"]), str(collection.get("id")))
+            (str(collection["name"]), collection_key(collection.get("id")))
             if isinstance(collection, dict) and collection.get("name")
             else None
         )
@@ -610,6 +588,61 @@ class TmdbSource:
             return frozenset()
         people = cast("list[dict[str, Any]]", detail.get("cast") or [])[:TOP_CAST]
         return frozenset(str(p["id"]) for p in people if p.get("id") is not None)
+
+    async def collection_shape(
+        self, client: httpx.AsyncClient, key: str, collection_id: str
+    ) -> FranchiseShape | None:
+        """What a franchise's collection lists, with each entry's status and spinoff flag.
+
+        Costs one GET for the collection plus one per entry, and that is unavoidable: the
+        ``parts[]`` payload carries sixteen fields and ``status`` is not among them. So this
+        is gated like :meth:`tv_cast` — only on an explicit ask, never on the search path —
+        and each per-entry GET buys both facts at once via ``append_to_response=keywords``.
+
+        None when the collection id no longer resolves, which is a fact about the id.
+        """
+        payload = cast(
+            "dict[str, Any] | None",
+            await get_json_absentable(
+                client, f"{BASE}/collection/{collection_id}", params={"api_key": key}
+            ),
+        )
+        if payload is None:
+            return None
+        parts = cast("list[dict[str, Any]]", payload.get("parts", []))
+        entries = await asyncio.gather(
+            *(self._collection_entry(client, key, str(p["id"])) for p in parts if p.get("id"))
+        )
+        return FranchiseShape(
+            name=str(payload["name"]) if payload.get("name") else None,
+            entries=tuple(e for e in entries if e is not None),
+        )
+
+    async def _collection_entry(
+        self, client: httpx.AsyncClient, key: str, movie_id: str
+    ) -> Entry | None:
+        """One collection member's status and whether TMDB calls it a spin-off, off one GET."""
+        detail = cast(
+            "dict[str, Any] | None",
+            await get_json_absentable(
+                client,
+                f"{BASE}/movie/{movie_id}",
+                params={"api_key": key, "append_to_response": "keywords"},
+            ),
+        )
+        if detail is None:
+            return None
+        words = cast("dict[str, Any]", detail.get("keywords", {}))
+        return Entry(
+            key=movie_id,
+            title=str(detail.get("title", "")),
+            released=_parse_tmdb_date(detail.get("release_date")),
+            status=str(detail["status"]) if detail.get("status") else None,
+            spinoff=any(
+                "spin" in str(k.get("name", "")).casefold()
+                for k in cast("list[dict[str, Any]]", words.get("keywords", []))
+            ),
+        )
 
     async def tv_shape(self, client: httpx.AsyncClient, key: str, tmdb_id: str) -> ShowShape:
         """What TMDB lists for a show: its seasons, and whether it says more are coming.

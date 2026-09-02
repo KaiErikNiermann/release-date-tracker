@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 
 from release_tracker.config import Settings
+from release_tracker.franchise import ordinal_of
 from release_tracker.models import Entity, MediaKind, ReleaseChannel, Stance
 from release_tracker.sources import tmdb
 from release_tracker.sources.base import SourceResult
@@ -166,3 +167,118 @@ def test_an_absent_record_is_not_the_same_as_a_film_with_no_dates(
     assert gone.notes != undated.notes
     assert gone.stance is None
     assert undated.stance is Stance.COMING
+
+
+# --- the collection walk -------------------------------------------------------------------
+def _collection(*part_ids: int) -> Any:
+    return {"name": "Ontos Collection", "parts": [{"id": i} for i in part_ids]}
+
+
+def _part(
+    title: str, when: str, *, status: str = "Released", words: list[str] | None = None
+) -> Any:
+    return {
+        "title": title,
+        "release_date": when,
+        "status": status,
+        "keywords": {"keywords": [{"name": w} for w in words or []]},
+    }
+
+
+def _shape(monkeypatch: pytest.MonkeyPatch, responses: dict[str, Any]) -> tuple[Any, list[str]]:
+    """Same table-driven harness, aimed at `collection_shape` instead of `pull`."""
+    seen: list[str] = []
+
+    async def fake_absentable(_client: object, url: str, **_kw: object) -> Any:
+        seen.append(url)
+        for needle, payload in responses.items():
+            if needle in url:
+                return None if payload == 404 else payload
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(tmdb, "get_json_absentable", fake_absentable)
+    shape = asyncio.run(tmdb.TmdbSource().collection_shape(object(), "k", "9"))  # type: ignore[arg-type]
+    return shape, seen
+
+
+def test_the_walk_costs_one_request_per_entry_and_no_more(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reason this is opt-in. `parts[]` carries neither `status` nor the keywords, so the
+    per-entry GET is unavoidable — but it must buy both at once, not one each."""
+    shape, seen = _shape(
+        monkeypatch,
+        {
+            "/collection/9": _collection(1, 2),
+            "/movie/1": _part("One", "2020-01-01"),
+            "/movie/2": _part("Two", "2022-01-01"),
+        },
+    )
+    assert len(seen) == 3  # the collection, then one per part
+    assert shape is not None
+    assert shape.name == "Ontos Collection"
+    assert shape.highest == 2
+
+
+def test_the_spinoff_keyword_is_read_off_the_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The whole point of paying for the per-entry GET: without it "Side" sits at position 2
+    and pushes "Two" to 3."""
+    shape, _ = _shape(
+        monkeypatch,
+        {
+            "/collection/9": _collection(1, 2, 3),
+            "/movie/1": _part("One", "2020-01-01"),
+            "/movie/2": _part("Side", "2021-01-01", words=["spin off"]),
+            "/movie/3": _part("Two", "2022-01-01"),
+        },
+    )
+    assert shape is not None
+    assert [e.title for e in shape.mainline] == ["One", "Two"]
+    assert ordinal_of(shape, "3") == 2
+
+
+def test_an_entry_that_stopped_resolving_is_dropped_not_fatal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TMDB merges and deletes duplicate film records; one dead part must not lose the walk."""
+    shape, _ = _shape(
+        monkeypatch,
+        {
+            "/collection/9": _collection(1, 2),
+            "/movie/1": _part("One", "2020-01-01"),
+            "/movie/2": 404,
+        },
+    )
+    assert shape is not None
+    assert shape.highest == 1
+
+
+def test_a_dead_collection_id_answers_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fact about the id, not about the franchise — so it must not read as "no films"."""
+    shape, seen = _shape(monkeypatch, {"/collection/9": 404})
+    assert shape is None
+    assert len(seen) == 1  # and it does not go on to walk anything
+
+
+def test_the_collection_id_rides_out_on_the_meta(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`collection_shape` needs an id it cannot derive; the film detail has always had it."""
+
+    async def fake_get_json(_client: object, _url: str, **_kw: object) -> Any:
+        return {
+            "status": "Released",
+            "title": "Ontos",
+            "release_date": "2020-01-01",
+            "production_companies": [],
+            "belongs_to_collection": {"id": 9, "name": "Ontos Collection"},
+        }
+
+    monkeypatch.setattr(tmdb, "get_json", fake_get_json)
+    meta = asyncio.run(tmdb.TmdbSource().movie_meta(object(), "k", _ID))  # type: ignore[arg-type]
+    assert meta.collection_id == "9"
+
+
+def test_a_standalone_film_carries_no_collection(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_get_json(_client: object, _url: str, **_kw: object) -> Any:
+        return {"status": "Released", "title": "Ontos", "production_companies": []}
+
+    monkeypatch.setattr(tmdb, "get_json", fake_get_json)
+    meta = asyncio.run(tmdb.TmdbSource().movie_meta(object(), "k", _ID))  # type: ignore[arg-type]
+    assert meta.collection_id is None

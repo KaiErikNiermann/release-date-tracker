@@ -22,7 +22,7 @@ import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Final, Literal
+from typing import Literal
 
 import httpx
 
@@ -35,6 +35,7 @@ from release_tracker.deltas import (
     match_studio,
     precise_from_coarse,
 )
+from release_tracker.franchise import UNBACKED, Placement, movie_stance, place
 from release_tracker.logging import get_logger
 from release_tracker.matching import rank_candidate
 from release_tracker.models import (
@@ -161,6 +162,9 @@ class RdReport:
     # When To Stream (movies): US PVOD/SVOD dates mined from the per-film article — corroborates
     # the digital window and carries the predicted subscription-drop date + named service.
     whentostream: WhenToStreamHints | None = None
+    # Where this film sits in its franchise. Opt-in only (`--franchise`): the walk costs one
+    # request per collection member, so it never rides the search path.
+    franchise: Placement | None = None
 
     def to_dict(self) -> dict[str, object]:
         out: dict[str, object] = {
@@ -187,6 +191,8 @@ class RdReport:
             out["availability"] = self.availability.to_dict()
         if self.whentostream is not None:
             out["whentostream"] = self.whentostream.to_dict()
+        if self.franchise is not None:
+            out["franchise"] = self.franchise.to_dict()
         return out
 
 
@@ -197,12 +203,14 @@ async def lookup(
     kind_hint: MediaKind | None = None,
     region: str | None = None,
     season: int | None = None,
+    franchise: bool = False,
 ) -> RdReport:
     """Resolve a single title to confirmed + speculative dates.
 
     ``region`` only matters for tech (a hard per-country constraint); film/tv/game
     dates are reported as earliest-worldwide and ignore it. ``season`` pins a specific TV
-    season explicitly (preferred over parsing it out of the title).
+    season explicitly (preferred over parsing it out of the title). ``franchise`` asks for
+    the film's number in its collection, which costs a request per sibling.
     """
     async with make_client() as client:
         if kind_hint is MediaKind.TECH:
@@ -227,7 +235,9 @@ async def lookup(
             )
 
         kind, cand = picked
-        return await report_for_candidate(client, query, kind, cand, settings, season=season)
+        return await report_for_candidate(
+            client, query, kind, cand, settings, season=season, franchise=franchise
+        )
 
 
 async def report_for_candidate(
@@ -239,6 +249,7 @@ async def report_for_candidate(
     *,
     season: int | None = None,
     region: str | None = None,
+    franchise: bool = False,
 ) -> RdReport:
     """Build the full dated report for an already-chosen (kind, candidate).
 
@@ -247,6 +258,7 @@ async def report_for_candidate(
     identical Tier-0 + JustWatch + WhenToStream report without re-running the search.
 
     ``region`` is only read for tech, where it decides which market's date leads.
+    ``franchise`` is film-only and opt-in; see :func:`_franchise_placement` for the cost.
     """
     # keep the raw query as the title (so "Show: Season 5" still resolves the
     # season) but pin the canonical id we just chose so pullers don't re-search.
@@ -400,6 +412,11 @@ async def report_for_candidate(
         wiki_hints=await wiki_task,
         availability=avail,
         whentostream=wts,
+        franchise=(
+            await _franchise_placement(client, settings, tmdb_id)
+            if franchise and kind is MediaKind.MOVIE
+            else None
+        ),
     )
 
 
@@ -922,10 +939,31 @@ def _merge_whentostream(
     return claims, tuple(notes)
 
 
-# TMDB status words that mean nobody official has committed to the film. Its `release_date`
-# in that state is a placeholder — Gladiator III reads "Rumored" with an empty one — so a
-# to-the-day theatrical guess off it would invent a schedule out of a maybe.
-_UNBACKED: Final[frozenset[str]] = frozenset({"Rumored", "Canceled", "Cancelled"})
+async def _franchise_placement(
+    client: httpx.AsyncClient, settings: Settings, tmdb_id: str | None
+) -> Placement | None:
+    """Number a film within its collection, or None when there is nothing to number it in.
+
+    Costs one GET for the film, one for the collection and one per sibling — the last of
+    which is unavoidable, since ``parts[]`` carries neither ``status`` nor the spin-off
+    keyword the count depends on. That is why this is behind ``--franchise`` and never runs
+    on a plain lookup: on Fast & Furious it is a dozen requests to answer one question.
+
+    None covers three different silences, all of which mean the same thing to a reader:
+    no id, no key, a standalone film, or a collection id TMDB no longer resolves.
+    """
+    key = secret(settings.tmdb_api_key)
+    if not (tmdb_id and key):
+        return None
+    src = TmdbSource()
+    # A second detail GET, deliberately: `_movie_claims` fetched the same payload for the
+    # distributor, but threading it out of a claims builder to save one request on an
+    # already-N-request opt-in path would tangle the two for no measurable gain.
+    meta = await src.movie_meta(client, key, tmdb_id)
+    if meta.collection_id is None:
+        return None
+    shape = await src.collection_shape(client, key, meta.collection_id)
+    return place(shape, tmdb_id) if shape is not None else None
 
 
 # --- per-kind claim builders ---------------------------------------------
@@ -1049,7 +1087,7 @@ async def _movie_claims(
                 f"premiere-chained: {est.basis}",
             )
         )
-    elif meta and meta.primary_date and meta.status not in _UNBACKED:
+    elif meta and meta.primary_date and movie_stance(meta.status) not in UNBACKED:
         # nothing concrete yet — best-guess theatrical off TMDB's primary date. Withheld for
         # a film TMDB itself only calls "Rumored": guessing a window to the day off a date
         # nobody has committed to dresses a maybe up as a schedule.

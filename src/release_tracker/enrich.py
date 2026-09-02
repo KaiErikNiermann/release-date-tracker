@@ -81,8 +81,15 @@ async def enrich_work(
     entity: Entity,
     *,
     include_themes: bool = True,
+    entry: int | None = None,
 ) -> EnrichSummary:
-    """Fetch + persist who/where/what for one resolved Work into the graph."""
+    """Fetch + persist who/where/what for one resolved Work into the graph.
+
+    ``entry`` is a film's number in its collection, and it is a parameter rather than
+    something derived here because deriving it costs a request per sibling — enrichment runs
+    on every capture and every refresh, and the walk is opt-in (``rdt rd --franchise``). So
+    the caller passes what it already paid for, or nothing.
+    """
     db.upsert_node(
         Node(
             id=entity.id,
@@ -119,10 +126,14 @@ async def enrich_work(
         )
 
     if graph.series is not None:
-        season = part = None
+        # The ordinal means two different things by kind, and both are the source's own
+        # sequence: for TV it is TMDB's season number, for a film it is our release-order
+        # count of the collection with spin-offs dropped. Neither is a title parse.
+        ordinal = entry if entity.kind is MediaKind.MOVIE else None
+        part = None
         if entity.kind is MediaKind.TV:  # explicit coords win; fall back to title parsing
-            season, part = coords_of(entity)
-        _write_series(db, entity, graph.series, provider, now, ordinal=season, part=part)
+            ordinal, part = coords_of(entity)
+        _write_series(db, entity, graph.series, provider, now, ordinal=ordinal, part=part)
         summary.series = 1
 
     if platforms:
